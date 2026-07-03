@@ -6,7 +6,7 @@ import { entryModel } from "./model";
 
 /**
  * TODO(codex): full pipeline port of `list_files` from the prototype
- * (/home/latand/.agents/tools/live-log-viewer/server.py):
+ * (the original single-file Python prototype):
  *
  *  1. discover.ts  — walk ROOTS, filter EXTS, skip `tool-results/` and
  *     everything in claude-tasks that is not `<slug>/<sid>/tasks/*.output`,

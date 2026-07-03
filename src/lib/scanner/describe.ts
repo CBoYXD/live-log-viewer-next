@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 import type { Engine, Fmt, RootKey } from "../types";
@@ -14,11 +15,15 @@ interface Meta {
 }
 
 const metaCache = globalCache<[number, Meta]>("meta");
-const slugPrefixes = ["-home-latand-Projects-", "-home-latand-"];
+
+// Claude project slugs encode the cwd with "/" and "." replaced by "-":
+// "-home-user-Projects-my-app" → "my-app", plain home dir → its basename.
+const homeSlug = "-" + os.homedir().split(path.sep).filter(Boolean).join("-");
+const slugPrefixes = [homeSlug + "-Projects-", homeSlug + "-"];
 const skipTitlePrefixes = ["<", "#", "Caveat:", "{", "["];
 
 export function projectFromSlug(slug: string): string {
-  if (slug === "-home-latand") return "latand";
+  if (slug === homeSlug) return path.basename(os.homedir());
   for (const prefix of slugPrefixes) {
     if (slug.startsWith(prefix)) return slug.slice(prefix.length) || slug;
   }

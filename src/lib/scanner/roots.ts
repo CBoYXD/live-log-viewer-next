@@ -10,7 +10,8 @@ export const ROOTS: Record<RootKey, string> = {
   "codex-jobs": path.join(HOME, ".claude/plugins/data/codex-openai-codex/state"),
   "codex-sessions": path.join(HOME, ".codex/sessions"),
   "claude-projects": path.join(HOME, ".claude/projects"),
-  "claude-tasks": "/tmp/claude-1000",
+  // Claude Code writes background-task output under /tmp/claude-<uid>.
+  "claude-tasks": "/tmp/claude-" + (process.getuid?.() ?? 1000),
 };
 
 export const EXTS = [".log", ".jsonl", ".output", ".txt"] as const;

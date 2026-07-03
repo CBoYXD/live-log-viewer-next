@@ -1,7 +1,7 @@
 # Live Log Viewer — Next.js rewrite
 
 Rewrite of the working Python prototype at
-`/home/latand/.agents/tools/live-log-viewer/server.py` (READ IT FIRST — it is the
+`the original single-file Python prototype (../live-log-viewer/server.py)` (READ IT FIRST — it is the
 behavioral reference; every feature it has must survive the port unless this
 document overrides it).
 
@@ -91,7 +91,7 @@ so dev hot-reload does not wipe them):
 - `discover.ts` — walk roots, filter extensions, skip tool-results and
   scratchpads, cap at 400 by mtime desc.
 - `describe.ts` — project/title/kind/engine/fmt (port `describe`,
-  `_scan_jsonl_title`, `_project_from_slug` incl. `-home-latand` → `latand`).
+  `_scan_jsonl_title`, `_project_from_slug` incl. `-home-<user>` → `<user>`).
 - `activity.ts` — port `_tail_records`, `_jsonl_turn_state`, `_activity`
   (age-gated, size-keyed cache).
 - `model.ts` — port `_entry_model` + `_short_model` (meta.json → tail records →

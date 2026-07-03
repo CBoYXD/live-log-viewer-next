@@ -1,5 +1,5 @@
 {
-  "name": "live-log-viewer-next",
+  "name": "live-log-viewer",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -30,5 +30,7 @@
   "trustedDependencies": [
     "sharp",
     "unrs-resolver"
-  ]
+  ],
+  "description": "Local web UI that renders Codex / Claude Code agent logs as a live chat-style feed with a session parentage tree",
+  "license": "MIT"
 }
