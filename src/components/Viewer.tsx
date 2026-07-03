@@ -1,146 +1,133 @@
 "use client";
 
-/* eslint-disable react-hooks/set-state-in-effect */
-
 import { useCallback, useEffect, useState } from "react";
 
 import { useFiles } from "@/hooks/useFiles";
 import type { FileEntry } from "@/lib/types";
 
-import { LogFeed } from "./LogFeed";
-import { Sidebar } from "./Sidebar";
-import { engineBadge, syntheticFile } from "./utils";
+import { FocusView } from "./FocusView";
+import { OverviewBoard } from "./OverviewBoard";
+import { ProjectDashboard } from "./ProjectDashboard";
+import { OVERVIEW, projectKey } from "./projectModel";
+import { ProjectRail } from "./ProjectRail";
+import { syntheticFile } from "./utils";
+
+const PROJECT_KEY = "llvProject";
+
+function readHash(): { focusPath: string | null; project: string | null } {
+  const focusMatch = location.hash.match(/^#f=(.+)$/);
+  if (focusMatch) {
+    try {
+      return { focusPath: decodeURIComponent(focusMatch[1]), project: null };
+    } catch {
+      return { focusPath: focusMatch[1], project: null };
+    }
+  }
+  const projectMatch = location.hash.match(/^#p=(.+)$/);
+  if (projectMatch) {
+    try {
+      return { focusPath: null, project: decodeURIComponent(projectMatch[1]) };
+    } catch {
+      return { focusPath: null, project: projectMatch[1] };
+    }
+  }
+  return { focusPath: null, project: null };
+}
+
+function writeHash(project: string, focusPath: string | null) {
+  if (focusPath) {
+    history.replaceState(null, "", "#f=" + encodeURIComponent(focusPath));
+    return;
+  }
+  if (project !== OVERVIEW) {
+    history.replaceState(null, "", "#p=" + encodeURIComponent(project));
+    return;
+  }
+  history.replaceState(null, "", location.pathname);
+}
 
 export function Viewer() {
   const files = useFiles();
-  const [selected, setSelected] = useState<FileEntry | null>(null);
-  const [pendingPath, setPendingPath] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    const match = location.hash.match(/^#f=(.+)$/);
-    if (match) {
-      try {
-        return decodeURIComponent(match[1]);
-      } catch {
-        return match[1];
-      }
-    }
-    return localStorage.getItem("llvLastFile");
-  });
-  const [follow, setFollow] = useState(true);
-  const [paused, setPaused] = useState(false);
-  const [showSvc, setShowSvc] = useState(false);
-  const [lineFilter, setLineFilter] = useState("");
-  const [status, setStatus] = useState("");
+  const [project, setProject] = useState<string>(OVERVIEW);
+  const [focus, setFocus] = useState<FileEntry | null>(null);
+  const [pendingPath, setPendingPath] = useState<string | null>(null);
 
-  const selectFile = useCallback((file: FileEntry) => {
-    setSelected(file);
-    setFollow(true);
-    localStorage.setItem("llvLastFile", file.path);
-    history.replaceState(null, "", "#f=" + encodeURIComponent(file.path));
-  }, []);
-
-  const openPath = useCallback(
-    (pathname: string) => {
-      const hit = files.find((file) => file.path === pathname);
-      if (hit) selectFile(hit);
-      else selectFile(syntheticFile(pathname));
-    },
-    [files, selectFile],
-  );
-
-  const readHash = useCallback(() => {
-      const match = location.hash.match(/^#f=(.+)$/);
-      if (!match) return null;
-      try {
-        return decodeURIComponent(match[1]);
-      } catch {
-        return match[1];
-      }
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    const initial = readHash();
+    if (initial.focusPath) setPendingPath(initial.focusPath);
+    const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
+    if (savedProject) setProject(savedProject);
   }, []);
 
   useEffect(() => {
     const onHash = () => {
       const next = readHash();
-      if (next) setPendingPath(next);
+      if (next.focusPath) setPendingPath(next.focusPath);
+      else if (next.project) {
+        setProject(next.project);
+        setFocus(null);
+      }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, [readHash]);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
+  const selectProject = useCallback((nextProject: string) => {
+    setProject(nextProject);
+    setFocus(null);
+    localStorage.setItem(PROJECT_KEY, nextProject);
+    writeHash(nextProject, null);
+  }, []);
+
+  const selectFile = useCallback((file: FileEntry) => {
+    const key = projectKey(file);
+    setProject(key);
+    setFocus(file);
+    localStorage.setItem(PROJECT_KEY, key);
+    writeHash(key, file.path);
+  }, []);
+
+  const backToProject = useCallback(() => {
+    setFocus(null);
+    writeHash(project, null);
+  }, [project]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!pendingPath || files.length === 0) return;
-    openPath(pendingPath);
+    const hit = files.find((file) => file.path === pendingPath);
+    selectFile(hit ?? syntheticFile(pendingPath));
     setPendingPath(null);
-  }, [pendingPath, files, openPath]);
+  }, [pendingPath, files, selectFile]);
 
   useEffect(() => {
-    if (!selected && files.length) {
-      const last = localStorage.getItem("llvLastFile");
-      if (last) {
-        const hit = files.find((file) => file.path === last);
-        if (hit) setSelected(hit);
-      }
-    }
-  }, [files, selected]);
+    if (!focus) return;
+    const fresh = files.find((file) => file.path === focus.path);
+    if (fresh && fresh !== focus) setFocus(fresh);
+  }, [files, focus]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
-  const badge = selected ? engineBadge(selected) : null;
   return (
     <div className="flex h-full">
-      <Sidebar files={files} selected={selected} onSelect={selectFile} />
+      {/* The rail hides in focus mode so the reading column centers on the viewport. */}
+      {focus ? null : <ProjectRail files={files} selected={project} onSelect={selectProject} />}
       <main className="flex min-w-0 flex-1 flex-col">
-        <div className="flex flex-wrap items-center gap-2.5 border-b border-line bg-panel px-5 py-2.5">
-          <div className="max-w-[40vw] truncate text-sm font-bold" title={selected?.path}>
-            {selected && badge ? (
-              <>
-                <span className={`mr-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold ${badge.cls}`}>
-                  <span className="h-1.5 w-1.5 rounded-full bg-current" />
-                  {badge.label}
-                </span>
-                {selected.model ? <span className="mr-2 rounded-full bg-chip px-2 py-0.5 font-mono text-[10px] font-semibold text-[#555]">{selected.model}</span> : null}
-                <span className="mr-2 text-[10.5px] font-normal text-dim">{selected.kind}</span>
-                {selected.title}
-              </>
-            ) : (
-              "Вибери лог"
-            )}
-          </div>
-          <button
-            className={`rounded-[10px] border border-line px-3.5 py-1.5 text-[13px] ${follow ? "bg-[#ecebfb] font-semibold text-accent" : "bg-panel"}`}
-            onClick={() => setFollow((value) => !value)}
-          >
-            Follow
-          </button>
-          <button
-            className={`rounded-[10px] border border-line px-3.5 py-1.5 text-[13px] ${paused ? "bg-[#ecebfb] font-semibold text-accent" : "bg-panel"}`}
-            onClick={() => setPaused((value) => !value)}
-          >
-            {paused ? "Продовжити" : "Пауза"}
-          </button>
-          <button
-            className={`rounded-[10px] border border-line px-3.5 py-1.5 text-[13px] ${showSvc ? "bg-[#ecebfb] font-semibold text-accent" : "bg-panel"}`}
-            onClick={() => setShowSvc((value) => !value)}
-          >
-            Службові
-          </button>
-          <input
-            className="w-[170px] rounded-[10px] border border-line bg-bg px-3 py-1.5 text-[13px] outline-none"
-            placeholder="Фільтр рядків…"
-            value={lineFilter}
-            onChange={(event) => setLineFilter(event.target.value)}
+        {focus ? (
+          <FocusView
+            key={focus.path}
+            file={focus}
+            files={files}
+            projectLabel={projectKey(focus)}
+            onBack={backToProject}
+            onSelect={selectFile}
           />
-          <span className="ml-auto text-xs text-dim">{status}</span>
-        </div>
-        <LogFeed
-          file={selected}
-          files={files}
-          onSelect={selectFile}
-          showSvc={showSvc}
-          lineFilter={lineFilter}
-          onStatus={setStatus}
-          paused={paused}
-          follow={follow}
-          setFollow={setFollow}
-        />
+        ) : project === OVERVIEW ? (
+          <OverviewBoard files={files} onSelectProject={selectProject} onSelectFile={selectFile} />
+        ) : (
+          <ProjectDashboard files={files} project={project} onSelect={selectFile} />
+        )}
       </main>
     </div>
   );

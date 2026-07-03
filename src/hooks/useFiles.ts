@@ -11,11 +11,14 @@ export function useFiles(): FileEntry[] {
   const [files, setFiles] = useState<FileEntry[]>([]);
   useEffect(() => {
     let alive = true;
+    let lastBody = "";
     const load = async () => {
       try {
         const res = await fetch("/api/files");
-        const data = (await res.json()) as FileEntry[];
-        if (alive) setFiles(data);
+        const body = await res.text();
+        if (!alive || body === lastBody) return;
+        lastBody = body;
+        setFiles(JSON.parse(body) as FileEntry[]);
       } catch {
         /* keep previous list */
       }

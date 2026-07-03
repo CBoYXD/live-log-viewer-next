@@ -1,0 +1,160 @@
+"use client";
+
+import { useState } from "react";
+
+import type { FileEntry } from "@/lib/types";
+
+import { LogFeed } from "./LogFeed";
+import { ProcessStatusControls } from "./TaskHeader";
+import { TmuxComposer } from "./TmuxComposer";
+import { activityDot, cleanTitle, engineBadge, engineEdge } from "./utils";
+
+const noop = () => undefined;
+
+interface Props {
+  file: FileEntry;
+  files: FileEntry[];
+  /** Background tasks attached to this column as collapsed rows. */
+  tasks: FileEntry[];
+  onSelect: (file: FileEntry) => void;
+  /** Column of the root conversation of a branch group. */
+  isRoot: boolean;
+  /** Removes the column from the managed list. */
+  onClose?: () => void;
+  /** Native DnD attributes on the header: drag a column by its head to reorder siblings. */
+  dragHandle?: React.HTMLAttributes<HTMLElement>;
+}
+
+export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle }: Props) {
+  const badge = engineBadge(file);
+  const live = file.activity === "live";
+  return (
+    <section
+      className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${
+        isRoot ? "border-t-4" : "border-t-2"
+      } ${engineEdge(file)} ${live ? "border-ok/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]" : "border-line"}`}
+    >
+      <header
+        className={`flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5 ${live ? "bg-[#eef8f0]" : ""} ${
+          dragHandle ? "cursor-grab active:cursor-grabbing" : ""
+        }`}
+        {...dragHandle}
+      >
+        <span
+          className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`}
+          title={file.activity === "live" ? "працює" : file.activity === "recent" ? "закінчив" : file.activity === "stalled" ? "перервано" : "тихо"}
+        />
+        <span className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold ${badge.cls}`}>
+          {badge.label}
+        </span>
+        {file.model ? (
+          <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 font-mono text-[9.5px] font-semibold text-[#555]">
+            {file.model}
+          </span>
+        ) : null}
+        {isRoot ? null : (
+          <span className="shrink-0 text-[10px] text-dim" title="гілка цієї розмови">
+            ⤷ {file.kind}
+          </span>
+        )}
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
+          {cleanTitle(file.title, 90)}
+        </span>
+        <ProcessStatusControls file={file} compact />
+        <button
+          className="shrink-0 rounded-[8px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-accent hover:bg-[#ecebfb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          aria-label={`Відкрити ${cleanTitle(file.title, 60)}`}
+          onClick={() => onSelect(file)}
+        >
+          відкрити
+        </button>
+        {onClose ? (
+          <button
+            className="shrink-0 rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-[10.5px] font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            aria-label={`Прибрати колонку ${cleanTitle(file.title, 60)}`}
+            onClick={onClose}
+          >
+            ✕
+          </button>
+        ) : null}
+      </header>
+      {file.pid !== null ? <TmuxComposer pid={file.pid} /> : null}
+      {tasks.length ? (
+        <div className="shrink-0 border-b border-line bg-[#fbfbfd]">
+          {tasks.map((task) => (
+            <TaskStrip key={task.path} file={task} files={files} onSelect={onSelect} />
+          ))}
+        </div>
+      ) : null}
+      <LogFeed
+        file={file}
+        files={files}
+        onSelect={onSelect}
+        showSvc={false}
+        lineFilter=""
+        onStatus={noop}
+        paused={false}
+        follow
+        setFollow={noop}
+        compact
+      />
+    </section>
+  );
+}
+
+/** Collapsed background-task row: glyph, title, PID chip, kill; click expands an inline mini feed. */
+function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
+  const [open, setOpen] = useState(false);
+  const title = cleanTitle(file.cmdDesc || file.title, 80);
+  return (
+    <div className="border-t border-line first:border-t-0">
+      <div className="flex h-7 items-center gap-1.5 pl-2 pr-2.5">
+        <button
+          className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-[6px] text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          aria-expanded={open}
+          aria-label={`${open ? "Згорнути" : "Розгорнути"} фонову задачу ${title}`}
+          onClick={() => setOpen((value) => !value)}
+        >
+          <span className={`shrink-0 font-mono text-[10px] text-dim transition-transform ${open ? "rotate-90" : ""}`}>❯</span>
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
+          <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold" title={cleanTitle(file.title)}>
+            {title}
+          </span>
+        </button>
+        <ProcessStatusControls file={file} compact />
+        <button
+          className="shrink-0 rounded-[6px] border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-accent hover:bg-[#ecebfb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          aria-label={`Відкрити ${title}`}
+          onClick={() => onSelect(file)}
+        >
+          відкрити
+        </button>
+      </div>
+      {open ? (
+        <div className="flex h-[220px] flex-col border-t border-dashed border-line bg-bg/60">
+          <LogFeed
+            file={file}
+            files={files}
+            onSelect={onSelect}
+            showSvc={false}
+            lineFilter=""
+            onStatus={noop}
+            paused={false}
+            follow
+            setFollow={noop}
+            compact
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Parentless background task: a narrow column collapsed to its header row. */
+export function TaskStubColumn({ file, files, onSelect }: { file: FileEntry; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
+  return (
+    <section className="flex max-h-full min-h-0 flex-col self-start overflow-hidden rounded-[10px] border border-line border-t-2 bg-panel shadow-card border-t-[#9a9aa4]">
+      <TaskStrip file={file} files={files} onSelect={onSelect} />
+    </section>
+  );
+}

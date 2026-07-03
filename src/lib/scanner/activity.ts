@@ -2,7 +2,8 @@ import fs from "node:fs";
 
 import type { Activity, RootKey } from "../types";
 import { globalCache } from "./caches";
-import { readJson, recordValue, recordsValue, stringValue } from "./json";
+import { numberValue, readJson, recordValue, recordsValue, stringValue } from "./json";
+import { outputHolders, pidAlive } from "./process";
 
 const turnCache = globalCache<[number, string | null]>("turn");
 
@@ -65,16 +66,29 @@ function jsonlTurnState(pathname: string, size: number, codex: boolean) {
   return null;
 }
 
-export function activity(root: RootKey, pathname: string, mtime: number, size: number): Activity {
+export function activity(
+  root: RootKey,
+  pathname: string,
+  mtime: number,
+  size: number,
+  job: Record<string, unknown> | null = null,
+): Activity {
   const age = Date.now() / 1000 - mtime;
   if (root === "codex-jobs") {
-    const job = readJson(pathname.replace(/\.log$/, ".json"));
-    if (job) {
-      if (job.status === "running") return "live";
+    const jobJson = job ?? readJson(pathname.replace(/\.log$/, ".json"));
+    if (jobJson) {
+      if (jobJson.status === "running") {
+        const pid = numberValue(jobJson.pid);
+        return pid !== null && pidAlive(pid) ? "live" : age < 900 ? "recent" : "idle";
+      }
       return age < 900 ? "recent" : "idle";
     }
   }
-  if (pathname.endsWith(".jsonl") && age < 1800) {
+  if (root === "claude-tasks" && pathname.endsWith(".output")) {
+    if (outputHolders().has(pathname)) return "live";
+    return age < 900 ? "recent" : "idle";
+  }
+  if (pathname.endsWith(".jsonl")) {
     const cached = turnCache.get(pathname);
     let state: string | null;
     if (cached?.[0] === size) state = cached[1];
@@ -82,7 +96,7 @@ export function activity(root: RootKey, pathname: string, mtime: number, size: n
       state = jsonlTurnState(pathname, size, root.startsWith("codex"));
       turnCache.set(pathname, [size, state]);
     }
-    if (state === "busy") return age < 1800 ? "live" : "idle";
+    if (state === "busy") return age < 180 ? "live" : "stalled";
     if (state === "done") return age < 900 ? "recent" : "idle";
   }
   if (age < 20) return "live";

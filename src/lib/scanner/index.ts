@@ -1,8 +1,53 @@
 import type { FileEntry } from "../types";
 import { activity } from "./activity";
 import { discoverFiles } from "./discover";
+import { numberValue, readJson } from "./json";
 import { linkEntries } from "./links";
 import { entryModel } from "./model";
+import { outputHolders, pathHolders, pidAlive } from "./process";
+
+function isInteractiveTranscript(entry: FileEntry): boolean {
+  return entry.path.endsWith(".jsonl") && (entry.root === "claude-projects" || entry.root === "codex-sessions");
+}
+
+function applyProcessState(
+  entry: FileEntry,
+  holders: Map<string, number>,
+  transcriptHolders: Map<string, number>,
+  job: Record<string, unknown> | null,
+) {
+  if (entry.root === "codex-jobs") {
+    if (!job) return;
+    const pid = numberValue(job.pid);
+    entry.pid = pid;
+    if (job.status === "running") {
+      if (pid !== null && pidAlive(pid)) {
+        entry.proc = "running";
+        entry.activity = "live";
+      } else {
+        entry.proc = "killed";
+        if (entry.activity === "live") entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle";
+      }
+      return;
+    }
+    entry.proc = "done";
+    return;
+  }
+  if (entry.root === "claude-tasks" && entry.path.endsWith(".output")) {
+    const holder = holders.get(entry.path) ?? null;
+    entry.pid = holder;
+    entry.proc = holder === null ? "done" : "running";
+    if (holder !== null) entry.activity = "live";
+    return;
+  }
+  if (isInteractiveTranscript(entry)) {
+    const holder = transcriptHolders.get(entry.path) ?? null;
+    if (holder !== null && pidAlive(holder)) {
+      entry.pid = holder;
+      entry.activity = "live";
+    }
+  }
+}
 
 /**
  * TODO(codex): full pipeline port of `list_files` from the prototype
@@ -22,11 +67,28 @@ import { entryModel } from "./model";
  *
  * Steps 3-5 run only on the capped shortlist.
  */
+const NO_HOLDERS: Map<string, number> = new Map();
+
 export async function listFiles(): Promise<FileEntry[]> {
   const entries = discoverFiles();
+  // The /proc fd scan is only needed to attribute background-task outputs to a
+  // live pid. When the shortlist has no such entries, skip the scan entirely;
+  // activity() only consults holders on the same claude-tasks/.output path.
+  const needsHolders = entries.some((entry) => entry.root === "claude-tasks" && entry.path.endsWith(".output"));
+  const holders = needsHolders ? outputHolders() : NO_HOLDERS;
+  const jobs = new Map<string, Record<string, unknown> | null>();
   for (const entry of entries) {
-    entry.activity = activity(entry.root, entry.path, entry.mtime, entry.size);
+    const job = entry.root === "codex-jobs" ? readJson(entry.path.replace(/\.log$/, ".json")) : null;
+    jobs.set(entry.path, job);
+    entry.activity = activity(entry.root, entry.path, entry.mtime, entry.size, job);
     entry.model = entryModel(entry);
+  }
+  const transcriptPaths = entries
+    .filter((entry) => isInteractiveTranscript(entry) && entry.activity !== "idle")
+    .map((entry) => entry.path);
+  const transcriptHolders = transcriptPaths.length ? pathHolders(transcriptPaths) : NO_HOLDERS;
+  for (const entry of entries) {
+    applyProcessState(entry, holders, transcriptHolders, jobs.get(entry.path) ?? null);
   }
   linkEntries(entries);
   return entries;

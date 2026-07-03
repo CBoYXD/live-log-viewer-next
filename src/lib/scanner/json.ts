@@ -31,6 +31,10 @@ export function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
+export function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

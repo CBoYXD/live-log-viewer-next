@@ -13,7 +13,14 @@ export function taskParts(root: string, pathname: string): [string, string, stri
   return null;
 }
 
-function walk(rootName: RootKey, root: string, dir: string, out: FileEntry[]) {
+interface RawEntry {
+  rootName: RootKey;
+  root: string;
+  path: string;
+  st: fs.Stats;
+}
+
+function walk(rootName: RootKey, root: string, dir: string, out: RawEntry[]) {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -43,29 +50,36 @@ function walk(rootName: RootKey, root: string, dir: string, out: FileEntry[]) {
       const twin = path.join(ROOTS["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
       if (fs.existsSync(twin)) continue;
     }
-    const meta = describe(rootName, root, pathname, st);
-    out.push({
-      path: pathname,
-      root: rootName,
-      name: path.relative(root, pathname),
+    out.push({ rootName, root, path: pathname, st });
+  }
+}
+
+export function discoverFiles(): FileEntry[] {
+  const raw: RawEntry[] = [];
+  for (const [rootName, root] of Object.entries(ROOTS) as [RootKey, string][]) {
+    if (fs.existsSync(root)) walk(rootName, root, root, raw);
+  }
+  // describe() reads file heads, so it runs only on the capped shortlist; the
+  // walk stays a cheap stat pass over every candidate.
+  raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
+  return raw.slice(0, FILE_CAP).map((entry) => {
+    const meta = describe(entry.rootName, entry.root, entry.path, entry.st);
+    return {
+      path: entry.path,
+      root: entry.rootName,
+      name: path.relative(entry.root, entry.path),
       project: meta.project,
       title: meta.title,
       engine: meta.engine,
       kind: meta.kind,
       fmt: meta.fmt,
       parent: null,
-      mtime: st.mtimeMs / 1000,
-      size: st.size,
+      mtime: entry.st.mtimeMs / 1000,
+      size: entry.st.size,
       activity: "idle",
+      proc: null,
+      pid: null,
       model: null,
-    });
-  }
-}
-
-export function discoverFiles(): FileEntry[] {
-  const out: FileEntry[] = [];
-  for (const [rootName, root] of Object.entries(ROOTS) as [RootKey, string][]) {
-    if (fs.existsSync(root)) walk(rootName, root, root, out);
-  }
-  return out.sort((a, b) => b.mtime - a.mtime).slice(0, FILE_CAP);
+    };
+  });
 }
