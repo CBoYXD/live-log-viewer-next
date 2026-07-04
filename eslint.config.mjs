@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Publish artifact assembled by scripts/prepack.mjs; gitignored.
+    "dist/**",
   ]),
 ]);
 

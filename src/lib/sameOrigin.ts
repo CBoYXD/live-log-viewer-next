@@ -16,7 +16,7 @@ import type { ApiError } from "@/lib/types";
  *   const rejection = rejectCrossOrigin(req);
  *   if (rejection) return rejection;
  */
-const ALLOWED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1", "::1"];
 
 /** Strips a trailing ":port" (or the brackets of an IPv6 "[::1]:port") from a Host header value. */
 function hostWithoutPort(host: string): string {
@@ -31,9 +31,16 @@ function hostWithoutPort(host: string): string {
 export function rejectCrossOrigin(req: NextRequest): NextResponse<ApiError> | null {
   // DNS rebinding: an attacker's public DNS name can resolve to 127.0.0.1 after
   // the browser's same-origin checks pass, carrying a Host header the attacker
-  // controls. Pin Host to loopback names regardless of Origin/Sec-Fetch-Site.
+  // controls. Pin Host to known names regardless of Origin/Sec-Fetch-Site; the
+  // optional tailnet hostname is pinned explicitly, preserving the allowlist.
+  const allowedHosts = new Set(LOOPBACK_HOSTS);
+  const tailnetHost = process.env.LLV_TS_HOST;
+  if (tailnetHost) {
+    allowedHosts.add(hostWithoutPort(tailnetHost));
+  }
+
   const host = req.headers.get("host");
-  if (host === null || !ALLOWED_HOSTS.has(hostWithoutPort(host))) return forbidden();
+  if (host === null || !allowedHosts.has(hostWithoutPort(host))) return forbidden();
 
   const origin = req.headers.get("origin");
   if (origin !== null) {
@@ -44,7 +51,7 @@ export function rejectCrossOrigin(req: NextRequest): NextResponse<ApiError> | nu
       // Covers the literal "null" opaque origin (sandboxed iframe, file://).
       originHost = null;
     }
-    if (originHost === null || originHost !== req.headers.get("host")) return forbidden();
+    if (originHost === null || !allowedHosts.has(hostWithoutPort(originHost))) return forbidden();
   }
   const site = req.headers.get("sec-fetch-site");
   if (site !== null && site !== "same-origin" && site !== "none") return forbidden();

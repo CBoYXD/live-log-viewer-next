@@ -10,8 +10,10 @@ Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8899**.
 
 ## Hard constraints
 
-- Bind/serve on localhost only; API routes must reject any `path` outside the
-  whitelisted roots (port `path_allowed` exactly: realpath + prefix check).
+- The app process binds loopback by default; remote access exists only through
+  `tailscale serve` behind the `src/proxy.ts` token gate. API routes must reject
+  any `path` outside the whitelisted roots (port `path_allowed` exactly:
+  realpath + prefix check).
 - No database, no external services. Filesystem only.
 - Keep the light design language: white panels, soft borders/shadows,
   bg `#f6f6f8`, Codex teal `#0d8a72` (+soft `#e3f4f0`), Claude coral `#d97757`
@@ -36,6 +38,41 @@ Runs with `bun dev` (dev) / `bun run build && bun start` on **127.0.0.1:8899**.
 Next.js 16.2.10 (LTS, App Router, Turbopack), React 19.2, Tailwind CSS 4.3
 (CSS-first `@theme` config — tokens already defined in `src/app/globals.css`),
 TypeScript 5 strict, bun.
+
+## bin/
+
+`bin/cli.mjs` is the published `agent-log-viewer` entrypoint. It resolves the
+package root from its own file location, chooses a standalone server when one is
+available, falls back to local `next start`, sets `PORT` and `HOSTNAME`
+explicitly for the child, polls readiness on `127.0.0.1`, and owns shutdown for
+the server and optional Tailscale child.
+
+`bin/tailscale.mjs` contains Tailscale-specific orchestration for the CLI:
+binary detection, `tailscale status --json` parsing, foreground
+`tailscale serve <port>`, operator-permission hints, and the persistent
+`0600` token file under `${XDG_CONFIG_HOME:-~/.config}/agent-log-viewer/token`.
+
+## Token proxy
+
+`src/proxy.ts` is the Next.js Proxy file. When `LLV_TOKEN` is empty, it passes
+requests through unchanged. When a remote request arrives, it accepts a matching
+`llv_auth` cookie or a matching `?k=` query parameter; valid query-key requests
+are redirected with `k` stripped and an HttpOnly cookie set. The matcher is
+`/((?!_next/static|favicon.ico).*)`, so static chunks and favicon bypass the
+token gate.
+
+`src/lib/sameOrigin.ts` protects mutating API routes from browser cross-origin
+requests. Its allowed hosts are the loopback names plus
+`hostWithoutPort(process.env.LLV_TS_HOST)` when the CLI sets a tailnet DNS name.
+Both the `Host` header and any `Origin` header must resolve to that allowlist.
+
+## Environment contract
+
+| variable | set by | effect |
+|----------|--------|--------|
+| `LLV_TOKEN` | CLI for `--tailscale` and non-loopback binds | Enables the proxy token gate for remote requests. Empty or absent means passthrough. |
+| `LLV_TS_HOST` | CLI after `tailscale status --json` | Adds the tailnet DNS name to same-origin allowed hosts. |
+| `LLV_STANDALONE` | `scripts/prepack.mjs` | Enables `output: "standalone"` during publish packaging only. |
 
 ## File tree and ownership
 

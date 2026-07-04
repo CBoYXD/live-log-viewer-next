@@ -36,9 +36,17 @@ tree, and tails the selected one in real time.
 
 ## Run
 
-Requires [bun](https://bun.sh) (or npm/pnpm), Node 18+, and
+Requires [bun](https://bun.sh) (or npm/pnpm), Node 20.9+, and
 [tmux](https://github.com/tmux/tmux) for the composer/spawn features (`brew
 install tmux` on macOS, or your distro's package on Linux).
+
+Once the package is published to npm, the quickstart is:
+
+```bash
+bunx agent-log-viewer
+```
+
+Local clone workflow:
 
 ```bash
 bun install
@@ -62,11 +70,36 @@ path on Linux too, for testing.
 Without tmux installed, log viewing still works; the composer, agent spawn
 and resume-into-pane features are unavailable.
 
+## Доступ через Tailscale
+
+```bash
+bunx agent-log-viewer --tailscale
+```
+
+`--tailscale` запускає локальний сервер на `127.0.0.1` і відкриває його в
+tailnet через foreground-процес `tailscale serve <port>`. Публічний інтернет
+через Funnel не використовується.
+
+CLI створює 32-символьний ключ доступу, додає його в tailnet URL як `?k=...`,
+а після першого відкриття сервер зберігає `llv_auth` cookie на 30 днів.
+`--new-token` генерує новий ключ. URL з ключем треба вважати секретом.
+
+Кожен, хто має tailnet-доступ до цього URL, може читати всі agent transcripts,
+включно з чутливими даними, які потрапили в сесію, і може виконувати команди
+через `/api/tmux` та `/api/spawn`. Ставтеся до tailnet URL як до секрета — не
+пересилайте його стороннім.
+>>>>>>> 151233d (Package as agent-log-viewer with a bunx CLI and Tailscale access)
+
 ## Security model
 
-Read-only, localhost-only. The API refuses any path that does not resolve
-into one of the four whitelisted log roots (see `src/lib/scanner/roots.ts`).
-Nothing is written anywhere and nothing leaves your machine.
+The log APIs refuse any path that does not resolve into one of the whitelisted
+log roots (see `src/lib/scanner/roots.ts`). Mutating endpoints exist:
+`/api/tmux` sends keys to tmux sessions and `/api/spawn` starts commands.
+
+By default the CLI binds to `127.0.0.1`. With `--tailscale`, access is exposed
+inside the tailnet via `tailscale serve` and guarded by the token gate in
+`src/proxy.ts`. Non-loopback binds also force token mode. Treat any URL
+containing `?k=` as a credential.
 
 ## Architecture
 

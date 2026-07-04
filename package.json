@@ -1,16 +1,31 @@
 {
-  "name": "live-log-viewer",
+  "name": "agent-log-viewer",
   "version": "0.1.0",
-  "private": true,
+  "bin": {
+    "agent-log-viewer": "bin/cli.mjs"
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
   "scripts": {
     "dev": "next dev --webpack --hostname 127.0.0.1",
     "build": "next build --webpack",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "prepack": "node scripts/prepack.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.23.0",
     "next": "16.2.10",
+    "qrcode-terminal": "^0.12.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
