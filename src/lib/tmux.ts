@@ -27,6 +27,36 @@ export function inboxImageExt(mime: string): string | null {
   return IMAGE_EXT[mime] ?? null;
 }
 
+export interface InboxImagePayload {
+  base64: string;
+  mime: string;
+}
+
+/** Normalises a request's image list; the legacy single `image` field folds in. */
+export function collectImagePayloads(body: { image?: unknown; images?: unknown }): InboxImagePayload[] {
+  const raw = Array.isArray(body.images) ? body.images : body.image && typeof body.image === "object" ? [body.image] : [];
+  return raw
+    .filter((entry): entry is { base64?: unknown; mime?: unknown } => Boolean(entry) && typeof entry === "object")
+    .map((entry) => ({
+      base64: typeof entry.base64 === "string" ? entry.base64 : "",
+      mime: typeof entry.mime === "string" ? entry.mime : "",
+    }))
+    .filter((entry) => entry.base64);
+}
+
+/** First validation problem in the list as an HTTP error; null when clean. */
+export function imagePayloadError(images: InboxImagePayload[]): { error: string; status: number } | null {
+  for (const image of images) {
+    if (inboxImageExt(image.mime) === null) return { error: "непідтримуваний тип зображення", status: 415 };
+    // base64 inflates the payload 4:3; checking the encoded length rejects an
+    // oversized body before it is ever decoded into a Buffer.
+    if (image.base64.length > (MAX_INBOX_IMAGE_BYTES * 4) / 3 + 4) {
+      return { error: "зображення завелике (ліміт 10 МБ)", status: 413 };
+    }
+  }
+  return null;
+}
+
 /** A resolved tmux target in `session:window.pane` form (e.g. `0:1.0`). */
 export type TmuxTarget = string;
 

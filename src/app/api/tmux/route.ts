@@ -4,8 +4,8 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import {
-  inboxImageExt,
-  MAX_INBOX_IMAGE_BYTES,
+  collectImagePayloads,
+  imagePayloadError,
   knownLivePids,
   liveResumePane,
   resolveTarget,
@@ -29,11 +29,6 @@ interface SendResponse {
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
-}
-
-interface ImagePayload {
-  base64?: unknown;
-  mime?: unknown;
 }
 
 /** Resolves and revalidates a request pid against the scanner's live set. */
@@ -82,32 +77,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
 
   const text = typeof body.text === "string" ? body.text : "";
-  /* Accept an images array; the legacy single `image` field folds in for
-     older clients. */
-  const rawImages = Array.isArray(body.images)
-    ? body.images
-    : body.image && typeof body.image === "object"
-      ? [body.image]
-      : [];
-  const images = rawImages
-    .filter((entry): entry is ImagePayload => Boolean(entry) && typeof entry === "object")
-    .map((entry) => ({
-      base64: typeof entry.base64 === "string" ? entry.base64 : "",
-      mime: typeof entry.mime === "string" ? entry.mime : "",
-    }))
-    .filter((entry) => entry.base64);
+  const images = collectImagePayloads(body);
   if (!text.trim() && !images.length) {
     return NextResponse.json({ error: "порожнє повідомлення" }, { status: 400 });
   }
-  for (const image of images) {
-    if (inboxImageExt(image.mime) === null) {
-      return NextResponse.json({ error: "непідтримуваний тип зображення" }, { status: 415 });
-    }
-    // base64 inflates the payload 4:3; checking the encoded length rejects an
-    // oversized body before it is ever decoded into a Buffer.
-    if (image.base64.length > (MAX_INBOX_IMAGE_BYTES * 4) / 3 + 4) {
-      return NextResponse.json({ error: "зображення завелике (ліміт 10 МБ)" }, { status: 413 });
-    }
+  const imageError = imagePayloadError(images);
+  if (imageError) {
+    return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
 
   let target: string | null = null;

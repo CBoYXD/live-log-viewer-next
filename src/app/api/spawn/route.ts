@@ -6,7 +6,14 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
-import { freshSpecFor, spawnAgentWithPrompt, type AgentEngine } from "@/lib/tmux";
+import {
+  collectImagePayloads,
+  freshSpecFor,
+  imagePayloadError,
+  saveInboxImage,
+  spawnAgentWithPrompt,
+  type AgentEngine,
+} from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -73,9 +80,9 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; cwd?: unknown; prompt?: unknown };
+  let body: { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown };
   try {
-    body = (await req.json()) as { engine?: unknown; cwd?: unknown; prompt?: unknown };
+    body = (await req.json()) as { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown };
   } catch {
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
   }
@@ -97,8 +104,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   }
 
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  const images = collectImagePayloads(body);
+  const imageError = imagePayloadError(images);
+  if (imageError) {
+    return NextResponse.json({ error: imageError.error }, { status: imageError.status });
+  }
+
   try {
-    const pane = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), prompt);
+    /* Pasted images land in the inbox and reach the fresh agent as file paths
+       appended to its first prompt — the same contract the pane composer uses. */
+    const imagePaths = images.map((image) => saveInboxImage(image.base64, image.mime).path);
+    const payload = [prompt, ...imagePaths].filter(Boolean).join("\n");
+    const pane = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), payload);
     return NextResponse.json({ ok: true, target: pane.display });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

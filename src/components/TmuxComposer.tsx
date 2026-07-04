@@ -6,13 +6,8 @@ import { ArrowRight, ArrowUpToLine, ImageIcon, Loader2, Play, SquareTerminal, X 
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import type { FileEntry } from "@/lib/types";
 
+import { ImagePreviewStrip, useImageAttachments } from "./imageAttachments";
 import { MicButton } from "./MicButton";
-
-interface PendingImage {
-  base64: string;
-  mime: string;
-  preview: string;
-}
 
 interface SentEntry {
   id: number;
@@ -34,19 +29,6 @@ function readSent(path: string): SentEntry[] {
   } catch {
     return [];
   }
-}
-
-function readImage(file: File): Promise<PendingImage> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = String(reader.result);
-      const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
-      resolve({ base64, mime: file.type || "image/png", preview: dataUrl });
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("не вдалося прочитати картинку"));
-    reader.readAsDataURL(file);
-  });
 }
 
 /** Conversations that accept a message without a live pane: root sessions
@@ -79,12 +61,16 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
     if (value) sessionStorage.setItem(draftKey(file.path), value);
     else sessionStorage.removeItem(draftKey(file.path));
   };
-  const [images, setImages] = useState<PendingImage[]>([]);
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [sent, setSent] = useState<SentEntry[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const attachments = useImageAttachments({
+    onError: (message) => setStatus({ kind: "err", text: message }),
+    onAdded: () => setStatus(null),
+  });
+  const images = attachments.images;
 
   /* The field grows with its content up to ~6 rows, then scrolls inside
      itself. Measured from scrollHeight on every text change, which also
@@ -130,29 +116,6 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
     sessionStorage.setItem(sentKey(file.path), JSON.stringify(next));
   };
 
-  const addFiles = (files: File[]) => {
-    const picks = files.filter((entry) => entry.type.startsWith("image/"));
-    if (!picks.length) return;
-    Promise.all(picks.map(readImage))
-      .then((pending) => {
-        setImages((prev) => [...prev, ...pending]);
-        setStatus(null);
-      })
-      .catch((error: unknown) => {
-        setStatus({ kind: "err", text: error instanceof Error ? error.message : "помилка картинки" });
-      });
-  };
-
-  const handlePaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const picks = Array.from(event.clipboardData.items)
-      .filter((entry) => entry.type.startsWith("image/"))
-      .map((entry) => entry.getAsFile())
-      .filter((entry): entry is File => entry !== null);
-    if (!picks.length) return;
-    event.preventDefault();
-    addFiles(picks);
-  };
-
   const send = async () => {
     if (sending || (!text.trim() && !images.length)) return;
     setSending(true);
@@ -182,7 +145,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
       };
       persistSent([...sent, entry].slice(-SENT_LIMIT));
       setText("");
-      setImages([]);
+      attachments.clear();
       setStatus({
         kind: "ok",
         text: json.spawned
@@ -262,7 +225,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           value={text}
           rows={1}
           onChange={(event) => setText(event.target.value)}
-          onPaste={handlePaste}
+          onPaste={attachments.handlePaste}
           onKeyDown={(event) => {
             /* Enter sends like the old single-line input; Shift+Enter makes a
                new line. Composition guard keeps IME confirms from sending. */
@@ -283,7 +246,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           multiple
           className="hidden"
           onChange={(event) => {
-            addFiles(Array.from(event.target.files ?? []));
+            attachments.addFiles(Array.from(event.target.files ?? []));
             event.target.value = "";
           }}
         />
@@ -312,27 +275,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           {sending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
         </button>
       </div>
-      {images.length ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {images.map((image, idx) => (
-            <div key={idx} className="group/img relative">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={image.preview} alt={`прев'ю картинки ${idx + 1}`} className="h-10 w-10 rounded border border-line object-cover" />
-              <button
-                type="button"
-                onClick={() => setImages((prev) => prev.filter((_, i) => i !== idx))}
-                aria-label={`Прибрати картинку ${idx + 1}`}
-                className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-line bg-panel text-dim shadow-card hover:text-err group-hover/img:flex focus-visible:flex focus-visible:outline-none"
-              >
-                <X className="h-2.5 w-2.5" aria-hidden />
-              </button>
-            </div>
-          ))}
-          <span className="inline-flex items-center gap-1 text-[10.5px] font-semibold text-dim">
-            {images.length} {images.length === 1 ? "картинка" : "картинки"} <ArrowRight className="h-3 w-3" aria-hidden /> шляхами до файлів
-          </span>
-        </div>
-      ) : null}
+      <ImagePreviewStrip images={images} onRemove={attachments.removeAt} />
       {status ? (
         <span className={`truncate text-[10.5px] font-semibold ${status.kind === "ok" ? "text-ok" : "text-err"}`}>
           {status.text}

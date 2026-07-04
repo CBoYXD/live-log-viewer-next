@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { ImageIcon } from "@/components/icons";
+
+import { ImagePreviewStrip, useImageAttachments } from "./imageAttachments";
 import { MicButton } from "./MicButton";
 import { engineTintOf } from "./utils";
 
@@ -32,6 +35,11 @@ export function SpawnAgentButton({ project }: { project: string }) {
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const attachments = useImageAttachments({
+    onError: (message) => setStatus({ kind: "err", text: message }),
+    onAdded: () => setStatus(null),
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -74,7 +82,12 @@ export function SpawnAgentButton({ project }: { project: string }) {
       const res = await fetch("/api/spawn", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ engine, cwd: cwd.trim(), prompt }),
+        body: JSON.stringify({
+          engine,
+          cwd: cwd.trim(),
+          prompt,
+          images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+        }),
       });
       const json = (await res.json()) as { ok?: boolean; target?: string; error?: string };
       if (!res.ok || !json.ok) {
@@ -83,6 +96,7 @@ export function SpawnAgentButton({ project }: { project: string }) {
       }
       setStatus({ kind: "ok", text: `запущено в tmux ${json.target ?? ""} — скоро з'явиться в списку` });
       setPrompt("");
+      attachments.clear();
     } catch {
       setStatus({ kind: "err", text: "сервер недоступний" });
     } finally {
@@ -142,12 +156,14 @@ export function SpawnAgentButton({ project }: { project: string }) {
               ref={promptRef}
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
+              onPaste={attachments.handlePaste}
               rows={3}
               placeholder="що зробити…"
               aria-label="Перший промпт для агента"
               className="resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[12px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             />
           </label>
+          <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />
           <div className="flex items-center gap-1.5">
             <MicButton
               onText={(spoken) => {
@@ -157,6 +173,25 @@ export function SpawnAgentButton({ project }: { project: string }) {
               }}
               onError={(message) => setStatus({ kind: "err", text: message })}
             />
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                attachments.addFiles(Array.from(event.target.files ?? []));
+                event.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              aria-label="Додати картинки до промпта"
+              onClick={() => fileRef.current?.click()}
+              className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-panel px-2 py-1.5 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <ImageIcon className="h-4 w-4" aria-hidden />
+            </button>
             <button
               type="button"
               disabled={busy || !cwd.trim()}
