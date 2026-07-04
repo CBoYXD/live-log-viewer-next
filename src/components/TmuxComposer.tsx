@@ -2,11 +2,11 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { ArrowRight, ArrowUpToLine, ImageIcon, Loader2, Play, SquareTerminal, X } from "@/components/icons";
+import { ArrowRight, ArrowUpToLine, Loader2, Play, SquareTerminal, X } from "@/components/icons";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import type { FileEntry } from "@/lib/types";
 
-import { ImagePreviewStrip, useImageAttachments } from "./imageAttachments";
+import { ImagePickerButton, ImagePreviewStrip, useImageAttachments } from "./imageAttachments";
 import { MicButton } from "./MicButton";
 
 interface SentEntry {
@@ -65,12 +65,10 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [sent, setSent] = useState<SentEntry[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),
     onAdded: () => setStatus(null),
   });
-  const images = attachments.images;
 
   /* The field grows with its content up to ~6 rows, then scrolls inside
      itself. Measured from scrollHeight on every text change, which also
@@ -117,7 +115,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
   };
 
   const send = async () => {
-    if (sending || (!text.trim() && !images.length)) return;
+    if (sending || (!text.trim() && !attachments.images.length)) return;
     setSending(true);
     setStatus(null);
     try {
@@ -128,7 +126,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           pid: file.pid ?? undefined,
           path: file.path,
           text,
-          images: images.map((image) => ({ base64: image.base64, mime: image.mime })),
+          images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
         }),
       });
       const json = (await res.json()) as { ok?: boolean; error?: string; imagePaths?: string[]; target?: string; spawned?: boolean };
@@ -136,7 +134,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
         setStatus({ kind: "err", text: json.error ?? "не вдалося надіслати" });
         return;
       }
-      const imgCount = images.length;
+      const imgCount = attachments.images.length;
       const entry: SentEntry = {
         id: Date.now(),
         text: text.trim() || (imgCount ? `${imgCount} ${imgCount === 1 ? "картинка" : "картинки"}` : ""),
@@ -167,7 +165,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
     void send();
   };
 
-  const canSend = !sending && (Boolean(text.trim()) || images.length > 0);
+  const canSend = !sending && (Boolean(text.trim()) || attachments.images.length > 0);
 
   return (
     <form
@@ -239,17 +237,6 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           disabled={sending}
           className="min-w-0 flex-1 resize-none overflow-y-auto rounded-[8px] border border-line bg-panel px-2 py-1 text-[12px] leading-[18px] text-[#222] placeholder:text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-60"
         />
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          multiple
-          className="hidden"
-          onChange={(event) => {
-            attachments.addFiles(Array.from(event.target.files ?? []));
-            event.target.value = "";
-          }}
-        />
         <MicButton
           onText={(spoken) => {
             setText(text ? text.trimEnd() + " " + spoken : spoken);
@@ -258,14 +245,11 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           }}
           onError={(message) => setStatus({ kind: "err", text: message })}
         />
-        <button
-          type="button"
-          aria-label="Додати картинки"
-          onClick={() => fileRef.current?.click()}
+        <ImagePickerButton
+          ariaLabel="Додати картинки"
           className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-panel px-2 py-1 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          <ImageIcon className="h-4 w-4" aria-hidden />
-        </button>
+          onFiles={attachments.addFiles}
+        />
         <button
           type="submit"
           disabled={!canSend}
@@ -275,7 +259,7 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
           {sending ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Play className="h-4 w-4" aria-hidden />}
         </button>
       </div>
-      <ImagePreviewStrip images={images} onRemove={attachments.removeAt} />
+      <ImagePreviewStrip images={attachments.images} onRemove={attachments.removeAt} />
       {status ? (
         <span className={`truncate text-[10.5px] font-semibold ${status.kind === "ok" ? "text-ok" : "text-err"}`}>
           {status.text}

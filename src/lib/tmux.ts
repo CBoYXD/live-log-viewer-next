@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { listFiles } from "@/lib/scanner";
 import { isHelperArgv, pidAlive, readArgv } from "@/lib/scanner/process";
 
@@ -12,49 +14,49 @@ const PANE_MAP_TTL_MS = 5_000;
 const MAX_ANCESTRY_HOPS = 64;
 const INBOX_DIR = path.join(os.homedir(), ".claude", "viewer-inbox");
 
-const IMAGE_EXT: Record<string, string> = {
-  "image/png": "png",
-  "image/jpeg": "jpg",
-  "image/jpg": "jpg",
-  "image/gif": "gif",
-  "image/webp": "webp",
-};
-
-export const MAX_INBOX_IMAGE_BYTES = 10 * 1024 * 1024;
-
-/** File extension for a whitelisted inbox image mime, or null when unsupported. */
-export function inboxImageExt(mime: string): string | null {
-  return IMAGE_EXT[mime] ?? null;
-}
-
 export interface InboxImagePayload {
   base64: string;
   mime: string;
 }
 
-/** Normalises a request's image list; the legacy single `image` field folds in. */
-export function collectImagePayloads(body: { image?: unknown; images?: unknown }): InboxImagePayload[] {
-  const raw = Array.isArray(body.images) ? body.images : body.image && typeof body.image === "object" ? [body.image] : [];
-  return raw
-    .filter((entry): entry is { base64?: unknown; mime?: unknown } => Boolean(entry) && typeof entry === "object")
-    .map((entry) => ({
-      base64: typeof entry.base64 === "string" ? entry.base64 : "",
-      mime: typeof entry.mime === "string" ? entry.mime : "",
-    }))
-    .filter((entry) => entry.base64);
+export interface ImagePayloadResult {
+  images: InboxImagePayload[];
+  error: { error: string; status: number } | null;
 }
 
-/** First validation problem in the list as an HTTP error; null when clean. */
-export function imagePayloadError(images: InboxImagePayload[]): { error: string; status: number } | null {
-  for (const image of images) {
-    if (inboxImageExt(image.mime) === null) return { error: "непідтримуваний тип зображення", status: 415 };
-    // base64 inflates the payload 4:3; checking the encoded length rejects an
-    // oversized body before it is ever decoded into a Buffer.
-    if (image.base64.length > (MAX_INBOX_IMAGE_BYTES * 4) / 3 + 4) {
-      return { error: "зображення завелике (ліміт 10 МБ)", status: 413 };
+/** Decoded byte length a base64 string produces, accounting for `=` padding;
+    lets the size check agree exactly with what Buffer.from(..., "base64")
+    will later decode, without decoding it twice. */
+function base64DecodedLength(base64: string): number {
+  if (!base64.length) return 0;
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return Math.floor((base64.length * 3) / 4) - padding;
+}
+
+/**
+ * Normalises and validates a request's image list; the legacy single `image`
+ * field folds in. Returns the first problem — a malformed entry, unsupported
+ * mime, or oversize payload — as an HTTP error instead of silently dropping
+ * the image and letting the request succeed short one attachment.
+ */
+export function collectImagePayloads(body: { image?: unknown; images?: unknown }): ImagePayloadResult {
+  const raw = Array.isArray(body.images) ? body.images : body.image && typeof body.image === "object" ? [body.image] : [];
+  const images: InboxImagePayload[] = [];
+  for (const entry of raw) {
+    const base64 = entry && typeof entry === "object" ? (entry as { base64?: unknown }).base64 : undefined;
+    const mime = entry && typeof entry === "object" ? (entry as { mime?: unknown }).mime : undefined;
+    if (typeof base64 !== "string" || !base64) {
+      return { images: [], error: { error: "некоректне зображення", status: 400 } };
     }
+    if (inboxImageExt(typeof mime === "string" ? mime : "") === null) {
+      return { images: [], error: { error: "непідтримуваний тип зображення", status: 415 } };
+    }
+    if (base64DecodedLength(base64) > MAX_INBOX_IMAGE_BYTES) {
+      return { images: [], error: { error: "зображення завелике (ліміт 10 МБ)", status: 413 } };
+    }
+    images.push({ base64, mime: mime as string });
   }
-  return null;
+  return { images, error: null };
 }
 
 /** A resolved tmux target in `session:window.pane` form (e.g. `0:1.0`). */
@@ -545,9 +547,45 @@ export function saveInboxImage(base64: string, mime: string): SavedImage {
   const ext = inboxImageExt(mime);
   if (ext === null) throw new Error("непідтримуваний тип зображення");
   const data = Buffer.from(base64, "base64");
+  if (data.length === 0) throw new Error("некоректні дані зображення");
   if (data.length > MAX_INBOX_IMAGE_BYTES) throw new Error("зображення завелике");
   fs.mkdirSync(INBOX_DIR, { recursive: true });
-  const filePath = path.join(INBOX_DIR, `img-${Date.now()}.${ext}`);
+  /* Date.now() alone collides when both API routes save several images in a
+     tight synchronous loop within the same millisecond. */
+  const filePath = path.join(INBOX_DIR, `img-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.${ext}`);
   fs.writeFileSync(filePath, data);
   return { path: filePath };
+}
+
+/** Removes inbox images saved for a delivery that failed before reaching the
+    agent; best-effort, since a delivery that already succeeded never calls this. */
+export function deleteInboxImages(paths: string[]): void {
+  for (const filePath of paths) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      /* already gone or unwritable: nothing more to clean up */
+    }
+  }
+}
+
+export interface ImagePayloadBundle {
+  payload: string;
+  imagePaths: string[];
+}
+
+/** Saves each image to the inbox and folds the resulting paths into the text
+    payload delivered to the agent, one per line after the text. A save that
+    throws mid-batch deletes the images already written, so no caller can
+    orphan a partial batch. */
+export function buildImagePayload(text: string, images: InboxImagePayload[]): ImagePayloadBundle {
+  const imagePaths: string[] = [];
+  try {
+    for (const image of images) imagePaths.push(saveInboxImage(image.base64, image.mime).path);
+  } catch (error) {
+    deleteInboxImages(imagePaths);
+    throw error;
+  }
+  const payload = [text, ...imagePaths].filter(Boolean).join("\n");
+  return { payload, imagePaths };
 }

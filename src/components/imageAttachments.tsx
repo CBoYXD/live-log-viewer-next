@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { ArrowRight, X } from "@/components/icons";
+import { ArrowRight, ImageIcon, X } from "@/components/icons";
+import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 
 export interface PendingImage {
   base64: string;
@@ -15,10 +16,16 @@ function readImage(file: File): Promise<PendingImage> {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = String(reader.result);
-      const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1);
+      const comma = dataUrl.indexOf(",");
+      if (comma < 0) {
+        reject(new Error("не вдалося прочитати картинку"));
+        return;
+      }
+      const base64 = dataUrl.slice(comma + 1);
       resolve({ base64, mime: file.type || "image/png", preview: dataUrl });
     };
     reader.onerror = () => reject(reader.error ?? new Error("не вдалося прочитати картинку"));
+    reader.onabort = () => reject(new Error("читання картинки перервано"));
     reader.readAsDataURL(file);
   });
 }
@@ -32,12 +39,30 @@ export function useImageAttachments(handlers: { onError: (message: string) => vo
   const [images, setImages] = useState<PendingImage[]>([]);
 
   const addFiles = (files: File[]) => {
-    const picks = files.filter((entry) => entry.type.startsWith("image/"));
-    if (!picks.length) return;
-    Promise.all(picks.map(readImage))
+    if (!files.length) return;
+    /* Validated against the same whitelist and size limit the server enforces
+       (src/lib/imagePolicy.ts), so a rejected file is reported here instead of
+       round-tripping to the API first. */
+    const accepted: File[] = [];
+    for (const file of files) {
+      if (inboxImageExt(file.type) === null) {
+        handlers.onError(`непідтримуваний формат картинки: ${file.name || file.type || "невідомий файл"}`);
+        continue;
+      }
+      if (file.size > MAX_INBOX_IMAGE_BYTES) {
+        handlers.onError(`${file.name || "картинка"}: завелика (ліміт 10 МБ)`);
+        continue;
+      }
+      accepted.push(file);
+    }
+    if (!accepted.length) return;
+    /* onAdded clears the status line at both call sites; a mixed batch keeps
+       the rejection message on screen instead of wiping it right away. */
+    const rejectedSome = accepted.length < files.length;
+    Promise.all(accepted.map(readImage))
       .then((pending) => {
         setImages((prev) => [...prev, ...pending]);
-        handlers.onAdded?.();
+        if (!rejectedSome) handlers.onAdded?.();
       })
       .catch((error: unknown) => {
         handlers.onError(error instanceof Error ? error.message : "помилка картинки");
@@ -85,5 +110,37 @@ export function ImagePreviewStrip({ images, onRemove }: { images: PendingImage[]
         {images.length} {images.length === 1 ? "картинка" : "картинки"} <ArrowRight className="h-3 w-3" aria-hidden /> шляхами до файлів
       </span>
     </div>
+  );
+}
+
+/** Hidden file input plus its trigger button, wired to a picker ref it owns
+    internally. Shared by the pane composer and the spawn dialog. */
+export function ImagePickerButton({
+  onFiles,
+  ariaLabel,
+  className,
+}: {
+  onFiles: (files: File[]) => void;
+  ariaLabel: string;
+  className: string;
+}) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  return (
+    <>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={(event) => {
+          onFiles(Array.from(event.target.files ?? []));
+          event.target.value = "";
+        }}
+      />
+      <button type="button" aria-label={ariaLabel} onClick={() => fileRef.current?.click()} className={className}>
+        <ImageIcon className="h-4 w-4" aria-hidden />
+      </button>
+    </>
   );
 }

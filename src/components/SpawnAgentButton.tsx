@@ -2,9 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { ImageIcon } from "@/components/icons";
-
-import { ImagePreviewStrip, useImageAttachments } from "./imageAttachments";
+import { ImagePickerButton, ImagePreviewStrip, useImageAttachments } from "./imageAttachments";
 import { MicButton } from "./MicButton";
 import { engineTintOf } from "./utils";
 
@@ -35,7 +33,6 @@ export function SpawnAgentButton({ project }: { project: string }) {
   const [status, setStatus] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
   const attachments = useImageAttachments({
     onError: (message) => setStatus({ kind: "err", text: message }),
     onAdded: () => setStatus(null),
@@ -173,25 +170,11 @@ export function SpawnAgentButton({ project }: { project: string }) {
               }}
               onError={(message) => setStatus({ kind: "err", text: message })}
             />
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              multiple
-              className="hidden"
-              onChange={(event) => {
-                attachments.addFiles(Array.from(event.target.files ?? []));
-                event.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              aria-label="Додати картинки до промпта"
-              onClick={() => fileRef.current?.click()}
+            <ImagePickerButton
+              ariaLabel="Додати картинки до промпта"
               className="inline-flex shrink-0 items-center rounded-[8px] border border-line bg-panel px-2 py-1.5 text-dim hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            >
-              <ImageIcon className="h-4 w-4" aria-hidden />
-            </button>
+              onFiles={attachments.addFiles}
+            />
             <button
               type="button"
               disabled={busy || !cwd.trim()}

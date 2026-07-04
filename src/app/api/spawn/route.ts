@@ -7,10 +7,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import {
+  buildImagePayload,
   collectImagePayloads,
+  deleteInboxImages,
   freshSpecFor,
-  imagePayloadError,
-  saveInboxImage,
   spawnAgentWithPrompt,
   type AgentEngine,
 } from "@/lib/tmux";
@@ -104,20 +104,23 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   }
 
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-  const images = collectImagePayloads(body);
-  const imageError = imagePayloadError(images);
+  const { images, error: imageError } = collectImagePayloads(body);
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
 
+  /* Saved paths stay visible to the catch: a failed spawn deletes them so a
+     retry cannot pile duplicates into the inbox. */
+  let imagePaths: string[] = [];
   try {
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */
-    const imagePaths = images.map((image) => saveInboxImage(image.base64, image.mime).path);
-    const payload = [prompt, ...imagePaths].filter(Boolean).join("\n");
-    const pane = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), payload);
+    const bundle = buildImagePayload(prompt, images);
+    imagePaths = bundle.imagePaths;
+    const pane = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), bundle.payload);
     return NextResponse.json({ ok: true, target: pane.display });
   } catch (error) {
+    deleteInboxImages(imagePaths);
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }

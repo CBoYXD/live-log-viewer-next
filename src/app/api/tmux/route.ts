@@ -4,13 +4,13 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import {
+  buildImagePayload,
   collectImagePayloads,
-  imagePayloadError,
+  deleteInboxImages,
   knownLivePids,
   liveResumePane,
   resolveTarget,
   resumeSpecFor,
-  saveInboxImage,
   sendText,
   sendToResumedAgent,
 } from "@/lib/tmux";
@@ -77,13 +77,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   }
 
   const text = typeof body.text === "string" ? body.text : "";
-  const images = collectImagePayloads(body);
-  if (!text.trim() && !images.length) {
-    return NextResponse.json({ error: "порожнє повідомлення" }, { status: 400 });
-  }
-  const imageError = imagePayloadError(images);
+  const { images, error: imageError } = collectImagePayloads(body);
   if (imageError) {
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
+  }
+  if (!text.trim() && !images.length) {
+    return NextResponse.json({ error: "порожнє повідомлення" }, { status: 400 });
   }
 
   let target: string | null = null;
@@ -95,14 +94,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     target = resolved === "unknown" ? null : resolved;
   }
 
+  /* Saved paths stay visible to the catch-all: a delivery that fails after
+     the images hit disk deletes them so a retry cannot duplicate files. */
+  let imagePaths: string[] = [];
   try {
-    const imagePaths = images.map((image) => saveInboxImage(image.base64, image.mime).path);
-    const payload = [text.trim(), ...imagePaths].filter(Boolean).join("\n");
-    const imageField = imagePaths.length ? { imagePaths } : {};
-
+    /* Images are only saved to the inbox once a deliverable destination is
+       confirmed below — every early 409/403 return above and below happens
+       before any file touches disk, so a rejected request never orphans one. */
     if (target !== null) {
-      await sendText(target, payload);
-      return NextResponse.json({ ok: true, target, ...imageField });
+      const bundle = buildImagePayload(text.trim(), images);
+      imagePaths = bundle.imagePaths;
+      await sendText(target, bundle.payload);
+      return NextResponse.json({ ok: true, target, ...(imagePaths.length ? { imagePaths } : {}) });
     }
 
     /* No live pane: reopen the conversation as a fresh agent window in the
@@ -117,8 +120,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     }
     const spec = resumeSpecFor(entry.root, entry.path);
     if (spec) {
-      const sent = await sendToResumedAgent(entry.path, spec, payload);
-      return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned, ...imageField });
+      const bundle = buildImagePayload(text.trim(), images);
+      imagePaths = bundle.imagePaths;
+      const sent = await sendToResumedAgent(entry.path, spec, bundle.payload);
+      return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned, ...(imagePaths.length ? { imagePaths } : {}) });
     }
 
     /* Subagents and other child records have no resumable session of their
@@ -134,21 +139,25 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     if (root.path === entry.path) {
       return NextResponse.json({ error: "цю розмову неможливо відновити" }, { status: 409 });
     }
-    const relayText = `Повідомлення від користувача для твоєї гілки «${entry.title.slice(0, 100)}» — передай або обробʼи сам:\n${payload}`;
-    if (root.pid !== null) {
-      const rootTarget = await resolveTarget(root.pid);
-      if (rootTarget !== null) {
-        await sendText(rootTarget, relayText);
-        return NextResponse.json({ ok: true, target: rootTarget, ...imageField });
-      }
-    }
-    const rootSpec = resumeSpecFor(root.root, root.path);
-    if (!rootSpec) {
+    /* Resolved before saving anything: the root's live pane or resume spec
+       must exist, or the request is rejected without ever writing an image. */
+    const rootTarget = root.pid !== null ? await resolveTarget(root.pid) : null;
+    const rootSpec = rootTarget === null ? resumeSpecFor(root.root, root.path) : null;
+    if (rootTarget === null && !rootSpec) {
       return NextResponse.json({ error: "коренева сесія недоступна для повідомлення" }, { status: 409 });
     }
-    const sent = await sendToResumedAgent(root.path, rootSpec, relayText);
+    const bundle = buildImagePayload(text.trim(), images);
+    imagePaths = bundle.imagePaths;
+    const relayText = `Повідомлення від користувача для твоєї гілки «${entry.title.slice(0, 100)}» — передай або обробʼи сам:\n${bundle.payload}`;
+    const imageField = imagePaths.length ? { imagePaths } : {};
+    if (rootTarget !== null) {
+      await sendText(rootTarget, relayText);
+      return NextResponse.json({ ok: true, target: rootTarget, ...imageField });
+    }
+    const sent = await sendToResumedAgent(root.path, rootSpec!, relayText);
     return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned, ...imageField });
   } catch (error) {
+    deleteInboxImages(imagePaths);
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
 }
