@@ -3,9 +3,12 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { listFiles } from "@/lib/scanner";
 import { numberValue, readJson } from "@/lib/scanner/json";
 import { outputHolders, pidAlive } from "@/lib/scanner/process";
 import { pathAllowed, ROOTS } from "@/lib/scanner/roots";
+import { transcriptEngine, verifyTranscriptPid } from "@/lib/scanner/transcripts";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -46,7 +49,7 @@ function pidStillHoldsPath(pid: number, pathname: string): boolean {
   return false;
 }
 
-function derivePid(pathname: string): number | null | "invalid" | "stale" {
+async function derivePid(pathname: string): Promise<number | null | "invalid" | "stale"> {
   if (isUnder(pathname, ROOTS["codex-jobs"]) && pathname.endsWith(".log")) {
     const job = readJson(pathname.replace(/\.log$/, ".json"));
     const pid = numberValue(job?.pid);
@@ -58,10 +61,22 @@ function derivePid(pathname: string): number | null | "invalid" | "stale" {
     if (pid === null || !pidAlive(pid)) return null;
     return pidStillHoldsPath(pid, pathname) ? pid : "stale";
   }
+  if (transcriptEngine(pathname) !== null) {
+    // The pid always comes from the scanner's own attribution; client-supplied
+    // pids are ignored. verifyTranscriptPid then re-checks /proc at kill time
+    // so a recycled pid is rejected instead of signalled.
+    const entry = (await listFiles()).find((candidate) => candidate.path === pathname);
+    const pid = entry?.pid ?? null;
+    if (pid === null || !pidAlive(pid)) return null;
+    return verifyTranscriptPid(pathname, pid) ? pid : "stale";
+  }
   return "invalid";
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<KillResponse | ApiError>> {
+  const rejection = rejectCrossOrigin(req);
+  if (rejection) return rejection;
+
   let body: { path?: unknown; force?: unknown };
   try {
     body = (await req.json()) as { path?: unknown; force?: unknown };
@@ -74,7 +89,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<KillResponse 
     return NextResponse.json({ error: "шлях поза дозволеними коренями" }, { status: 400 });
   }
 
-  const pid = derivePid(pathname);
+  const pid = await derivePid(pathname);
   if (pid === "invalid") {
     return NextResponse.json({ error: "не процесний запис" }, { status: 400 });
   }

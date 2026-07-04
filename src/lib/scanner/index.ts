@@ -4,18 +4,10 @@ import { discoverFiles } from "./discover";
 import { numberValue, readJson } from "./json";
 import { linkEntries } from "./links";
 import { entryModel } from "./model";
-import { outputHolders, pathHolders, pidAlive } from "./process";
+import { outputHolders, pidAlive } from "./process";
+import { assignTranscriptPids } from "./transcripts";
 
-function isInteractiveTranscript(entry: FileEntry): boolean {
-  return entry.path.endsWith(".jsonl") && (entry.root === "claude-projects" || entry.root === "codex-sessions");
-}
-
-function applyProcessState(
-  entry: FileEntry,
-  holders: Map<string, number>,
-  transcriptHolders: Map<string, number>,
-  job: Record<string, unknown> | null,
-) {
+function applyProcessState(entry: FileEntry, holders: Map<string, number>, job: Record<string, unknown> | null) {
   if (entry.root === "codex-jobs") {
     if (!job) return;
     const pid = numberValue(job.pid);
@@ -38,14 +30,6 @@ function applyProcessState(
     entry.pid = holder;
     entry.proc = holder === null ? "done" : "running";
     if (holder !== null) entry.activity = "live";
-    return;
-  }
-  if (isInteractiveTranscript(entry)) {
-    const holder = transcriptHolders.get(entry.path) ?? null;
-    if (holder !== null && pidAlive(holder)) {
-      entry.pid = holder;
-      entry.activity = "live";
-    }
   }
 }
 
@@ -83,13 +67,10 @@ export async function listFiles(): Promise<FileEntry[]> {
     entry.activity = activity(entry.root, entry.path, entry.mtime, entry.size, job);
     entry.model = entryModel(entry);
   }
-  const transcriptPaths = entries
-    .filter((entry) => isInteractiveTranscript(entry) && entry.activity !== "idle")
-    .map((entry) => entry.path);
-  const transcriptHolders = transcriptPaths.length ? pathHolders(transcriptPaths) : NO_HOLDERS;
   for (const entry of entries) {
-    applyProcessState(entry, holders, transcriptHolders, jobs.get(entry.path) ?? null);
+    applyProcessState(entry, holders, jobs.get(entry.path) ?? null);
   }
+  assignTranscriptPids(entries);
   linkEntries(entries);
   return entries;
 }

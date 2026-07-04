@@ -47,6 +47,18 @@ export interface LogChunk {
   data: string;
 }
 
+/** One action on the activity timeline, extracted from a transcript tail. */
+export interface ActionEvent {
+  /** Unix seconds. */
+  ts: number;
+  /** Transcript path the action belongs to. */
+  file: string;
+  /** Short conversation/agent name. */
+  actor: string;
+  kind: "user" | "turn" | "spawn" | "msg";
+  label: string;
+}
+
 export interface ApiError {
   error: string;
 }
