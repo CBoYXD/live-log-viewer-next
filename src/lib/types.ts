@@ -40,6 +40,8 @@ export interface FileEntry {
   pendingQuestion: PendingQuestion | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */
   plan?: AgentPlan | null;
+  /** Context-window fullness from the transcript tail, when it carries usage. */
+  ctx?: CtxUsage | null;
   /** Codex only: the thread's declared goal (objective + status). */
   goal?: AgentGoal | null;
   /** Best-effort TUI scrape fallback for prompts without a transcript protocol. */
@@ -58,6 +60,15 @@ export interface FilesResponse {
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
+
+/** How full an agent's context window is (codex token_count events; claude
+    assistant usage vs the model's window). */
+export interface CtxUsage {
+  usedTokens: number;
+  windowTokens: number;
+  /** Rounded 0–100. */
+  pct: number;
+}
 
 /** Codex thread goal (update_goal tool / thread_goal_updated events): the
     session-level objective and its lifecycle. Claude has no counterpart. */

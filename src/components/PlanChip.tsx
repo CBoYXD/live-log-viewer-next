@@ -1,6 +1,6 @@
 "use client";
 
-import type { AgentGoal, AgentPlan } from "@/lib/types";
+import type { AgentGoal, AgentPlan, CtxUsage } from "@/lib/types";
 
 const STEP_GLYPHS: Record<AgentPlan["steps"][number]["status"], string> = {
   completed: "✓",
@@ -45,6 +45,27 @@ function goalTooltip(goal: AgentGoal): string {
   if (goal.tokensUsed !== null) lines.push(`токенів: ${goal.tokensUsed.toLocaleString("uk-UA")}`);
   if (goal.timeUsedSeconds !== null) lines.push(`часу: ${Math.round(goal.timeUsedSeconds / 60)} хв`);
   return lines.join("\n");
+}
+
+/* Same escalation points as the sidebar limit bars: calm, then amber, then red. */
+function ctxTone(pct: number): string {
+  if (pct >= 90) return "bg-[#fbeaea] text-err";
+  if (pct >= 70) return "bg-[#fff7e6] text-[#b07d18]";
+  return "bg-chip text-dim";
+}
+
+/** Context-window fullness of an agent: «ctx N%», exact token counts in the
+    tooltip. Rendered wherever the agent is shown (pane header, switch cards). */
+export function CtxChip({ ctx }: { ctx: CtxUsage }) {
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${ctxTone(ctx.pct)}`}
+      title={`Контекстне вікно: використано ${ctx.pct}%\n${ctx.usedTokens.toLocaleString("uk-UA")} з ${ctx.windowTokens.toLocaleString("uk-UA")} токенів`}
+      aria-label={`Контекст: використано ${ctx.pct} відсотків вікна`}
+    >
+      ctx {ctx.pct}%
+    </span>
+  );
 }
 
 /** Codex thread-goal state in a pane header: status-colored chip, the

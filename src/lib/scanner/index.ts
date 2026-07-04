@@ -3,6 +3,7 @@ import { notifyQuestion } from "../push";
 import { resolveTarget } from "../tmux";
 import { activityVerdict } from "./activity";
 import { tickFlows } from "../flows/engine";
+import { ctxFor } from "./context";
 import { discoverFiles } from "./discover";
 import { numberValue, readJson } from "./json";
 import { linkEntries } from "./links";
@@ -92,6 +93,7 @@ export async function listFiles(): Promise<FileEntry[]> {
     entry.waitingInput = await waitingInputFor(entry);
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
+    entry.ctx = ctxFor(entry);
   }));
   for (const entry of entries) {
     if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);

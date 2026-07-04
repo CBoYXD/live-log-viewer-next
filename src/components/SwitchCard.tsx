@@ -5,6 +5,7 @@ import { CornerDownRight } from "lucide-react";
 import { X } from "@/components/icons";
 import type { FileEntry } from "@/lib/types";
 
+import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { activityDot, cleanTitle, engineBadge, fmtAge, modelTint } from "./utils";
 
@@ -84,6 +85,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
       </div>
       <div className="relative mt-auto flex min-w-0 items-center gap-2 text-[10.5px] font-semibold text-dim">
         <span className="shrink-0">{fmtAge(file.mtime)}</span>
+        {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
         {descendants ? (
           <span className="inline-flex shrink-0 items-center gap-0.5">
             <CornerDownRight className="h-3 w-3" aria-hidden /> {descendants}

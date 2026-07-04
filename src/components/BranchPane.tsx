@@ -13,7 +13,7 @@ import { FlipRow } from "./FlipRow";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
-import { GoalChip, PlanChip } from "./PlanChip";
+import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { activityDot, cleanTitle, engineBadge, engineEdge, modelTint } from "./utils";
@@ -101,6 +101,7 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
             {file.model}
           </span>
         ) : null}
+        {file.ctx ? <CtxChip ctx={file.ctx} /> : null}
         {file.plan ? <PlanChip plan={file.plan} /> : null}
         {file.goal ? <GoalChip goal={file.goal} /> : null}
         {isRoot ? null : (
