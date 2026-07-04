@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import type { FileEntry } from "@/lib/types";
 
+import { AccessQrButton } from "./AccessQrButton";
 import { FlipRow } from "./FlipRow";
 import { buildProjectSummaries, OVERVIEW } from "./projectModel";
 import { fmtAge } from "./utils";
@@ -28,11 +29,12 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-4 text-[13.5px] font-bold">
         Логи агентів
         {totalLive ? (
-          <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
+          <span className="inline-flex items-center gap-1 rounded-full bg-[#e5f6ea] px-2 py-0.5 text-[10.5px] font-bold text-ok">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-ok" />
             {totalLive}
           </span>
         ) : null}
+        <AccessQrButton />
       </header>
       <div className="px-2.5 pb-1 pt-2.5">
         <input

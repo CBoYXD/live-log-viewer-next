@@ -72,6 +72,7 @@ Both the `Host` header and any `Origin` header must resolve to that allowlist.
 |----------|--------|--------|
 | `LLV_TOKEN` | CLI for `--tailscale` and non-loopback binds | Enables the proxy token gate for remote requests. Empty or absent means passthrough. |
 | `LLV_TS_HOST` | CLI after `tailscale status --json` | Adds the tailnet DNS name to same-origin allowed hosts. |
+| `LLV_TS_URL` | CLI when `--tailscale` is used | Full tailnet URL (with `?k=` token) returned by `GET /api/access` for the in-app QR button. Absent means the button shows the "start with --tailscale" hint. |
 | `LLV_STANDALONE` | `scripts/prepack.mjs` | Enables `output: "standalone"` during publish packaging only. |
 
 ## File tree and ownership

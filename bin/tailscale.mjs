@@ -126,7 +126,7 @@ export function serve(tailscalePath, port) {
     console.error(`Не вдалося запустити tailscale serve: ${error.message}`);
   });
 
-  child.on("exit", () => {
+  child.on("exit", (code) => {
     clearTimeout(startedTimer);
     if (state.stopping || state.operatorHintPrinted) {
       return;
@@ -134,6 +134,13 @@ export function serve(tailscalePath, port) {
 
     if (state.started) {
       console.error("Попередження: tailscale serve зупинився, локальний сервер продовжує працювати.");
+      return;
+    }
+
+    if (code !== 0) {
+      console.error(
+        "Не вдалося запустити tailscale serve (можливо, порт уже обслуговується іншим правилом). Перевірте `tailscale serve status`. Локальний сервер продовжує працювати.",
+      );
     }
   });
 
@@ -174,6 +181,13 @@ export async function getToken({ rotate = false } = {}) {
   }
 
   const token = generateToken();
-  await writeToken(path, token);
+  try {
+    await writeToken(path, token);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new TailscaleError(
+      `Не вдалося записати ключ доступу у ${path} (${detail}). Перевірте права на директорію ${dirname(path)} і повторіть.`,
+    );
+  }
   return { token, path };
 }

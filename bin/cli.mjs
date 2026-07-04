@@ -181,10 +181,14 @@ function buildChildEnv(options, runtime) {
     env.LLV_TS_HOST = runtime.llvTsHost;
   }
 
+  if (runtime.tailnetUrl) {
+    env.LLV_TS_URL = runtime.tailnetUrl;
+  }
+
   return env;
 }
 
-function startServer(server, options, runtime) {
+function startServer(server, options, runtime, tailscaleProcessRef) {
   const child = spawn(server.command, server.args, {
     cwd: server.cwd,
     env: buildChildEnv(options, runtime),
@@ -214,9 +218,17 @@ function startServer(server, options, runtime) {
     fail(`Не вдалося запустити сервер: ${error.message}`);
   });
 
-  child.on("exit", (code, signal) => {
+  child.on("exit", async (code, signal) => {
     if (state.stopping) {
       return;
+    }
+
+    // The server dying on its own (crash, EADDRINUSE) still leaves `tailscale
+    // serve` running as our child; stop it through the bounded path (SIGTERM,
+    // 2s, SIGKILL) so an unexpected server exit does not orphan the tailnet
+    // mapping even when serve ignores SIGTERM.
+    if (tailscaleProcessRef?.current) {
+      await stopChild(tailscaleProcessRef.current);
     }
 
     if (state.sawAddressInUse) {
@@ -429,8 +441,8 @@ async function main() {
   }
 
   const server = resolveServer(packageRoot);
-  const serverProcess = startServer(server, options, runtime);
   const tailscaleProcessRef = { current: null };
+  const serverProcess = startServer(server, options, runtime, tailscaleProcessRef);
   installSignalHandlers(serverProcess, tailscaleProcessRef);
 
   if (options.tailscale && runtime.tailscalePath) {
