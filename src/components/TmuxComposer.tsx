@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import type { FileEntry } from "@/lib/types";
 
+import { MicButton } from "./MicButton";
+
 interface PendingImage {
   base64: string;
   mime: string;
@@ -252,6 +254,14 @@ export function TmuxComposer({ file }: { file: FileEntry }) {
             addFiles(Array.from(event.target.files ?? []));
             event.target.value = "";
           }}
+        />
+        <MicButton
+          onText={(spoken) => {
+            setText(text ? text.trimEnd() + " " + spoken : spoken);
+            setStatus(null);
+            inputRef.current?.focus();
+          }}
+          onError={(message) => setStatus({ kind: "err", text: message })}
         />
         <button
           type="button"

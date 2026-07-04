@@ -17,6 +17,7 @@ import {
 } from "./projectModel";
 import { ResidualStrip } from "./TreeAside";
 import { activityDot, cleanTitle, engineBadge, engineColor, ukPlural } from "./utils";
+import { SpawnAgentButton } from "./SpawnAgentButton";
 
 const COL_W = 520;
 const COL_GAP = 12;
@@ -404,7 +405,8 @@ export function ProjectDashboard({ files, project, openNonce }: Props) {
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-panel px-4">
         <h1 className="truncate text-[13.5px] font-bold">{project}</h1>
-        <span className="text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : "зараз нічого не працює"}</span>
+        <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : "зараз нічого не працює"}</span>
+        <SpawnAgentButton project={project} />
       </div>
 
       {dockedTasks.length ? (

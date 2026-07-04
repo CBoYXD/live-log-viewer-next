@@ -264,6 +264,20 @@ export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null
   return null;
 }
 
+export type AgentEngine = "claude" | "codex";
+
+/** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
+export function freshSpecFor(engine: AgentEngine, cwd: string): ResumeSpec {
+  if (engine === "claude") {
+    return {
+      command: `${resolveBinary("claude")} --dangerously-skip-permissions`,
+      cwd,
+      windowName: "claude-new",
+    };
+  }
+  return { command: resolveBinary("codex"), cwd, windowName: "codex-new" };
+}
+
 const SPAWN_READY_TIMEOUT_MS = 60_000;
 const SPAWN_POLL_MS = 1_000;
 const SPAWN_STABLE_ROUNDS = 3;
@@ -271,6 +285,9 @@ const SHELL_COMMANDS = new Set(["zsh", "bash", "fish", "sh", "dash"]);
 /* Bottom-bar hints both CLIs draw once their composer accepts input. */
 const READY_MARKERS = /\? for shortcuts|bypass permissions on|Press up to edit|⏎ send/;
 const CLAUDE_RESUME_PICKER = /Resume from summary/;
+/* First launch of an agent in an untrusted directory asks to trust the folder;
+   the safe default is highlighted, so Enter confirms it. */
+const TRUST_FOLDER_PROMPT = /trust (?:the files in )?this folder|Do you trust the files/i;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -331,7 +348,7 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
 
   const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
   let agentSeen = false;
-  let pickerAnswered = false;
+  let answeredScreen = "";
   let previousScreen = "";
   let stableRounds = 0;
   while (Date.now() < deadline) {
@@ -347,9 +364,12 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
     agentSeen = true;
 
     const screen = await paneScreen(target);
-    if (!pickerAnswered && CLAUDE_RESUME_PICKER.test(screen)) {
+    /* Startup gates (trust-folder, resume-summary picker) each default to the
+       safe option, so Enter clears them. Re-answering only when the screen
+       changed avoids hammering Enter into a composer that is already ready. */
+    if (screen !== answeredScreen && (CLAUDE_RESUME_PICKER.test(screen) || TRUST_FOLDER_PROMPT.test(screen))) {
       await runTmux(["send-keys", "-t", target, "Enter"]);
-      pickerAnswered = true;
+      answeredScreen = screen;
       previousScreen = "";
       stableRounds = 0;
       continue;
@@ -368,7 +388,7 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
   if (finalCommand === null || SHELL_COMMANDS.has(finalCommand)) {
     throw new Error(`агент не запустився у вікні: ${screenTail(await paneScreen(target))}`);
   }
-  await sendText(target, text);
+  if (text) await sendText(target, text);
   return target;
 }
 

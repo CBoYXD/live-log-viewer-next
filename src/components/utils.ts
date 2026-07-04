@@ -78,6 +78,11 @@ export function modelTint(file: FileEntry): ModelTint {
   return base;
 }
 
+/** Engine base tint for UI that has no FileEntry yet (e.g. the spawn dialog). */
+export function engineTintOf(engine: string): ModelTint {
+  return ENGINE_TINTS[engine] ?? NEUTRAL_TINT;
+}
+
 /** Model-tinted identity color as a raw value for SVG connectors and dots. */
 export function engineColor(file: FileEntry): string {
   return modelTint(file).color;
