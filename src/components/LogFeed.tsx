@@ -230,9 +230,11 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
                 ))}
                 {file.activity === "live" ? <WorkingRow icon={working.icon} label={working.label} /> : null}
                 {file.activity === "recent" && isAwaitingUser(file) ? (
-                  <div className="mt-2 text-[11.5px] font-semibold text-[#b8860b]">закінчив хід — чекає відповіді</div>
+                  <div className="mt-2 flex items-center gap-1.5 text-[11.5px] font-semibold text-[#b8860b]">
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#d29a2f]" aria-hidden /> закінчив хід — чекає відповіді
+                  </div>
                 ) : file.activity === "recent" && isSubagent(file) && file.proc !== "running" ? (
-                  <div className="mt-2 flex items-center gap-1 text-[11.5px] font-semibold text-dim">
+                  <div className="mt-2 flex items-center gap-1 text-[11.5px] font-semibold text-accent">
                     <CornerDownRight className="h-3.5 w-3.5" aria-hidden /> повернувся з результатом
                   </div>
                 ) : null}

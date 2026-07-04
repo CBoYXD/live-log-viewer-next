@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useFiles } from "@/hooks/useFiles";
 import type { FileEntry } from "@/lib/types";
 
@@ -42,6 +43,7 @@ function writeHash(project: string) {
 
 export function Viewer() {
   const files = useFiles();
+  useAgentChimes(files);
   const [project, setProject] = useState<string>(OVERVIEW);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   /* Reopening a file whose project is already selected does not change

@@ -1,19 +1,38 @@
 "use client";
 
 import { CornerDownRight } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
+import { registerPane } from "@/lib/chime";
 import type { FileEntry } from "@/lib/types";
 
 import { FlipRow } from "./FlipRow";
 import { canHandoff, HandoffHandle } from "./HandoffHandle";
 import { LogFeed } from "./LogFeed";
+import { paneState, type PaneState } from "./paneState";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { activityDot, cleanTitle, engineBadge, engineEdge, modelTint } from "./utils";
 
 const noop = () => undefined;
+
+/* Card treatment per lifecycle state; `glow` also feeds the orbiting border. */
+const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: string }> = {
+  live: { section: "border-ok/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]", header: "bg-[#eef8f0]" },
+  waiting: { section: "border-[#e0ae45]/60 shadow-[0_0_0_3px_rgba(224,174,69,0.2)]", header: "bg-[#fff7e6]", glow: "#e0ae45" },
+  returned: { section: "border-accent/50 shadow-[0_0_0_3px_rgba(90,81,224,0.15)]", header: "bg-[#f1f0fc]", glow: "#7a6ff0" },
+  stalled: { section: "border-err/50 shadow-[0_0_0_3px_rgba(198,40,40,0.13)]", header: "bg-[#fdf0f0]", glow: "#d76a6a" },
+  done: { section: "border-line", header: "bg-[#f4f4f6] text-dim opacity-80 saturate-50" },
+};
+
+const DOT_TITLES: Record<PaneState, string> = {
+  live: "працює",
+  waiting: "закінчив хід — чекає відповіді",
+  returned: "повернувся з результатом",
+  stalled: "перервано або чекає дозволу",
+  done: "завершено — можна прибрати",
+};
 
 interface Props {
   file: FileEntry;
@@ -32,7 +51,12 @@ interface Props {
 export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, dragHandle }: Props) {
   const paneRef = useRef<HTMLElement | null>(null);
   const badge = engineBadge(file);
-  const live = file.activity === "live";
+  const state = paneState(file);
+  const tone = PANE_TONES[state];
+  /* The chime of this conversation pans to wherever this pane sits on screen. */
+  useEffect(() => {
+    if (paneRef.current) return registerPane(file.path, paneRef.current);
+  }, [file.path]);
   return (
     <section
       ref={paneRef}
@@ -41,19 +65,19 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
       data-pan-ignore
       className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[10px] border bg-panel shadow-card ${
         isRoot ? "border-t-4" : "border-t-2"
-      } ${live ? "border-ok/60 shadow-[0_0_0_3px_rgba(47,158,68,0.16)]" : "border-line"}`}
-      style={engineEdge(file)}
+      } ${tone.section} ${tone.glow ? "pane-attention" : ""}`}
+      style={{
+        ...(state === "done" ? { borderTopColor: "#c9c9d1" } : engineEdge(file)),
+        ...(tone.glow ? ({ "--pane-glow": tone.glow } as React.CSSProperties) : null),
+      }}
     >
       <header
-        className={`flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5 ${live ? "bg-[#eef8f0]" : ""} ${
+        className={`flex h-10 shrink-0 items-center gap-1.5 border-b border-line px-2.5 ${tone.header} ${
           dragHandle ? "cursor-grab active:cursor-grabbing" : ""
         }`}
         {...dragHandle}
       >
-        <span
-          className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`}
-          title={file.activity === "live" ? "працює" : file.activity === "recent" ? "закінчив" : file.activity === "stalled" ? "перервано" : "тихо"}
-        />
+        <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={DOT_TITLES[state]} />
         <span className="inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-bold" style={badge.style}>
           {badge.label}
         </span>

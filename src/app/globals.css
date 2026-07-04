@@ -26,3 +26,46 @@ body {
   background: var(--color-bg);
   color: var(--color-ink);
 }
+
+/* Attention border: two soft comets orbiting the card edge in the state's
+   color (--pane-glow) — visibly "waiting for you" without stealing focus. */
+@property --pane-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@keyframes pane-orbit {
+  to {
+    --pane-angle: 360deg;
+  }
+}
+
+.pane-attention::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  border-radius: 10px;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--pane-angle),
+    transparent 0deg 30deg,
+    var(--pane-glow) 100deg,
+    transparent 170deg 210deg,
+    var(--pane-glow) 280deg,
+    transparent 350deg 360deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: pane-orbit 3.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pane-attention::before {
+    animation: none;
+  }
+}

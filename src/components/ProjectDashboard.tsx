@@ -16,6 +16,7 @@ import {
   projectKey,
   residualItems,
 } from "./projectModel";
+import { SoundToggle } from "./SoundToggle";
 import { ResidualStrip } from "./TreeAside";
 import { activityDot, cleanTitle, engineBadge, engineColor, ukPlural } from "./utils";
 import { SpawnAgentButton } from "./SpawnAgentButton";
@@ -415,6 +416,7 @@ export function ProjectDashboard({ files, project, openNonce }: Props) {
       <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-line bg-panel px-4">
         <h1 className="truncate text-[13.5px] font-bold">{project}</h1>
         <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : "зараз нічого не працює"}</span>
+        <SoundToggle />
         <SpawnAgentButton project={project} />
       </div>
 
