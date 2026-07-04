@@ -4,6 +4,13 @@ export type ActivityBand = 0 | 1 | 2 | 3;
 
 export const OVERVIEW = "__overview__";
 
+/**
+ * Freshness in 5-minute buckets: live files bump mtime every poll, so raw
+ * mtime ties reshuffle columns continuously; bucketed time plus a path
+ * tie-breaker keeps the order stable while staying recency-driven.
+ */
+const tick5 = (t: number) => Math.floor(t / 300);
+
 export function activityBand(file: FileEntry): ActivityBand {
   if (file.activity === "live") return 0;
   if (file.activity === "recent") return 1;
@@ -68,7 +75,7 @@ export function buildProjectSummaries(files: FileEntry[]): ProjectSummary[] {
     const al = a.liveCount > 0;
     const bl = b.liveCount > 0;
     if (al !== bl) return al ? -1 : 1;
-    return b.smt - a.smt;
+    return tick5(b.smt) - tick5(a.smt) || a.project.localeCompare(b.project);
   });
 }
 
@@ -158,10 +165,10 @@ function assembleGroup(root: FileEntry, kids: Map<string, FileEntry[]>, byPath: 
   const liveRank = (file: FileEntry) => (file.activity === "live" ? 0 : 1);
   const branches = descendants
     .filter(columnWorthy)
-    .sort((a, b) => liveRank(a) - liveRank(b) || b.mtime - a.mtime);
+    .sort((a, b) => liveRank(a) - liveRank(b) || tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const liveTasks = descendants
     .filter((file) => isAuxTask(file) && file.activity === "live")
-    .sort((a, b) => b.mtime - a.mtime);
+    .sort((a, b) => tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const columns: BranchColumn[] = [root, ...branches].map((file) => ({ file, tasks: [] }));
   const columnByPath = new Map(columns.map((column) => [column.file.path, column]));
   for (const task of liveTasks) {
@@ -221,7 +228,7 @@ export function buildBranchGroups(files: FileEntry[], project: string): BranchGr
   /* Conversations own the freshness order; parentless task stubs trail the row. */
   return groups.sort((a, b) => {
     if (a.orphanTask !== b.orphanTask) return a.orphanTask ? 1 : -1;
-    return b.smt - a.smt;
+    return tick5(b.smt) - tick5(a.smt) || a.key.localeCompare(b.key);
   });
 }
 

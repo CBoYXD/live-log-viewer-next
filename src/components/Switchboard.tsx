@@ -1,0 +1,205 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { useArchivedPaths } from "@/hooks/useArchivedPaths";
+import { useTimeline } from "@/hooks/useTimeline";
+import { useSwitchboardData, type SwitchboardItem } from "@/hooks/useSwitchboardData";
+import { cleanTitle } from "@/lib/title";
+import type { FileEntry } from "@/lib/types";
+
+import { projectKey } from "./projectModel";
+import { CornerStatus } from "./CornerStatus";
+import { FlipRow } from "./FlipRow";
+import { SwitchCard, type SwitchCardTone } from "./SwitchCard";
+
+interface Props {
+  files: FileEntry[];
+  project: string;
+  onOpenFile: (file: FileEntry) => void;
+}
+
+function toneFor(item: SwitchboardItem): SwitchCardTone {
+  if (item.kind === "working") return "working";
+  if (item.kind === "waiting" && item.file.activity === "stalled") return "stalled";
+  if (item.kind === "waiting") return "waiting";
+  return "quiet";
+}
+
+function Section({
+  title,
+  items,
+  size,
+  currentProject,
+  onOpenFile,
+  onArchive,
+}: {
+  title: string;
+  items: SwitchboardItem[];
+  size: "large" | "small";
+  currentProject: string;
+  onOpenFile: (file: FileEntry) => void;
+  onArchive: (file: FileEntry) => void;
+}) {
+  if (!items.length) return null;
+  return (
+    <section className="shrink-0">
+      <div className="mb-2 flex items-baseline gap-2">
+        <h2 className="text-[13px] font-bold">{title}</h2>
+        <span className="text-[11px] font-semibold text-dim">{items.length}</span>
+      </div>
+      <FlipRow className="flex flex-wrap gap-2.5" enter="fade">
+        {items.map((item) => (
+          <div key={item.file.path} data-flip-key={item.file.path}>
+            <SwitchCard
+              file={item.file}
+              title={item.title}
+              project={item.project}
+              currentProject={currentProject}
+              descendants={item.descendants}
+              statusLine={item.statusLine}
+              size={size}
+              tone={toneFor(item)}
+              onOpen={onOpenFile}
+              onArchive={onArchive}
+            />
+          </div>
+        ))}
+      </FlipRow>
+    </section>
+  );
+}
+
+export function Switchboard({ files, project, onOpenFile }: Props) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [olderOpen, setOlderOpen] = useState(false);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [now, setNow] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const timeline = useTimeline(project, open);
+  const { archivedPaths, archive, unarchive } = useArchivedPaths(files);
+  const data = useSwitchboardData(files, timeline.events, query, now, archivedPaths);
+  const cornerData = useSwitchboardData(files, [], "", now, archivedPaths);
+  const archivedItems = useMemo(
+    () =>
+      files
+        .filter((file) => archivedPaths.has(file.path))
+        .map((file) => ({ file, title: cleanTitle(file.title), project: projectKey(file) }))
+        .sort((a, b) => b.file.mtime - a.file.mtime),
+    [files, archivedPaths],
+  );
+
+  useEffect(() => {
+    const refresh = () => setNow(Date.now() / 1000);
+    refresh();
+    const timer = window.setInterval(refresh, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
+  const openFile = (file: FileEntry) => {
+    onOpenFile(file);
+    setOpen(false);
+  };
+  const archiveFile = (file: FileEntry) => archive(file.path);
+
+  return (
+    <>
+      <CornerStatus data={cornerData} onOpen={() => setOpen(true)} />
+      {open ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/28 p-[2.5vh]" onMouseDown={() => setOpen(false)}>
+          <div
+            className="flex h-[95vh] w-[95vw] flex-col overflow-hidden rounded-[8px] border border-line bg-bg shadow-[0_18px_70px_rgb(20_20_30/0.28)]"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Пульт агентів"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <header className="flex h-14 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
+              <div className="text-[15px] font-bold">Пульт</div>
+              <input
+                ref={inputRef}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Пошук за назвою або проєктом"
+                className="h-9 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-3 text-[13px] outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              />
+              {timeline.loading ? <span className="text-[11px] font-semibold text-dim">оновлення…</span> : null}
+              <button
+                className="h-8 w-8 rounded-[8px] border border-line bg-bg text-[15px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                aria-label="Закрити пульт"
+                onClick={() => setOpen(false)}
+              >
+                ✕
+              </button>
+            </header>
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
+              <Section title="Чекає тебе" items={data.waiting} size="large" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
+              <Section title="Працюють" items={data.working} size="large" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
+              <Section title="Нещодавні" items={data.recent} size="small" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
+              <section className="shrink-0">
+                <button
+                  className="flex h-10 w-full items-center justify-between rounded-[8px] border border-line bg-panel px-3 text-left text-[12.5px] font-bold hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  aria-expanded={olderOpen}
+                  onClick={() => setOlderOpen((value) => !value)}
+                >
+                  <span>Старіше</span>
+                  <span className="text-dim">{data.older.length}</span>
+                </button>
+                {olderOpen ? (
+                  <div className="mt-2">
+                    <Section title="" items={data.older} size="small" currentProject={project} onOpenFile={openFile} onArchive={archiveFile} />
+                  </div>
+                ) : null}
+              </section>
+              {!data.waiting.length && !data.working.length && !data.recent.length && !data.older.length ? (
+                <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">Нічого не знайдено</div>
+              ) : null}
+              {archivedItems.length ? (
+                <section className="shrink-0">
+                  <button
+                    className="flex h-9 w-full items-center justify-between rounded-[8px] border border-line bg-panel px-3 text-left text-[12px] font-bold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    aria-expanded={archivedOpen}
+                    onClick={() => setArchivedOpen((value) => !value)}
+                  >
+                    <span>Приховані ({archivedItems.length})</span>
+                    <span>{archivedOpen ? "сховати" : "показати"}</span>
+                  </button>
+                  {archivedOpen ? (
+                    <div className="mt-2 space-y-1">
+                      {archivedItems.map((item) => (
+                        <div
+                          key={item.file.path}
+                          className="flex min-w-0 items-center gap-2 rounded-[8px] border border-line bg-panel/60 px-3 py-1.5 text-[11.5px] text-dim"
+                        >
+                          <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                          <span className="shrink-0 truncate text-[10.5px]">{item.project}</span>
+                          <button
+                            className="shrink-0 rounded-full border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-ink hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                            onClick={() => unarchive(item.file.path)}
+                          >
+                            повернути
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}

@@ -5,13 +5,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useWheelPan } from "@/hooks/useWheelPan";
 import type { FileEntry } from "@/lib/types";
 
-import { BranchPane, TaskStubColumn } from "./BranchPane";
-import { MiniMap } from "./MiniMap";
+import { BranchPane, TaskStrip } from "./BranchPane";
+import { FlipRow } from "./FlipRow";
+import { Switchboard } from "./Switchboard";
 import {
   type BranchGroup,
   buildBranchGroups,
   collapsedTrees,
-  isAuxTask,
   projectKey,
   residualItems,
 } from "./projectModel";
@@ -20,7 +20,6 @@ import { activityDot, cleanTitle, engineBadge, engineColor, ukPlural } from "./u
 
 const COL_W = 520;
 const COL_GAP = 12;
-const STUB_W = 340;
 /** How long a map-selected column keeps its highlight ring. */
 const HIGHLIGHT_MS = 1800;
 /** Crown above each tree group: header pill row + connector svg. */
@@ -107,7 +106,9 @@ function GroupCrown({
 interface Props {
   files: FileEntry[];
   project: string;
-  onSelect: (file: FileEntry) => void;
+  /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
+      even though `project` itself did not change. */
+  openNonce: number;
 }
 
 /** Manual additions and removals of dashboard columns, persisted per project. */
@@ -129,18 +130,42 @@ function loadPrefs(project: string): ColumnPrefs {
   }
 }
 
-export function ProjectDashboard({ files, project, onSelect }: Props) {
+/** Pre-adds a conversation as a manual dashboard column of its project. */
+export function queueColumnOpen(project: string, path: string) {
+  const prefs = loadPrefs(project);
+  if (!prefs.manual.includes(path)) prefs.manual.push(path);
+  prefs.hidden = prefs.hidden.filter((item) => item !== path);
+  localStorage.setItem(prefsKey(project), JSON.stringify(prefs));
+}
+
+/* Kept outside the component: the React Compiler's immutability check flags
+   direct global mutation (location.hash = ...) inside a component body. */
+function gotoProject(project: string) {
+  location.hash = "#p=" + encodeURIComponent(project);
+}
+
+export function ProjectDashboard({ files, project, openNonce }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ x: number; y: number; left: number; active: boolean } | null>(null);
   const columnRefs = useRef(new Map<string, HTMLDivElement>());
+  const groupRefs = useRef(new Map<string, HTMLDivElement>());
+  const hoverGroupRef = useRef<string | null>(null);
   const highlightTimer = useRef<number | null>(null);
   const pendingScrollRef = useRef<string | null>(null);
   const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [], order: {} });
   const [highlight, setHighlight] = useState<string | null>(null);
   const dragColRef = useRef<{ group: string; path: string } | null>(null);
+  /* Mirrors `prefs` synchronously so the missing-columns effect below can read
+     the value the project-switch load just set, even within the same commit
+     (state updates from sibling effects are not visible via closure yet). */
+  const prefsRef = useRef(prefs);
 
-  /* eslint-disable-next-line react-hooks/set-state-in-effect */
-  useEffect(() => setPrefs(loadPrefs(project)), [project]);
+  useEffect(() => {
+    const loaded = loadPrefs(project);
+    prefsRef.current = loaded;
+    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    setPrefs(loaded);
+  }, [project, openNonce]);
   useEffect(
     () => () => {
       if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
@@ -149,6 +174,7 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
   );
 
   const persistPrefs = (next: ColumnPrefs) => {
+    prefsRef.current = next;
     setPrefs(next);
     localStorage.setItem(prefsKey(project), JSON.stringify(next));
   };
@@ -196,7 +222,7 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
     highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
   };
 
-  /* A column added from the map mounts on the next render; flash it then. */
+  /* A column added from the switchboard mounts on the next render; flash it then. */
   useEffect(() => {
     const pending = pendingScrollRef.current;
     if (!pending || !columnRefs.current.has(pending)) return;
@@ -205,35 +231,38 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
   });
 
   const closeColumn = (path: string) => {
-    if (prefs.manual.includes(path)) {
-      persistPrefs({ ...prefs, manual: prefs.manual.filter((item) => item !== path) });
-    } else {
-      persistPrefs({ ...prefs, hidden: [...new Set([...prefs.hidden, path])] });
-    }
+    const manual = prefs.manual.filter((item) => item !== path);
+    const hidden = autoPaths.has(path) ? [...new Set([...prefs.hidden, path])] : prefs.hidden;
+    persistPrefs({ ...prefs, manual, hidden });
   };
 
-  /* Map click: a bubble of another project pre-adds its column and switches
-     the project; a conversation of this project joins the managed column list
-     (or gets flashed / focused when already there). */
-  const onMapNode = (file: FileEntry) => {
-    if (isAuxTask(file)) {
-      onSelect(file);
-      return;
-    }
+  /* A column never vanishes on its own: every auto column is recorded as a
+     manual one, so a branch that goes quiet keeps its place until the user
+     closes it with ✕. Capped so old projects do not accumulate forever. */
+  useEffect(() => {
+    const prev = prefsRef.current;
+    const missing = [...autoPaths].filter((path) => !prev.manual.includes(path) && !prev.hidden.includes(path));
+    if (!missing.length) return;
+    const next = { ...prev, manual: [...prev.manual, ...missing].slice(-40) };
+    prefsRef.current = next;
+    setPrefs(next);
+    localStorage.setItem(prefsKey(project), JSON.stringify(next));
+  }, [autoPaths, project]);
+
+  /* Any open lands in the column canvas: a card of another project pre-adds its
+     column and switches the project; a conversation of this project joins the
+     managed column list (or gets flashed when already there). */
+  const openSwitchboardFile = (file: FileEntry) => {
     const fileProject = projectKey(file);
     if (fileProject !== project) {
-      const target = loadPrefs(fileProject);
-      if (!target.manual.includes(file.path)) target.manual.push(file.path);
-      target.hidden = target.hidden.filter((item) => item !== file.path);
-      localStorage.setItem(prefsKey(fileProject), JSON.stringify(target));
-      location.hash = "#p=" + encodeURIComponent(fileProject);
+      queueColumnOpen(fileProject, file.path);
+      gotoProject(fileProject);
       return;
     }
     const visible =
       (autoPaths.has(file.path) && !hiddenSet.has(file.path)) || manualColumns.some((item) => item.path === file.path);
     if (visible) {
-      if (highlight === file.path) onSelect(file);
-      else flashColumn(file.path);
+      flashColumn(file.path);
       return;
     }
     const hidden = prefs.hidden.filter((item) => item !== file.path);
@@ -303,8 +332,26 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
     if (el) columnRefs.current.set(path, el);
     else columnRefs.current.delete(path);
   };
+  const setGroupRef = (key: string) => (el: HTMLDivElement | null) => {
+    if (el) groupRefs.current.set(key, el);
+    else groupRefs.current.delete(key);
+  };
+  /* Reading stability: while the cursor rests on a group, that group must
+     not move when a poll reshuffles columns — it opts out of FLIP and the
+     canvas scroll compensates its layout delta, so neighbors glide around
+     the spot the user is reading. */
+  const readingGuard = (key: string) => ({
+    onPointerEnter: (event: React.PointerEvent<HTMLDivElement>) => {
+      hoverGroupRef.current = key;
+      event.currentTarget.setAttribute("data-flip-skip", "1");
+    },
+    onPointerLeave: (event: React.PointerEvent<HTMLDivElement>) => {
+      if (hoverGroupRef.current === key) hoverGroupRef.current = null;
+      event.currentTarget.removeAttribute("data-flip-skip");
+    },
+  });
 
-  const visibleGroups = groups
+  const allVisibleGroups = groups
     .map((group) => {
       const columns = group.columns.filter((column) => !hiddenSet.has(column.file.path));
       const order = prefs.order[group.key];
@@ -314,6 +361,10 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
       return { ...group, columns: root ? [root, ...branches] : branches };
     })
     .filter((group) => group.columns.length);
+  /* Parentless background processes dock as colored strips at the top of the
+     canvas instead of hanging as lone stub columns in the middle of it. */
+  const dockedTasks = allVisibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
+  const visibleGroups = allVisibleGroups.filter((group) => !group.orphanTask);
   const hasColumns = visibleGroups.length > 0 || manualColumns.length > 0;
 
   /* Drag a sibling column by its header onto another to swap places; the
@@ -356,6 +407,19 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
         <span className="text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : "зараз нічого не працює"}</span>
       </div>
 
+      {dockedTasks.length ? (
+        <div className="shrink-0 border-b border-line bg-[#fbfbfd]">
+          {dockedTasks.map((task) => (
+            <div
+              key={task.path}
+              className={`border-l-4 ${task.activity === "live" ? "border-l-ok bg-[#f2faf4]" : "border-l-[#9a9aa4]"}`}
+            >
+              <TaskStrip file={task} files={files} onSelect={openSwitchboardFile} />
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {hasColumns ? (
         <div
           ref={scrollRef}
@@ -365,62 +429,57 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
         >
-          <div className="flex h-full items-stretch gap-10 px-3 py-2.5">
-            {visibleGroups.map((group) =>
-              group.orphanTask ? (
-                <div
-                  key={group.key}
-                  ref={setColumnRef(group.columns[0]!.file.path)}
-                  className="flex h-full shrink-0 flex-col"
-                  style={{ width: STUB_W }}
-                >
-                  <div style={{ height: CROWN_H }} className="shrink-0" />
-                  <TaskStubColumn file={group.columns[0]!.file} files={files} onSelect={onSelect} />
-                </div>
-              ) : (
-                <div key={group.key} className="flex h-full shrink-0 flex-col">
-                  <GroupCrown
-                    group={group}
-                    quietCount={group.returnable.length + group.finished.length}
-                    onSelect={onSelect}
-                    onResetOrder={prefs.order[group.key] ? () => resetOrder(group.key) : undefined}
-                  />
-                  <div className="flex min-h-0 flex-1" style={{ gap: COL_GAP }}>
-                    {group.columns.map((column) => {
-                      const isRootCol = column.file.path === group.key;
-                      return (
-                        <div
-                          key={column.file.path}
-                          ref={setColumnRef(column.file.path)}
-                          className={`flex min-h-0 rounded-[10px] transition-shadow ${
-                            highlight === column.file.path ? "ring-2 ring-accent/60" : ""
-                          }`}
-                          style={{ width: COL_W }}
-                          onDragOver={(event) => {
-                            if (!isRootCol && dragColRef.current?.group === group.key) event.preventDefault();
-                          }}
-                          onDrop={() => {
-                            if (!isRootCol) dropColumn(group.key, column.file.path);
-                          }}
-                        >
-                          <BranchPane
-                            file={column.file}
-                            tasks={column.tasks}
-                            files={files}
-                            onSelect={onSelect}
-                            isRoot={isRootCol}
-                            onClose={() => closeColumn(column.file.path)}
-                            dragHandle={isRootCol ? undefined : dragHandleFor(group.key, column.file.path)}
-                          />
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              ),
-            )}
+          <FlipRow className="flex h-full items-stretch gap-10 px-3 py-2.5">
+            {visibleGroups.map((group) => (
+              <div
+                key={group.key}
+                data-flip-key={group.key}
+                ref={setGroupRef(group.key)}
+                className="flex h-full shrink-0 flex-col"
+                {...readingGuard(group.key)}
+              >
+                <GroupCrown
+                  group={group}
+                  quietCount={group.returnable.length + group.finished.length}
+                  onSelect={openSwitchboardFile}
+                  onResetOrder={prefs.order[group.key] ? () => resetOrder(group.key) : undefined}
+                />
+                <FlipRow className="flex min-h-0 flex-1" style={{ gap: COL_GAP }}>
+                  {group.columns.map((column) => {
+                    const isRootCol = column.file.path === group.key;
+                    return (
+                      <div
+                        key={column.file.path}
+                        data-flip-key={column.file.path}
+                        ref={setColumnRef(column.file.path)}
+                        className={`flex min-h-0 rounded-[10px] transition-shadow ${
+                          highlight === column.file.path ? "ring-2 ring-accent/60" : ""
+                        }`}
+                        style={{ width: COL_W }}
+                        onDragOver={(event) => {
+                          if (!isRootCol && dragColRef.current?.group === group.key) event.preventDefault();
+                        }}
+                        onDrop={() => {
+                          if (!isRootCol) dropColumn(group.key, column.file.path);
+                        }}
+                      >
+                        <BranchPane
+                          file={column.file}
+                          tasks={column.tasks}
+                          files={files}
+                          onSelect={openSwitchboardFile}
+                          isRoot={isRootCol}
+                          onClose={() => closeColumn(column.file.path)}
+                          dragHandle={isRootCol ? undefined : dragHandleFor(group.key, column.file.path)}
+                        />
+                      </div>
+                    );
+                  })}
+                </FlipRow>
+              </div>
+            ))}
             {manualColumns.map((file) => (
-              <div key={file.path} className="flex h-full shrink-0 flex-col" style={{ width: COL_W }}>
+              <div key={file.path} data-flip-key={file.path} className="flex h-full shrink-0 flex-col" style={{ width: COL_W }}>
                 <div style={{ height: CROWN_H }} className="shrink-0" />
                 <div
                   ref={setColumnRef(file.path)}
@@ -432,27 +491,27 @@ export function ProjectDashboard({ files, project, onSelect }: Props) {
                     file={file}
                     tasks={[]}
                     files={files}
-                    onSelect={onSelect}
+                    onSelect={openSwitchboardFile}
                     isRoot={!file.parent}
                     onClose={() => closeColumn(file.path)}
                   />
                 </div>
               </div>
             ))}
-          </div>
+          </FlipRow>
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
           <div>
             <div className="text-[13.5px] font-semibold text-dim">Жодної відкритої колонки</div>
-            <div className="mt-0.5 text-[12px] text-dim">Розгорни мапу в правому нижньому куті і клікни розмову — вона додасться сюди</div>
+            <div className="mt-0.5 text-[12px] text-dim">Відкрий пульт у правому нижньому куті і клікни розмову — вона додасться сюди</div>
           </div>
         </div>
       )}
 
-      <MiniMap files={files} project={project} onNode={onMapNode} />
+      <Switchboard files={files} project={project} onOpenFile={openSwitchboardFile} />
 
-      {residual.length ? <ResidualStrip items={residual} onSelect={onSelect} /> : null}
+      {residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
     </div>
   );
 }

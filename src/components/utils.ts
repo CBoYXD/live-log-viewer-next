@@ -76,7 +76,7 @@ export function syntheticFile(pathname: string): FileEntry {
     ? "codex-sessions"
     : pathname.includes("/.claude/projects/")
       ? "claude-projects"
-      : pathname.includes("/tmp/claude-1000/")
+      : /\/tmp\/claude-\d+\//.test(pathname)
         ? "claude-tasks"
         : "codex-jobs";
   const fmt = pathname.endsWith(".jsonl") ? (root === "claude-projects" ? "claude" : "codex") : "plain";

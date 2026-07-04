@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import type { FileEntry } from "@/lib/types";
 
+import { FlipRow } from "./FlipRow";
 import { buildProjectSummaries, OVERVIEW } from "./projectModel";
 import { fmtAge } from "./utils";
 
@@ -52,18 +53,21 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
           onClick={() => onSelect(OVERVIEW)}
         />
         <div className="mx-2.5 my-1.5 border-t border-line" />
-        {visible.map((summary) => (
-          <RailRow
-            key={summary.project}
-            label={summary.project}
-            live={summary.liveCount}
-            total={summary.conversations}
-            age={fmtAge(summary.smt)}
-            active={selected === summary.project}
-            hasLive={summary.liveCount > 0}
-            onClick={() => onSelect(summary.project)}
-          />
-        ))}
+        <FlipRow>
+          {visible.map((summary) => (
+            <div key={summary.project} data-flip-key={summary.project}>
+              <RailRow
+                label={summary.project}
+                live={summary.liveCount}
+                total={summary.conversations}
+                age={fmtAge(summary.smt)}
+                active={selected === summary.project}
+                hasLive={summary.liveCount > 0}
+                onClick={() => onSelect(summary.project)}
+              />
+            </div>
+          ))}
+        </FlipRow>
         {!visible.length ? <div className="px-3 py-4 text-center text-[12px] text-dim">Нічого не знайдено</div> : null}
       </nav>
     </aside>

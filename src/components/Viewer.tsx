@@ -5,40 +5,34 @@ import { useCallback, useEffect, useState } from "react";
 import { useFiles } from "@/hooks/useFiles";
 import type { FileEntry } from "@/lib/types";
 
-import { FocusView } from "./FocusView";
 import { OverviewBoard } from "./OverviewBoard";
-import { ProjectDashboard } from "./ProjectDashboard";
+import { ProjectDashboard, queueColumnOpen } from "./ProjectDashboard";
 import { OVERVIEW, projectKey } from "./projectModel";
 import { ProjectRail } from "./ProjectRail";
-import { syntheticFile } from "./utils";
 
 const PROJECT_KEY = "llvProject";
 
-function readHash(): { focusPath: string | null; project: string | null } {
-  const focusMatch = location.hash.match(/^#f=(.+)$/);
-  if (focusMatch) {
+function readHash(): { filePath: string | null; project: string | null } {
+  const fileMatch = location.hash.match(/^#f=(.+)$/);
+  if (fileMatch) {
     try {
-      return { focusPath: decodeURIComponent(focusMatch[1]), project: null };
+      return { filePath: decodeURIComponent(fileMatch[1]), project: null };
     } catch {
-      return { focusPath: focusMatch[1], project: null };
+      return { filePath: fileMatch[1], project: null };
     }
   }
   const projectMatch = location.hash.match(/^#p=(.+)$/);
   if (projectMatch) {
     try {
-      return { focusPath: null, project: decodeURIComponent(projectMatch[1]) };
+      return { filePath: null, project: decodeURIComponent(projectMatch[1]) };
     } catch {
-      return { focusPath: null, project: projectMatch[1] };
+      return { filePath: null, project: projectMatch[1] };
     }
   }
-  return { focusPath: null, project: null };
+  return { filePath: null, project: null };
 }
 
-function writeHash(project: string, focusPath: string | null) {
-  if (focusPath) {
-    history.replaceState(null, "", "#f=" + encodeURIComponent(focusPath));
-    return;
-  }
+function writeHash(project: string) {
   if (project !== OVERVIEW) {
     history.replaceState(null, "", "#p=" + encodeURIComponent(project));
     return;
@@ -49,13 +43,16 @@ function writeHash(project: string, focusPath: string | null) {
 export function Viewer() {
   const files = useFiles();
   const [project, setProject] = useState<string>(OVERVIEW);
-  const [focus, setFocus] = useState<FileEntry | null>(null);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
+  /* Reopening a file whose project is already selected does not change
+     `project`, so ProjectDashboard would never remount or re-read prefs.
+     Bumping this on every same-project open gives it an explicit signal. */
+  const [openNonce, setOpenNonce] = useState(0);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const initial = readHash();
-    if (initial.focusPath) setPendingPath(initial.focusPath);
+    if (initial.filePath) setPendingPath(initial.filePath);
     const savedProject = initial.project ?? localStorage.getItem(PROJECT_KEY);
     if (savedProject) setProject(savedProject);
   }, []);
@@ -63,11 +60,8 @@ export function Viewer() {
   useEffect(() => {
     const onHash = () => {
       const next = readHash();
-      if (next.focusPath) setPendingPath(next.focusPath);
-      else if (next.project) {
-        setProject(next.project);
-        setFocus(null);
-      }
+      if (next.filePath) setPendingPath(next.filePath);
+      else if (next.project) setProject(next.project);
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -76,57 +70,38 @@ export function Viewer() {
 
   const selectProject = useCallback((nextProject: string) => {
     setProject(nextProject);
-    setFocus(null);
     localStorage.setItem(PROJECT_KEY, nextProject);
-    writeHash(nextProject, null);
+    writeHash(nextProject);
   }, []);
 
-  const selectFile = useCallback((file: FileEntry) => {
-    const key = projectKey(file);
-    setProject(key);
-    setFocus(file);
-    localStorage.setItem(PROJECT_KEY, key);
-    writeHash(key, file.path);
-  }, []);
-
-  const backToProject = useCallback(() => {
-    setFocus(null);
-    writeHash(project, null);
-  }, [project]);
+  /* A file open (overview card, deep link) becomes a column of its project. */
+  const openFile = useCallback(
+    (file: FileEntry) => {
+      const key = projectKey(file);
+      queueColumnOpen(key, file.path);
+      selectProject(key);
+      setOpenNonce((value) => value + 1);
+    },
+    [selectProject],
+  );
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!pendingPath || files.length === 0) return;
     const hit = files.find((file) => file.path === pendingPath);
-    selectFile(hit ?? syntheticFile(pendingPath));
+    if (hit) openFile(hit);
     setPendingPath(null);
-  }, [pendingPath, files, selectFile]);
-
-  useEffect(() => {
-    if (!focus) return;
-    const fresh = files.find((file) => file.path === focus.path);
-    if (fresh && fresh !== focus) setFocus(fresh);
-  }, [files, focus]);
+  }, [pendingPath, files, openFile]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   return (
     <div className="flex h-full">
-      {/* The rail hides in focus mode so the reading column centers on the viewport. */}
-      {focus ? null : <ProjectRail files={files} selected={project} onSelect={selectProject} />}
+      <ProjectRail files={files} selected={project} onSelect={selectProject} />
       <main className="flex min-w-0 flex-1 flex-col">
-        {focus ? (
-          <FocusView
-            key={focus.path}
-            file={focus}
-            files={files}
-            projectLabel={projectKey(focus)}
-            onBack={backToProject}
-            onSelect={selectFile}
-          />
-        ) : project === OVERVIEW ? (
-          <OverviewBoard files={files} onSelectProject={selectProject} onSelectFile={selectFile} />
+        {project === OVERVIEW ? (
+          <OverviewBoard files={files} onSelectProject={selectProject} onSelectFile={openFile} />
         ) : (
-          <ProjectDashboard files={files} project={project} onSelect={selectFile} />
+          <ProjectDashboard files={files} project={project} openNonce={openNonce} />
         )}
       </main>
     </div>

@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import type { FileEntry } from "@/lib/types";
 
+import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
@@ -61,13 +62,6 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           {cleanTitle(file.title, 90)}
         </span>
         <ProcessStatusControls file={file} compact />
-        <button
-          className="shrink-0 rounded-[8px] border border-line bg-bg px-2 py-0.5 text-[10.5px] font-semibold text-accent hover:bg-[#ecebfb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          aria-label={`Відкрити ${cleanTitle(file.title, 60)}`}
-          onClick={() => onSelect(file)}
-        >
-          відкрити
-        </button>
         {onClose ? (
           <button
             className="shrink-0 rounded-[8px] border border-line bg-bg px-1.5 py-0.5 text-[10.5px] font-semibold text-dim hover:border-err/40 hover:text-err focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -78,13 +72,14 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
           </button>
         ) : null}
       </header>
-      {file.pid !== null ? <TmuxComposer pid={file.pid} /> : null}
       {tasks.length ? (
-        <div className="shrink-0 border-b border-line bg-[#fbfbfd]">
+        <FlipRow className="shrink-0 border-b border-line bg-[#fbfbfd]" enter="fade">
           {tasks.map((task) => (
-            <TaskStrip key={task.path} file={task} files={files} onSelect={onSelect} />
+            <div key={task.path} data-flip-key={task.path}>
+              <TaskStrip file={task} files={files} onSelect={onSelect} />
+            </div>
           ))}
-        </div>
+        </FlipRow>
       ) : null}
       <LogFeed
         file={file}
@@ -98,12 +93,13 @@ export function BranchPane({ file, files, tasks, onSelect, isRoot, onClose, drag
         setFollow={noop}
         compact
       />
+      <TmuxComposer file={file} />
     </section>
   );
 }
 
 /** Collapsed background-task row: glyph, title, PID chip, kill; click expands an inline mini feed. */
-function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
+export function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
   const [open, setOpen] = useState(false);
   const title = cleanTitle(file.cmdDesc || file.title, 80);
   return (
@@ -122,13 +118,6 @@ function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: FileEntr
           </span>
         </button>
         <ProcessStatusControls file={file} compact />
-        <button
-          className="shrink-0 rounded-[6px] border border-line bg-bg px-1.5 py-0.5 text-[10px] font-semibold text-accent hover:bg-[#ecebfb] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-          aria-label={`Відкрити ${title}`}
-          onClick={() => onSelect(file)}
-        >
-          відкрити
-        </button>
       </div>
       {open ? (
         <div className="flex h-[220px] flex-col border-t border-dashed border-line bg-bg/60">
@@ -147,14 +136,5 @@ function TaskStrip({ file, files, onSelect }: { file: FileEntry; files: FileEntr
         </div>
       ) : null}
     </div>
-  );
-}
-
-/** Parentless background task: a narrow column collapsed to its header row. */
-export function TaskStubColumn({ file, files, onSelect }: { file: FileEntry; files: FileEntry[]; onSelect: (file: FileEntry) => void }) {
-  return (
-    <section className="flex max-h-full min-h-0 flex-col self-start overflow-hidden rounded-[10px] border border-line border-t-2 bg-panel shadow-card border-t-[#9a9aa4]">
-      <TaskStrip file={file} files={files} onSelect={onSelect} />
-    </section>
   );
 }
