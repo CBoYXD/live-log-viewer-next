@@ -62,3 +62,25 @@ export interface ActionEvent {
 export interface ApiError {
   error: string;
 }
+
+/** One rate-limit window (5h session or weekly) of an engine subscription. */
+export interface LimitWindow {
+  usedPercent: number;
+  /** Unix seconds when the window resets, or null when unknown. */
+  resetsAt: number | null;
+}
+
+/** Plan rate limits of one engine, returned by GET /api/limits. */
+export interface EngineLimits {
+  session: LimitWindow | null;
+  weekly: LimitWindow | null;
+  plan: string | null;
+  /** Unix seconds when the numbers were captured. Codex limits come from the
+      newest session transcript, so they can lag behind; null = fetched live. */
+  capturedAt: number | null;
+}
+
+export interface LimitsPayload {
+  claude: EngineLimits | null;
+  codex: EngineLimits | null;
+}

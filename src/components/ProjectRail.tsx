@@ -6,6 +6,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { AccessQrButton } from "./AccessQrButton";
 import { FlipRow } from "./FlipRow";
+import { LimitsFooter } from "./LimitsFooter";
 import { buildProjectSummaries, OVERVIEW } from "./projectModel";
 import { fmtAge } from "./utils";
 
@@ -72,6 +73,7 @@ export function ProjectRail({ files, selected, onSelect }: Props) {
         </FlipRow>
         {!visible.length ? <div className="px-3 py-4 text-center text-[12px] text-dim">Нічого не знайдено</div> : null}
       </nav>
+      <LimitsFooter />
     </aside>
   );
 }
