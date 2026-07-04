@@ -7,11 +7,12 @@ import {
   inboxImageExt,
   MAX_INBOX_IMAGE_BYTES,
   knownLivePids,
+  liveResumePane,
   resolveTarget,
   resumeSpecFor,
   saveInboxImage,
   sendText,
-  spawnAgentWithPrompt,
+  sendToResumedAgent,
 } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
@@ -43,13 +44,23 @@ async function targetForKnownPid(pid: number): Promise<string | null | "unknown"
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse | ApiError>> {
-  const pid = Number(req.nextUrl.searchParams.get("pid"));
-  if (!Number.isInteger(pid) || pid <= 0) {
-    return NextResponse.json({ error: "некоректний pid" }, { status: 400 });
+  const pidRaw = req.nextUrl.searchParams.get("pid");
+  const filePath = req.nextUrl.searchParams.get("path") ?? "";
+  const pid = Number(pidRaw);
+  const hasPid = Number.isInteger(pid) && pid > 0;
+  if (!hasPid && !filePath) {
+    return NextResponse.json({ error: "потрібен pid або path" }, { status: 400 });
   }
-  const target = await targetForKnownPid(pid);
-  if (target === "unknown") return NextResponse.json({ target: null });
-  return NextResponse.json({ target });
+  if (hasPid) {
+    const target = await targetForKnownPid(pid);
+    if (target !== "unknown" && target !== null) return NextResponse.json({ target });
+  }
+  /* A finished conversation has no pid, but its resume window may still run. */
+  if (filePath && pathAllowed(filePath)) {
+    const pane = await liveResumePane(filePath);
+    if (pane) return NextResponse.json({ target: pane.display });
+  }
+  return NextResponse.json({ target: null });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SendResponse | ApiError>> {
@@ -130,8 +141,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     }
     const spec = resumeSpecFor(entry.root, entry.path);
     if (spec) {
-      const spawnedTarget = await spawnAgentWithPrompt(spec, payload);
-      return NextResponse.json({ ok: true, target: spawnedTarget, spawned: true, ...imageField });
+      const sent = await sendToResumedAgent(entry.path, spec, payload);
+      return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned, ...imageField });
     }
 
     /* Subagents and other child records have no resumable session of their
@@ -159,8 +170,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     if (!rootSpec) {
       return NextResponse.json({ error: "коренева сесія недоступна для повідомлення" }, { status: 409 });
     }
-    const spawnedTarget = await spawnAgentWithPrompt(rootSpec, relayText);
-    return NextResponse.json({ ok: true, target: spawnedTarget, spawned: true, ...imageField });
+    const sent = await sendToResumedAgent(root.path, rootSpec, relayText);
+    return NextResponse.json({ ok: true, target: sent.target, spawned: sent.spawned, ...imageField });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

@@ -278,6 +278,115 @@ export function freshSpecFor(engine: AgentEngine, cwd: string): ResumeSpec {
   return { command: resolveBinary("codex"), cwd, windowName: "codex-new" };
 }
 
+/**
+ * Windows opened for resumed conversations, keyed by transcript path. A
+ * resumed agent writes its new turns into a fresh transcript file, so the
+ * conversation the user keeps typing into never gets a live pid of its own —
+ * without this registry every follow-up message would boot yet another
+ * resume window. Persisted like codex lineage so it survives a server restart.
+ */
+const RESUME_PANES_FILE = path.join(os.homedir(), ".claude", "viewer-state", "resume-panes.json");
+
+interface ResumePaneRecord {
+  paneId: string;
+  windowName: string;
+}
+
+let resumePanes: Map<string, ResumePaneRecord> | null = null;
+
+function loadResumePanes(): Map<string, ResumePaneRecord> {
+  if (resumePanes) return resumePanes;
+  resumePanes = new Map();
+  try {
+    const data = JSON.parse(fs.readFileSync(RESUME_PANES_FILE, "utf8")) as Record<string, ResumePaneRecord>;
+    for (const [key, value] of Object.entries(data)) {
+      if (value && typeof value.paneId === "string" && typeof value.windowName === "string") {
+        resumePanes.set(key, value);
+      }
+    }
+  } catch {
+    /* first run or unreadable cache: start empty */
+  }
+  return resumePanes;
+}
+
+function persistResumePanes(): void {
+  if (!resumePanes) return;
+  try {
+    fs.mkdirSync(path.dirname(RESUME_PANES_FILE), { recursive: true });
+    fs.writeFileSync(RESUME_PANES_FILE, JSON.stringify(Object.fromEntries(resumePanes)));
+  } catch {
+    /* best-effort: a lost cache only costs one extra resume window */
+  }
+}
+
+export interface SpawnedPane {
+  /** Stable `%N` pane id used for tmux commands. */
+  paneId: string;
+  /** Human-readable `session:window.pane` shown in the UI. */
+  display: TmuxTarget;
+}
+
+/**
+ * The pane previously opened for this transcript when it still runs the agent.
+ * Pane ids restart when the tmux server restarts, so the pane is trusted only
+ * while the window keeps its resume name and a non-shell foreground process;
+ * anything else drops the stale record.
+ */
+export async function liveResumePane(transcriptPath: string): Promise<SpawnedPane | null> {
+  const record = loadResumePanes().get(transcriptPath);
+  if (!record) return null;
+  const res = await runTmux([
+    "display-message",
+    "-p",
+    "-t",
+    record.paneId,
+    "#{window_name}\t#{pane_current_command}\t#{session_name}:#{window_index}.#{pane_index}",
+  ]).catch(() => null);
+  const parts = res && res.code === 0 ? res.stdout.trim().split("\t") : null;
+  if (!parts || parts.length !== 3 || parts[0] !== record.windowName || SHELL_COMMANDS.has(parts[1] ?? "")) {
+    loadResumePanes().delete(transcriptPath);
+    persistResumePanes();
+    return null;
+  }
+  return { paneId: record.paneId, display: parts[2] ?? record.paneId };
+}
+
+const resumeInFlight = new Map<string, Promise<SpawnedPane>>();
+
+/**
+ * Delivers a message to the conversation's resume window: an already-running
+ * window gets the text pasted in, a boot still in progress is awaited and
+ * joined, and only a transcript with no window at all spawns a new one.
+ */
+export async function sendToResumedAgent(
+  transcriptPath: string,
+  spec: ResumeSpec,
+  text: string,
+): Promise<{ target: TmuxTarget; spawned: boolean }> {
+  const existing = await liveResumePane(transcriptPath);
+  if (existing) {
+    await sendText(existing.paneId, text);
+    return { target: existing.display, spawned: false };
+  }
+  const pending = resumeInFlight.get(transcriptPath);
+  if (pending) {
+    const pane = await pending;
+    await sendText(pane.paneId, text);
+    return { target: pane.display, spawned: false };
+  }
+  const boot = spawnAgentWithPrompt(spec, text);
+  resumeInFlight.set(transcriptPath, boot);
+  try {
+    const pane = await boot;
+    loadResumePanes().set(transcriptPath, { paneId: pane.paneId, windowName: spec.windowName });
+    persistResumePanes();
+    return { target: pane.display, spawned: true };
+  } finally {
+    resumeInFlight.delete(transcriptPath);
+  }
+}
+
 const SPAWN_READY_TIMEOUT_MS = 60_000;
 const SPAWN_POLL_MS = 1_000;
 const SPAWN_STABLE_ROUNDS = 3;
@@ -321,14 +430,14 @@ function screenTail(screen: string): string {
  * the agent CLI — a pane that fell back to the shell would otherwise execute
  * the prompt text as a shell command.
  */
-export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Promise<TmuxTarget> {
+export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
   const session = await activeTmuxSession();
   const spawned = await runTmux([
     "new-window",
     "-d",
     "-P",
     "-F",
-    "#{session_name}:#{window_index}.#{pane_index}",
+    "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}",
     "-t",
     session + ":",
     "-n",
@@ -337,7 +446,9 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
     spec.cwd,
   ]);
   if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "не вдалося відкрити tmux-вікно");
-  const target = spawned.stdout.trim();
+  /* The %N pane id addresses the pane even after window indexes shift; the
+     display form only labels UI messages. */
+  const [target = "", display = ""] = spawned.stdout.trim().split("\t");
   if (!target) throw new Error("tmux не повернув адресу вікна");
 
   /* Type the boot command literally into the fresh shell, then run it. */
@@ -389,7 +500,7 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
     throw new Error(`агент не запустився у вікні: ${screenTail(await paneScreen(target))}`);
   }
   if (text) await sendText(target, text);
-  return target;
+  return { paneId: target, display: display || target };
 }
 
 export interface SavedImage {

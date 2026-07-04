@@ -1,5 +1,6 @@
 "use client";
 
+import { CornerDownRight, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useWheelPan } from "@/hooks/useWheelPan";
@@ -62,19 +63,20 @@ function GroupCrown({
           <span className="shrink-0 rounded-full px-1.5 text-[9px] font-bold" style={badge.style}>{badge.label}</span>
           <span className="min-w-0 truncate text-[11px] font-bold">{cleanTitle(root.title, 60)}</span>
           {count - 1 + quietCount > 0 ? (
-            <span className="shrink-0 text-[10px] font-semibold text-dim">
-              ⤷ {count - 1 + quietCount} {ukPlural(count - 1 + quietCount, "гілка", "гілки", "гілок")}
+            <span className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-semibold text-dim">
+              <CornerDownRight className="h-3 w-3" aria-hidden /> {count - 1 + quietCount}{" "}
+              {ukPlural(count - 1 + quietCount, "гілка", "гілки", "гілок")}
             </span>
           ) : null}
         </button>
         {onResetOrder ? (
           <button
-            className="ml-1.5 self-start rounded-full border border-line bg-panel px-1.5 py-0.5 text-[10px] font-semibold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="ml-1.5 inline-flex h-[22px] w-[22px] items-center justify-center self-start rounded-full border border-line bg-panel text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             title="Скинути ручний порядок колонок"
             aria-label="Скинути ручний порядок колонок"
             onClick={onResetOrder}
           >
-            ⟲
+            <RotateCcw className="h-3.5 w-3.5" aria-hidden />
           </button>
         ) : null}
       </div>
@@ -239,7 +241,7 @@ export function ProjectDashboard({ files, project, openNonce }: Props) {
 
   /* A column never vanishes on its own: every auto column is recorded as a
      manual one, so a branch that goes quiet keeps its place until the user
-     closes it with ✕. Capped so old projects do not accumulate forever. */
+     closes it. Capped so old projects do not accumulate forever. */
   useEffect(() => {
     const prev = prefsRef.current;
     const missing = [...autoPaths].filter((path) => !prev.manual.includes(path) && !prev.hidden.includes(path));

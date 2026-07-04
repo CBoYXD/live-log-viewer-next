@@ -98,8 +98,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
 
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   try {
-    const target = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), prompt);
-    return NextResponse.json({ ok: true, target });
+    const pane = await spawnAgentWithPrompt(freshSpecFor(engine, cwd), prompt);
+    return NextResponse.json({ ok: true, target: pane.display });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
