@@ -1,7 +1,7 @@
 "use client";
 
 import { Loader2, Mic, X } from "@/components/icons";
-import { fmtElapsed, METER_HEIGHT, METER_WIDTH, useDictation, type UseDictationResult } from "@/hooks/useDictation";
+import { fmtElapsed, METER_HEIGHT, METER_WIDTH, type UseDictationResult } from "@/hooks/useDictation";
 
 export interface MicButtonViewProps extends UseDictationResult {
   onText: (text: string) => void;
@@ -12,10 +12,8 @@ export interface MicButtonViewProps extends UseDictationResult {
 
 /**
  * Presentational dictation control driven by a `useDictation` instance handed
- * down by the caller. Exported separately from `MicButton` so a composer that
- * needs to orchestrate its own send button around the same recording (see
- * TmuxComposer) can share one hook instance instead of MicButton owning it
- * privately.
+ * down by the caller, so a composer that orchestrates its own send button
+ * around the same recording (see TmuxComposer) shares one hook instance.
  */
 export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard, onText, busy = false }: MicButtonViewProps) {
   const handleMain = () => {
@@ -64,18 +62,4 @@ export function MicButtonView({ phase, elapsed, canvasRef, start, stop, discard,
       {phase === "busy" ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Mic className="h-4 w-4" aria-hidden />}
     </button>
   );
-}
-
-/**
- * Dictation button for composers: press to record (getUserMedia + MediaRecorder,
- * webm/opus), press again to stop and transcribe through /api/transcribe, which
- * proxies to the ChatGPT backend with the local Codex credentials. Self-contained
- * for callers that only need the mic (see SpawnAgentButton); TmuxComposer lifts
- * `useDictation` itself instead to also drive its send button while recording.
- */
-export function MicButton({ onText, onError }: { onText: (text: string) => void; onError: (message: string) => void }) {
-  /* onUnclaimedText covers the 120s auto-stop, where no stop() promise waits
-     for the transcript — it lands in the input the same way a manual stop does. */
-  const dictation = useDictation({ onError, onUnclaimedText: onText });
-  return <MicButtonView {...dictation} onText={onText} />;
 }

@@ -34,6 +34,9 @@ interface SuggestResponse {
 interface SpawnResponse {
   ok: true;
   target: string;
+  /** Transcript path the fresh session will write, when knowable (claude);
+      the draft pane waits for exactly this file to appear in the scanner. */
+  path: string | null;
 }
 
 /** Security gate for `?src=`: the resolved real path must be a regular .jsonl
@@ -161,7 +164,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
       if (pane.panePid) rememberHandoffPane(pane.panePid, src);
       persistHandoffLineage();
     }
-    return NextResponse.json({ ok: true, target: pane.display });
+    return NextResponse.json({ ok: true, target: pane.display, path: spec.transcript ?? null });
   } catch (error) {
     deleteInboxImages(imagePaths);
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

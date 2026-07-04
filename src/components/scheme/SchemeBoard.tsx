@@ -8,6 +8,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { BranchPane } from "@/components/BranchPane";
+import { DraftAgentPane } from "@/components/DraftAgentPane";
 import { FlowDialog } from "@/components/flows/FlowDialog";
 import { canStartFlow, flowByImplementer } from "@/components/flows/flowModel";
 import { FlowStrip } from "@/components/flows/FlowStrip";
@@ -15,7 +16,16 @@ import { RoundDeck } from "@/components/flows/RoundDeck";
 import type { BranchGroup } from "@/components/projectModel";
 import { activityDot, cleanTitle, engineBadge, fmtAge } from "@/components/utils";
 
-import { buildSchemeLayout, type DeckNode, type MiniStack, type SchemeEdge, type SchemeLayout, type SchemeNode } from "./layout";
+import {
+  buildSchemeLayout,
+  type DeckNode,
+  type DraftNode,
+  type MiniStack,
+  type SchemeEdge,
+  type SchemeLayout,
+  type SchemeNode,
+  type SchemeRect,
+} from "./layout";
 import { type Camera, Minimap } from "./Minimap";
 
 const MIN_Z = 0.12;
@@ -39,10 +49,15 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
+  drafts: string[];
   /** Path to glide the camera to and ring briefly (set by openers). */
   focus: string | null;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
+  onDraftClose: (id: string) => void;
+  /** A draft's agent booted and its transcript arrived: open it as a real node. */
+  onDraftSpawned: (id: string, file: FileEntry) => void;
 }
 
 /** Round-chip click on a strip, delivered to that flow's deck. */
@@ -281,6 +296,41 @@ function NodeShell({
   );
 }
 
+/** A conversation draft as a scheme citizen: positioned like a fresh root node. */
+function DraftShell({
+  draft,
+  project,
+  files,
+  ringed,
+  onDraftClose,
+  onDraftSpawned,
+}: {
+  draft: DraftNode;
+  project: string;
+  files: FileEntry[];
+  ringed: boolean;
+  onDraftClose: (id: string) => void;
+  onDraftSpawned: (id: string, file: FileEntry) => void;
+}) {
+  return (
+    <div
+      data-scheme-node={draft.key}
+      className="scheme-enter absolute"
+      style={{ transform: `translate(${draft.x}px, ${draft.y}px)`, width: draft.w, height: draft.h, transition: MOVE_TRANSITION }}
+    >
+      <div className={`flex h-full ${ringed ? "rounded-[10px] ring-2 ring-accent/60" : ""}`}>
+        <DraftAgentPane
+          draftId={draft.id}
+          project={project}
+          files={files}
+          onClose={() => onDraftClose(draft.id)}
+          onSpawned={(file) => onDraftSpawned(draft.id, file)}
+        />
+      </div>
+    </div>
+  );
+}
+
 /** The review deck as a scheme citizen: positioned like a child node. */
 function DeckShell({
   deck,
@@ -307,6 +357,7 @@ function DeckShell({
 
 const NodesLayer = memo(function NodesLayer({
   layout,
+  project,
   files,
   interactive,
   selected,
@@ -316,8 +367,11 @@ const NodesLayer = memo(function NodesLayer({
   onSelect,
   onClose,
   onFocusRound,
+  onDraftClose,
+  onDraftSpawned,
 }: {
   layout: SchemeLayout;
+  project: string;
   files: FileEntry[];
   interactive: boolean;
   selected: string | null;
@@ -327,6 +381,8 @@ const NodesLayer = memo(function NodesLayer({
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
+  onDraftClose: (id: string) => void;
+  onDraftSpawned: (id: string, file: FileEntry) => void;
 }) {
   return (
     <div className={interactive ? undefined : "pointer-events-none select-none"}>
@@ -335,6 +391,17 @@ const NodesLayer = memo(function NodesLayer({
       ))}
       {layout.decks.map((deck) => (
         <DeckShell key={deck.key} deck={deck} files={files} focus={deckFocus} onSelect={onSelect} />
+      ))}
+      {layout.drafts.map((draft) => (
+        <DraftShell
+          key={draft.key}
+          draft={draft}
+          project={project}
+          files={files}
+          ringed={selected === draft.key || focus === draft.key}
+          onDraftClose={onDraftClose}
+          onDraftSpawned={onDraftSpawned}
+        />
       ))}
       {layout.nodes.map((node) => (
         <NodeShell
@@ -390,7 +457,7 @@ const dist = (a: { x: number; y: number }, b: { x: number; y: number }) => Math.
  * minimap. The camera never re-renders panes: node/edge layers are memoized
  * and far-zoom labels scale through CSS vars.
  */
-export function SchemeBoard({ project, groups, manual, files, flows, focus, onSelect, onClose }: Props) {
+export function SchemeBoard({ project, groups, manual, files, flows, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned }: Props) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [cam, setCam] = useState<Camera>({ x: 0, y: 0, z: 0.5 });
   const [mode, setModeState] = useState<Mode>("select");
@@ -434,7 +501,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
     localStorage.setItem(MODE_KEY, next);
   }, []);
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows), [groups, manual, files, flows]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
@@ -445,12 +512,18 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
      otherwise every camera frame re-renders every pane. */
   const selectRef = useRef(onSelect);
   const closeRef = useRef(onClose);
+  const draftCloseRef = useRef(onDraftClose);
+  const draftSpawnedRef = useRef(onDraftSpawned);
   useEffect(() => {
     selectRef.current = onSelect;
     closeRef.current = onClose;
+    draftCloseRef.current = onDraftClose;
+    draftSpawnedRef.current = onDraftSpawned;
   });
   const stableSelect = useCallback((file: FileEntry) => selectRef.current(file), []);
   const stableClose = useCallback((path: string) => closeRef.current(path), []);
+  const stableDraftClose = useCallback((id: string) => draftCloseRef.current(id), []);
+  const stableDraftSpawned = useCallback((id: string, file: FileEntry) => draftSpawnedRef.current(id, file), []);
 
   useEffect(() => {
     const el = viewportRef.current;
@@ -513,7 +586,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
 
   const fitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
-    if (!rect || !layout.nodes.length) return null;
+    if (!rect || (!layout.nodes.length && !layout.drafts.length)) return null;
     const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / layout.width, (rect.height - 48) / layout.height, 1)));
     return { z, x: (rect.width - layout.width * z) / 2, y: (rect.height - layout.height * z) / 2 };
   }, [layout]);
@@ -539,7 +612,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
   /* Glide a node into view: centered horizontally, its head near the top so
      a tall pane starts readable instead of vertically split. */
   const centerOn = useCallback(
-    (node: SchemeNode, zMin: number) => {
+    (node: SchemeRect, zMin: number) => {
       const rect = viewportRef.current?.getBoundingClientRect();
       if (!rect) return;
       glideTo((c) => {
@@ -556,7 +629,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
 
   /* First layout of a project: restore the saved camera or fit everything. */
   useEffect(() => {
-    if (initedFor.current === project || !layout.nodes.length) return;
+    if (initedFor.current === project || (!layout.nodes.length && !layout.drafts.length)) return;
     initedFor.current = project;
     try {
       const raw = sessionStorage.getItem("llvCam:" + project);
@@ -816,6 +889,7 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
         <EdgesLayer edges={layout.edges} width={layout.width} height={layout.height} />
         <NodesLayer
           layout={layout}
+          project={project}
           files={files}
           interactive={!handLike}
           selected={selected}
@@ -825,6 +899,8 @@ export function SchemeBoard({ project, groups, manual, files, flows, focus, onSe
           onSelect={stableSelect}
           onClose={stableClose}
           onFocusRound={focusRound}
+          onDraftClose={stableDraftClose}
+          onDraftSpawned={stableDraftSpawned}
         />
       </div>
 

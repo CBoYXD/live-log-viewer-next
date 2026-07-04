@@ -26,17 +26,27 @@ const MINI_PAD = 8;
 /* Rows visible before the stack starts scrolling internally. */
 const MINI_MAX = 8;
 
-export interface SchemeNode {
+/** World-space box of anything the camera can glide to. */
+export interface SchemeRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface SchemeNode extends SchemeRect {
   file: FileEntry;
   /** Live background tasks docked inside the pane as collapsed strips. */
   tasks: FileEntry[];
   /** Quiet history lying "under" the node: previous chats, finished tasks. */
   under: FileEntry[];
-  x: number;
-  y: number;
-  w: number;
-  h: number;
   isRoot: boolean;
+}
+
+/** Not-yet-spawned conversation drafted straight on the scheme. */
+export interface DraftNode extends SchemeRect {
+  key: string;
+  id: string;
 }
 
 export interface SchemeEdge {
@@ -84,7 +94,8 @@ export interface SchemeLayout {
   edges: SchemeEdge[];
   stacks: MiniStack[];
   decks: DeckNode[];
-  byPath: Map<string, SchemeNode>;
+  drafts: DraftNode[];
+  byPath: Map<string, SchemeRect>;
   width: number;
   height: number;
 }
@@ -110,6 +121,7 @@ export function buildSchemeLayout(
   manual: FileEntry[],
   files: FileEntry[],
   flows: Flow[] = [],
+  draftIds: string[] = [],
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
@@ -281,16 +293,28 @@ export function buildSchemeLayout(
       ) + GROUP_GAP;
   }
 
+  /* Drafts trail the row like fresh top-level nodes: root-sized, no edges. */
+  const drafts: DraftNode[] = [];
+  for (const id of draftIds) {
+    drafts.push({ key: "draft::" + id, id, x: cursor, y: PAD, w: NODE_W, h: ROOT_H });
+    cursor += NODE_W + GROUP_GAP;
+  }
+
   let bottom = 0;
   for (const node of nodes) bottom = Math.max(bottom, node.y + node.h);
   for (const stack of stacks) bottom = Math.max(bottom, stack.y + stack.h);
   for (const deck of decks) bottom = Math.max(bottom, deck.y + deck.h);
+  for (const draft of drafts) bottom = Math.max(bottom, draft.y + draft.h);
   return {
     nodes,
     edges,
     stacks,
     decks,
-    byPath: new Map(nodes.map((node) => [node.file.path, node])),
+    drafts,
+    byPath: new Map<string, SchemeRect>([
+      ...nodes.map((node) => [node.file.path, node] as const),
+      ...drafts.map((draft) => [draft.key, draft] as const),
+    ]),
     width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W),
     /* Extra room under the last generation for decks and expanded panels. */
     height: bottom + PAD + 140,

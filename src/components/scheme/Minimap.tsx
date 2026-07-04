@@ -79,6 +79,9 @@ export function Minimap({
           {layout.stacks.map((stack) => (
             <rect key={stack.key} x={stack.x} y={stack.y} width={stack.w} height={stack.h} rx={18} fill="#c9c9d1" opacity={0.45} />
           ))}
+          {layout.drafts.map((draft) => (
+            <rect key={draft.key} x={draft.x} y={draft.y} width={draft.w} height={draft.h} rx={18} fill="#9a9aa4" opacity={0.3} />
+          ))}
           {layout.nodes.map((node) => (
             <rect
               key={node.file.path}

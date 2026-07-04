@@ -6,6 +6,7 @@ import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { TaskStrip } from "./BranchPane";
+import { clearDraftStorage } from "./DraftAgentPane";
 import { claimedReviewerPaths } from "./flows/flowModel";
 import { SchemeBoard } from "./scheme/SchemeBoard";
 import { Switchboard } from "./Switchboard";
@@ -14,7 +15,6 @@ import { DeleteProjectButton, QuietFileList } from "./ProjectTrash";
 import { SoundToggle } from "./SoundToggle";
 import { ResidualStrip } from "./TreeAside";
 import { ukPlural } from "./utils";
-import { SpawnAgentButton } from "./SpawnAgentButton";
 
 /** How long an opened node keeps its highlight ring on the scheme. */
 const HIGHLIGHT_MS = 1800;
@@ -35,6 +35,18 @@ interface ColumnPrefs {
 }
 
 const prefsKey = (project: string) => `llvCols:${project}`;
+/* Conversation drafts survive remounts and reloads within the tab: an agent
+   booted from a draft keeps its waiting pane until the transcript arrives. */
+const draftsKey = (project: string) => `llvDrafts:${project}`;
+
+function loadDrafts(project: string): string[] {
+  try {
+    const raw = JSON.parse(sessionStorage.getItem(draftsKey(project)) ?? "[]") as unknown;
+    return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+}
 
 function loadPrefs(project: string): ColumnPrefs {
   try {
@@ -63,6 +75,7 @@ export function ProjectDashboard({ files, flows, project, openNonce }: Props) {
   const highlightTimer = useRef<number | null>(null);
   const pendingFocusRef = useRef<string | null>(null);
   const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [] });
+  const [drafts, setDrafts] = useState<string[]>([]);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Mirrors `prefs` synchronously so the missing-nodes effect below can read
      the value the project-switch load just set, even within the same commit
@@ -72,8 +85,10 @@ export function ProjectDashboard({ files, flows, project, openNonce }: Props) {
   useEffect(() => {
     const loaded = loadPrefs(project);
     prefsRef.current = loaded;
-    /* eslint-disable-next-line react-hooks/set-state-in-effect */
+    /* eslint-disable react-hooks/set-state-in-effect */
     setPrefs(loaded);
+    setDrafts(loadDrafts(project));
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [project, openNonce]);
   useEffect(
     () => () => {
@@ -146,6 +161,34 @@ export function ProjectDashboard({ files, flows, project, openNonce }: Props) {
     flashNode(pending);
   });
 
+  const persistDrafts = (next: string[]) => {
+    setDrafts(next);
+    sessionStorage.setItem(draftsKey(project), JSON.stringify(next));
+  };
+
+  /* The «+ Агент» flow: a draft conversation lands on the scheme as a full
+     pane and the camera glides to it — engine, directory and the first prompt
+     are picked right inside that pane. */
+  const addDraft = () => {
+    /* randomUUID needs a secure context; LAN http access gets the fallback. */
+    const id = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    persistDrafts([...drafts, id]);
+    pendingFocusRef.current = "draft::" + id;
+  };
+
+  const removeDraft = (id: string) => {
+    clearDraftStorage(id);
+    persistDrafts(drafts.filter((item) => item !== id));
+  };
+
+  /* The draft's agent booted and its transcript arrived: the real node takes
+     the draft's place (openSwitchboardFile also covers a cwd from another
+     project by switching there). */
+  const draftSpawned = (id: string, file: FileEntry) => {
+    removeDraft(id);
+    openSwitchboardFile(file);
+  };
+
   const closeNode = (path: string) => {
     /* Closing a chat also puts out its tmux pane; fire-and-forget, since the
        node disappears either way and a pane that survived a failed request
@@ -215,7 +258,7 @@ export function ProjectDashboard({ files, flows, project, openNonce }: Props) {
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  const hasNodes = schemeGroups.length > 0 || manualNodes.length > 0;
+  const hasNodes = schemeGroups.length > 0 || manualNodes.length > 0 || drafts.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -232,7 +275,14 @@ export function ProjectDashboard({ files, flows, project, openNonce }: Props) {
         <span className="truncate text-[11.5px] text-dim">{statusBits.length ? statusBits.join(" · ") : "зараз нічого не працює"}</span>
         <SoundToggle />
         <DeleteProjectButton files={projectFiles} />
-        <SpawnAgentButton project={project} />
+        <button
+          type="button"
+          onClick={addDraft}
+          aria-label="Нова розмова з агентом"
+          className="ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        >
+          <span className="text-[13px] leading-none text-accent">+</span> Агент
+        </button>
       </div>
 
       {dockedTasks.length ? (
@@ -255,9 +305,12 @@ export function ProjectDashboard({ files, flows, project, openNonce }: Props) {
           manual={manualNodes}
           files={files}
           flows={flows}
+          drafts={drafts}
           focus={highlight}
           onSelect={openSwitchboardFile}
           onClose={closeNode}
+          onDraftClose={removeDraft}
+          onDraftSpawned={draftSpawned}
         />
       ) : projectFiles.length ? (
         <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
