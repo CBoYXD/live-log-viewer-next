@@ -108,7 +108,10 @@ export function AccessQrButton() {
         <QrCode className="h-4 w-4" aria-hidden />
       </button>
       {open ? (
-        <div className="absolute right-0 top-full z-50 mt-1.5 flex w-[260px] flex-col gap-2.5 rounded-[12px] border border-line bg-panel p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)]">
+        /* The rail is narrower than the popover on phones, so an absolute
+           right-0 panel would clip past the left viewport edge; below sm it
+           is fixed and centered instead. */
+        <div className="fixed left-1/2 top-12 z-50 flex w-[260px] -translate-x-1/2 flex-col gap-2.5 rounded-[12px] border border-line bg-panel p-3 shadow-[0_8px_28px_rgba(20,20,30,0.14)] sm:absolute sm:left-auto sm:right-0 sm:top-full sm:mt-1.5 sm:translate-x-0">
           {state.status === "idle" ? (
             <span className="text-[11.5px] text-dim">завантаження…</span>
           ) : state.status === "error" ? (
