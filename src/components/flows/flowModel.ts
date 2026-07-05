@@ -1,8 +1,60 @@
+import { useMemo, useSyncExternalStore } from "react";
+
 import { getLocale, type TFunction, translate } from "@/lib/i18n";
 import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { isConversation } from "@/components/projectModel";
+
+/** Fired after any successful flow PATCH so pollers refresh immediately. */
+export const FLOWS_CHANGED_EVENT = "llv:flows-changed";
+
+/*
+ * Flows closed in this tab but possibly not yet reflected by the /api/files
+ * poll (10 s cadence). The close click must clear the reviewer side of the
+ * scheme instantly, so consumers overlay this set on the polled flows via
+ * useEffectiveFlows. Entries become redundant once the server confirms; the
+ * set stays tiny (ids of flows closed this session).
+ */
+const locallyClosed = new Set<string>();
+let locallyClosedSnapshot: ReadonlySet<string> = locallyClosed;
+const closeListeners = new Set<() => void>();
+
+function markFlowClosedLocally(id: string): void {
+  if (locallyClosed.has(id)) return;
+  locallyClosed.add(id);
+  locallyClosedSnapshot = new Set(locallyClosed);
+  for (const listener of closeListeners) listener();
+}
+
+function subscribeLocallyClosed(listener: () => void): () => void {
+  closeListeners.add(listener);
+  return () => closeListeners.delete(listener);
+}
+
+const locallyClosedServerSnapshot: ReadonlySet<string> = new Set();
+
+/**
+ * The polled flows with this tab's optimistic closes applied: a flow closed
+ * here renders as closed at once instead of waiting out the poll interval.
+ * Mapped (state → closed) rather than filtered, so reviewer transcripts stay
+ * claimed by their rounds and never resurface as standalone nodes.
+ */
+export function useEffectiveFlows(flows: Flow[]): Flow[] {
+  const closed = useSyncExternalStore(
+    subscribeLocallyClosed,
+    () => locallyClosedSnapshot,
+    () => locallyClosedServerSnapshot,
+  );
+  return useMemo(() => {
+    if (!flows.some((flow) => closed.has(flow.id) && flow.state !== "closed")) return flows;
+    return flows.map((flow) =>
+      closed.has(flow.id) && flow.state !== "closed"
+        ? { ...flow, state: "closed" as FlowState, closedAt: flow.closedAt ?? new Date().toISOString() }
+        : flow,
+    );
+  }, [flows, closed]);
+}
 
 /** Flows that still occupy their implementer's node on the scheme. */
 export function isActiveFlow(flow: Flow): boolean {
@@ -98,7 +150,13 @@ export async function patchFlow(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (res.ok) return null;
+    if (res.ok) {
+      /* A close clears the reviewer side optimistically; every mutation asks
+         the poller to refresh now instead of waiting out its interval. */
+      if (body.action === "close") markFlowClosedLocally(id);
+      window.dispatchEvent(new Event(FLOWS_CHANGED_EVENT));
+      return null;
+    }
     const json = (await res.json().catch(() => null)) as { error?: string } | null;
     return json?.error ?? translate(getLocale(), "flowModel.failed", { status: res.status });
   } catch {

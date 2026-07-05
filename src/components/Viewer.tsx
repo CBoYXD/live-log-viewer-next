@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { useAgentChimes } from "@/hooks/useAgentChimes";
 import { useArchivedProjects } from "@/hooks/useArchivedProjects";
+import { useEffectiveFlows } from "@/components/flows/flowModel";
 import { useFiles } from "@/hooks/useFiles";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
@@ -48,7 +49,10 @@ function writeHash(project: string) {
 
 export function Viewer() {
   const { t } = useLocale();
-  const { files, flows } = useFiles();
+  const { files, flows: polledFlows } = useFiles();
+  /* This tab's optimistic flow closes apply before anything renders: the X
+     on a flow strip clears the reviewer side of the scheme instantly. */
+  const flows = useEffectiveFlows(polledFlows);
   useAgentChimes(files);
   const { archivedProjects, archiveProject, unarchiveProject } = useArchivedProjects(files);
   const isMobile = useIsMobile();

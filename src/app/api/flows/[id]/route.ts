@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { cancelRound, patchFlow } from "@/lib/flows/commands";
+import { cancelRound, closeFlow, patchFlow } from "@/lib/flows/commands";
 import type { Flow, PatchFlowRequest } from "@/lib/flows/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -26,7 +26,8 @@ export async function PATCH(
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
   }
   const { id } = await ctx.params;
-  const result = body.action === "cancel-round" ? await cancelRound(id) : patchFlow(id, body);
+  const result =
+    body.action === "cancel-round" ? await cancelRound(id) : body.action === "close" ? await closeFlow(id) : patchFlow(id, body);
   if (!result.flow) return NextResponse.json({ error: result.error ?? "не вдалося змінити флоу" }, { status: result.status ?? 400 });
   return NextResponse.json({ ok: true, flow: result.flow });
 }

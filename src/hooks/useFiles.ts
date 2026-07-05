@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { FLOWS_CHANGED_EVENT } from "@/components/flows/flowModel";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry, FilesResponse } from "@/lib/types";
 
@@ -38,9 +39,14 @@ export function useFiles(): FilesData {
     };
     void load();
     const t = setInterval(load, POLL_MS);
+    /* Flow mutations (close, advance, …) refresh out of band: the strip must
+       not sit on stale state for up to a full poll interval. */
+    const onFlowsChanged = () => void load();
+    window.addEventListener(FLOWS_CHANGED_EVENT, onFlowsChanged);
     return () => {
       alive = false;
       clearInterval(t);
+      window.removeEventListener(FLOWS_CHANGED_EVENT, onFlowsChanged);
     };
   }, []);
   return data;

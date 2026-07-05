@@ -11,7 +11,7 @@ import { forgetHeadlessReview } from "./exec";
 import { resolveBaseRef } from "./git";
 import { kickoffPrompt } from "./prompts";
 import { loadFlows, loadPresets, saveFlows } from "./store";
-import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig } from "./types";
+import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
 
 /**
  * User-facing flow commands: creating a flow from an HTTP request and the
@@ -97,10 +97,37 @@ function noteFromRequest(req: PatchFlowRequest): string | null {
 }
 
 /**
- * Stops the round's reviewer mid-run: the headless child gets killed through
- * its run registry, a pane reviewer loses its tmux pane. The flow lands in
- * needs_decision, where retry-round (optionally with a user note for the
- * next reviewer) or extend/close already exist.
+ * Kills whatever executes the round's review right now: the headless child
+ * through its run registry, a pane reviewer through its tmux pane. Best
+ * effort — the pane may already be gone. The pane handle captured at spawn
+ * is authoritative (it exists before the scanner attributes a transcript);
+ * the window-name check guards against pane-id reuse after a tmux server
+ * restart. The transcript lookup is the fallback for rounds persisted before
+ * the handle existed.
+ */
+async function stopReviewer(flow: Flow, round: Round): Promise<void> {
+  forgetHeadlessReview(flow.id, round.n);
+  if (flow.reviewerMode !== "pane") return;
+  try {
+    const pane = round.reviewerPane;
+    if (pane) {
+      const info = await paneInfo(pane.paneId);
+      if (info && info.windowName === pane.windowName && !isShellCommand(info.command)) {
+        await killPane(pane.paneId);
+      }
+    } else if (round.reviewerPath) {
+      const target = await livePaneTarget(round.reviewerPath);
+      if (target !== null) await killPane(target);
+    }
+  } catch {
+    /* pane already closed */
+  }
+}
+
+/**
+ * Stops the round's reviewer mid-run. The flow lands in needs_decision,
+ * where retry-round (optionally with a user note for the next reviewer) or
+ * extend/close already exist.
  */
 export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: string; status?: number }> {
   const flows = loadFlows();
@@ -110,31 +137,28 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   if (flow.state !== "reviewing" || !round) {
     return { error: "no reviewer is running for this flow", status: 409 };
   }
-  forgetHeadlessReview(flow.id, round.n);
-  if (flow.reviewerMode === "pane") {
-    /* Best-effort: the pane may already be gone — the cancel still stands.
-       The pane handle captured at spawn is authoritative (it exists before
-       the scanner attributes a transcript); the window-name check guards
-       against pane-id reuse after a tmux server restart. The transcript
-       lookup is the fallback for rounds persisted before the handle existed. */
-    try {
-      const pane = round.reviewerPane;
-      if (pane) {
-        const info = await paneInfo(pane.paneId);
-        if (info && info.windowName === pane.windowName && !isShellCommand(info.command)) {
-          await killPane(pane.paneId);
-        }
-      } else if (round.reviewerPath) {
-        const target = await livePaneTarget(round.reviewerPath);
-        if (target !== null) await killPane(target);
-      }
-    } catch {
-      /* pane already closed */
-    }
-  }
+  await stopReviewer(flow, round);
   round.error = "cancelled by user";
   flow.state = "needs_decision";
   flow.stateDetail = "round cancelled by user";
+  saveFlows(flows);
+  return { flow };
+}
+
+/**
+ * One-click teardown: whatever the flow is doing, stop the reviewer that may
+ * still run and close the loop. The implementer session is untouched — only
+ * the reviewer side goes away.
+ */
+export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: string; status?: number }> {
+  const flows = loadFlows();
+  const flow = flows.find((item) => item.id === id);
+  if (!flow) return { error: "flow not found", status: 404 };
+  const round = lastRound(flow);
+  if (round && round.verdict === null && !round.error) await stopReviewer(flow, round);
+  flow.state = "closed";
+  flow.closedAt = isoNow();
+  flow.stateDetail = null;
   saveFlows(flows);
   return { flow };
 }
@@ -222,11 +246,9 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.closedAt = null;
     flow.state = "waiting_ready";
     flow.stateDetail = null;
-  } else if (req.action === "close") {
-    flow.state = "closed";
-    flow.closedAt = isoNow();
-    flow.stateDetail = null;
   }
+  /* "close" and "cancel-round" never reach this function — the route sends
+     them to closeFlow/cancelRound, which also stop a running reviewer. */
   if (round && flow.state === "spawning") round.error = null;
   saveFlows(flows);
   return { flow };

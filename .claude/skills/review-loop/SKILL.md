@@ -75,7 +75,7 @@ From an agent:
   round from `waiting_ready`), `retry-round` (re-run the current round from
   `needs_decision`), `cancel-round` (stop a running reviewer mid-round; the
   flow lands in `needs_decision`), `extend` (+N rounds at the limit),
-  `another-round`, `close`, `set-round-limit` (absolute limit via `rounds`,
+  `another-round`, `close` (also stops a still-running reviewer — one click removes the reviewer side, the implementer keeps working), `set-round-limit` (absolute limit via `rounds`,
   0 = unlimited). `advance` and `retry-round` take an optional `note` string
   delivered to the next reviewer as the round's ready note — use it to steer
   a re-review after cancelling.
