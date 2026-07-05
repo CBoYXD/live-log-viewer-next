@@ -1,16 +1,16 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { attentionId } from "@/components/attention";
 
+import { statePath } from "@/lib/configDir";
+
 import type { FileEntry } from "./types";
 
-const STATE_DIR = path.join(os.homedir(), ".claude", "viewer-state");
-const KEYS_FILE = path.join(STATE_DIR, "push-keys.json");
-const SUBS_FILE = path.join(STATE_DIR, "push-subscriptions.json");
-const SENT_FILE = path.join(STATE_DIR, "push-sent.json");
+const KEYS_FILE = statePath("push-keys.json");
+const SUBS_FILE = statePath("push-subscriptions.json");
+const SENT_FILE = statePath("push-sent.json");
 const WAITING_PUSH_DEBOUNCE_SECONDS = 60;
 const PUSH_TIMEOUT_MS = 3_000;
 

@@ -201,7 +201,9 @@ Question visibility rides on the normal `/api/files` poll. Feed cards live in
 `src/components/feed/QuestionCard.tsx`; overview promotion is handled by the
 switchboard/project rail state. In-app notifications use the page title, a
 dismissible toast, and the question chime. Closed-tab notifications use the
-Push API: VAPID keys and subscriptions live under `~/.claude/viewer-state`,
+Push API: VAPID keys and subscriptions live under the viewer state dir
+(`~/.config/agent-log-viewer/state`, legacy `~/.claude/viewer-state` migrated on
+first run),
 payloads are encrypted with `aes128gcm`, and the service worker opens the
 deep link for the waiting session.
 
@@ -213,7 +215,7 @@ engine, kind, fmt, parent, mtime, size, activity, model, cmd, cmdDesc).
 semantics as prototype `/log` (MAX_CHUNK 768 KiB, offset reset, utf-8 replace).
 
 `src/app/api/inbox/route.ts` — GET `?name` serves the bytes of a composer-saved
-`~/.claude/viewer-inbox` image (feed cards for image paths in user messages);
+`~/.config/agent-log-viewer/inbox` image (feed cards for image paths in user messages);
 DELETE `?name` removes it from disk behind the same-origin gate, after an
 explicit confirmation in the UI. Only a bare whitelisted-image basename is
 accepted (`src/lib/inbox.ts`), so nothing outside the inbox dir is reachable.

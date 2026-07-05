@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import type { ResumeSpec } from "@/lib/agent/cli";
+import { statePath } from "@/lib/configDir";
 import { logEvent } from "@/lib/events";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 import { INBOX_DIR } from "@/lib/inbox";
@@ -349,7 +349,7 @@ export async function activeTmuxSession(): Promise<string> {
  * without this registry every follow-up message would boot yet another
  * resume window. Persisted like codex lineage so it survives a server restart.
  */
-const RESUME_PANES_FILE = path.join(os.homedir(), ".claude", "viewer-state", "resume-panes.json");
+const RESUME_PANES_FILE = statePath("resume-panes.json");
 
 interface ResumePaneRecord {
   paneId: string;

@@ -2,11 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import type { EngineLimits, LimitsPayload, LimitWindow } from "./types";
 
 const HOME = os.homedir();
 const CLAUDE_CREDENTIALS = path.join(HOME, ".claude", ".credentials.json");
-const LIMITS_CACHE_FILE = path.join(HOME, ".claude", "viewer-state", "limits-cache.json");
+const LIMITS_CACHE_FILE = statePath("limits-cache.json");
 const CODEX_SESSIONS = path.join(HOME, ".codex", "sessions");
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 

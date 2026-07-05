@@ -25,7 +25,7 @@ one action, composable from stages.
 - `Flow` state machine with `tickFlows()` polling, headless/pane reviewers,
   round artifacts, findings relay (`src/lib/flows/engine.ts`, `exec.ts`).
 - Role config `{engine, model, effort}` + presets
-  (`~/.claude/viewer-state/review-loop-presets.json`, `store.ts`).
+  (`~/.config/agent-log-viewer/state/review-loop-presets.json`, `store.ts`).
 - Agent boot specs with model/effort/read-only options (`freshSpecFor` in
   `src/lib/agent/cli.ts`), pane spawn + verified prompt paste
   (`spawnAgentWithPrompt` in `src/lib/tmux.ts`), delivery ladder
@@ -93,7 +93,7 @@ merge conflict) park the workflow in `needs_decision` with the error as
 `stateDetail`. *Why:* user decision — «завжди в кінці PR», with auto-merge
 as the selectable alternative for low-ceremony repos.
 
-**W8 — Templates live in `~/.claude/viewer-state/workflow-templates.json`.**
+**W8 — Templates live in `~/.config/agent-log-viewer/state/workflow-templates.json`.**
 Same pattern as flow presets: the picker lists them, editing happens in the
 file (by hand or by an agent); a CRUD editor UI is deferred. *Why:* templates
 change rarely; the daily surface is picker + task textarea. File schema below.

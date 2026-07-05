@@ -1,16 +1,15 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 
 import type { FinishAction, ImplementStage, ReviewStage, Workflow, WorkflowStage, WorkflowTemplate } from "./types";
 
-const STATE_DIR = process.env.LLV_STATE_DIR || path.join(os.homedir(), ".claude", "viewer-state");
-const WORKFLOWS_FILE = path.join(STATE_DIR, "workflows.json");
-const TEMPLATES_FILE = path.join(STATE_DIR, "workflow-templates.json");
-const ARTIFACT_DIR = path.join(STATE_DIR, "workflows");
+const WORKFLOWS_FILE = statePath("workflows.json");
+const TEMPLATES_FILE = statePath("workflow-templates.json");
+const ARTIFACT_DIR = statePath("workflows");
 
 /** The hard fixer default (W5): cheap fast hands for applying findings. */
 export const DEFAULT_FIXER: RoleConfig = { engine: "codex", model: null, effort: "low" };

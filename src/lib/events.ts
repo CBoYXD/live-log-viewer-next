@@ -1,6 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { statePath } from "@/lib/configDir";
 
 /**
  * Append-only NDJSON log of viewer operations (spawn, send, interrupt, kill,
@@ -9,7 +10,7 @@ import path from "node:path";
  * scraping and TUI drift make failures otherwise unreproducible. Reading it
  * is a human/debugging affair; nothing in the viewer parses it back.
  */
-const EVENTS_FILE = path.join(os.homedir(), ".claude", "viewer-state", "events.ndjson");
+const EVENTS_FILE = statePath("events.ndjson");
 const ROTATE_BYTES = 4 * 1024 * 1024;
 
 export type ViewerEventAction =

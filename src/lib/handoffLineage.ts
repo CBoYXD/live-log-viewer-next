@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
+import { statePath } from "@/lib/configDir";
 import { pidAlive } from "@/lib/scanner/process";
 
 /**
@@ -15,7 +15,7 @@ import { pidAlive } from "@/lib/scanner/process";
  * child link is then persisted by path (like codex lineage), so it survives
  * both the process exit and a server restart.
  */
-const LINEAGE_FILE = path.join(os.homedir(), ".claude", "viewer-state", "handoff-lineage.json");
+const LINEAGE_FILE = statePath("handoff-lineage.json");
 const MAX_CHILDREN = 2000;
 
 interface StoreShape {

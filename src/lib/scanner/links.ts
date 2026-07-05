@@ -1,6 +1,7 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { statePath } from "@/lib/configDir";
 
 import {
   handoffParentForChild,
@@ -237,7 +238,7 @@ const ANCESTRY_MAX_DEPTH = 15;
  * The link observed while live is remembered — in-process for the session and
  * on disk so it also survives a server restart.
  */
-const LINEAGE_FILE = path.join(os.homedir(), ".claude", "viewer-state", "codex-lineage.json");
+const LINEAGE_FILE = statePath("codex-lineage.json");
 const LINEAGE_MAX_ENTRIES = 2000;
 const lineageCache = globalCache<string>("codex-lineage");
 let lineageLoaded = false;

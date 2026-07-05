@@ -11,7 +11,7 @@ type View = "chip" | "thumb" | "full";
 type Gone = "deleted" | "missing";
 
 /**
- * Attachment card for an image the composer stored under ~/.claude/viewer-inbox
+ * Attachment card for an image the composer stored in the viewer inbox dir
  * and delivered to the agent as a file path. The transcript only carries the
  * path, so the bytes stream through /api/inbox; the card also offers a
  * confirmed delete that removes the file from disk — inbox files otherwise

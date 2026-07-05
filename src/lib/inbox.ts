@@ -1,8 +1,9 @@
-import os from "node:os";
 import path from "node:path";
 
+import { inboxDir } from "@/lib/configDir";
+
 /** Where the composer stores pasted images before handing agents their paths. */
-export const INBOX_DIR = path.join(os.homedir(), ".claude", "viewer-inbox");
+export const INBOX_DIR = inboxDir();
 
 /* Serve-side mime map. `jpeg` is accepted alongside `jpg` for files that
    predate the current save-side extension normalisation. */

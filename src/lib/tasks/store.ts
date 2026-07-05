@@ -1,12 +1,12 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { statePath } from "@/lib/configDir";
 
 import type { AssignmentState, BoardTask, TaskAssignment, TaskStatus } from "./types";
 
-const STATE_DIR = path.join(os.homedir(), ".claude", "viewer-state");
-export const TASKS_FILE = path.join(STATE_DIR, "tasks.json");
+export const TASKS_FILE = statePath("tasks.json");
 
 type TasksFile = { tasks?: unknown };
 

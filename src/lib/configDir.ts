@@ -40,3 +40,48 @@ function resolveWithFallback(root: string, name: string): string {
   if (fs.existsSync(legacy)) return legacy;
   return preferred;
 }
+
+/* Viewer-owned mutable state used to live under ~/.claude/viewer-state and
+   ~/.claude/viewer-inbox — inside another tool's directory. It now lives in
+   the app's own config dir; the first access copies the legacy content over,
+   so flows, workflows, tasks, push subscriptions and inbox images survive
+   the move. The legacy dirs are left in place untouched. */
+const migrated = new Set<string>();
+
+/** Copy-once move of a legacy dir into its new home; exported for tests. */
+export function migrateLegacyDir(target: string, legacy: string): void {
+  if (migrated.has(target)) return;
+  migrated.add(target);
+  try {
+    if (fs.existsSync(target) || !fs.existsSync(legacy)) return;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(legacy, target, { recursive: true });
+  } catch {
+    /* best-effort: a failed copy just means starting with empty state */
+  }
+}
+
+/**
+ * Root of the viewer's mutable state (flows, workflows, tasks, lineage,
+ * events, push keys, limits cache). LLV_STATE_DIR overrides it wholesale —
+ * tests and sandboxed runs point it at a scratch dir.
+ */
+export function stateDir(): string {
+  const override = process.env.LLV_STATE_DIR;
+  if (override) return override;
+  const dir = path.join(configRoot(), APP_DIR, "state");
+  migrateLegacyDir(dir, path.join(os.homedir(), ".claude", "viewer-state"));
+  return dir;
+}
+
+/** A file or subdirectory inside the viewer state dir. */
+export function statePath(...segments: string[]): string {
+  return path.join(stateDir(), ...segments);
+}
+
+/** Composer-pasted images the agents receive as file paths. */
+export function inboxDir(): string {
+  const dir = path.join(configRoot(), APP_DIR, "inbox");
+  migrateLegacyDir(dir, path.join(os.homedir(), ".claude", "viewer-inbox"));
+  return dir;
+}

@@ -1,14 +1,14 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+
+import { statePath } from "@/lib/configDir";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
-const STATE_DIR = process.env.LLV_STATE_DIR || path.join(os.homedir(), ".claude", "viewer-state");
-const FLOWS_FILE = path.join(STATE_DIR, "flows.json");
-const PRESETS_FILE = path.join(STATE_DIR, "review-loop-presets.json");
-const FLOW_ARTIFACT_DIR = path.join(STATE_DIR, "flows");
+const FLOWS_FILE = statePath("flows.json");
+const PRESETS_FILE = statePath("review-loop-presets.json");
+const FLOW_ARTIFACT_DIR = statePath("flows");
 
 const SEEDED_PRESETS: FlowPreset[] = [
   {
