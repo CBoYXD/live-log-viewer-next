@@ -416,6 +416,7 @@ function NodeShell({
   onClose,
   onFocusRound,
   onHandoff,
+  onExpand,
 }: {
   node: SchemeNode;
   files: FileEntry[];
@@ -429,6 +430,8 @@ function NodeShell({
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
   onHandoff?: (file: FileEntry) => void;
+  /** Header control: open this conversation as the full-window overlay. */
+  onExpand: (path: string) => void;
 }) {
   const { t } = useLocale();
   const [underOpen, setUnderOpen] = useState(false);
@@ -478,6 +481,7 @@ function NodeShell({
           onSelect={onSelect}
           isRoot={node.isRoot}
           onClose={() => onClose(node.file.path)}
+          onToggleExpand={() => onExpand(node.file.path)}
         />
       </div>
       {flow ? <RoleTag role="implementer" active={activeLoopRole(flow) === "implementer"} /> : null}
@@ -589,6 +593,7 @@ export const NodesLayer = memo(function NodesLayer({
   onDraftClose,
   onDraftSpawned,
   onHandoff,
+  onExpand,
 }: {
   layout: SchemeLayout;
   project: string;
@@ -609,6 +614,8 @@ export const NodesLayer = memo(function NodesLayer({
   onDraftClose: (id: string) => void;
   onDraftSpawned: (id: string, file: FileEntry) => void;
   onHandoff?: (file: FileEntry) => void;
+  /** Opens a conversation as the full-window overlay (desktop panes only). */
+  onExpand: (path: string) => void;
 }) {
   /* A stack or deck stays lit when any conversation inside it is in the
      queue — a stalled branch may live in a mini stack, and a blocked
@@ -672,6 +679,7 @@ export const NodesLayer = memo(function NodesLayer({
             onClose={onClose}
             onFocusRound={onFocusRound}
             onHandoff={onHandoff}
+            onExpand={onExpand}
           />
         ),
       )}

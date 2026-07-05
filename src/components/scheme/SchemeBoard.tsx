@@ -7,8 +7,10 @@ import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
+import { cleanTitle } from "@/components/utils";
 
 import { buildSchemeLayout } from "./layout";
 import { Minimap } from "./Minimap";
@@ -111,6 +113,36 @@ export function SchemeBoard({
 
   const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
+
+  /* One conversation expanded full-window at a time. React state only — never
+     persisted, gone on reload; the board underneath stays mounted, so camera,
+     selection and column prefs survive the round trip untouched. */
+  const [expanded, setExpanded] = useState<string | null>(null);
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    setExpanded(null);
+  }, [project]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  /* The overlay pane re-derives from the layout each poll, so its feed stays
+     live; a node that left the layout (closed, deleted) drops the overlay. */
+  const expandedNode = expanded ? (layout.nodes.find((node) => node.file.path === expanded) ?? null) : null;
+  const overlayOpen = expandedNode !== null;
+  /* Esc collapses the overlay. Capture phase, so the camera's own Escape
+     handler never sees the press and the board selection stays. Presses
+     inside text fields keep their meaning for the field. */
+  useEffect(() => {
+    if (!overlayOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const el = event.target as HTMLElement | null;
+      if (el && (["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName) || el.isContentEditable)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setExpanded(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [overlayOpen]);
   const [deckFocus, setDeckFocus] = useState<DeckFocus | null>(null);
   const focusRound = useCallback((flowId: string, round: number) => {
     setDeckFocus((prev) => ({ flowId, round, nonce: (prev?.nonce ?? 0) + 1 }));
@@ -147,6 +179,13 @@ export function SchemeBoard({
   const stableHandoff = useCallback((file: FileEntry) => handoffRef.current?.(file), []);
   /* The handle renders only when the opener wired a handler (not in map mode). */
   const handoffForNodes = onHandoff ? stableHandoff : undefined;
+  const stableExpand = useCallback((path: string) => setExpanded(path), []);
+  /* Opening another conversation from inside the overlay (agent links,
+     subagent chips) collapses it first, so the board jump stays visible. */
+  const overlaySelect = useCallback((file: FileEntry) => {
+    setExpanded(null);
+    selectRef.current(file);
+  }, []);
 
   const {
     cam,
@@ -169,6 +208,7 @@ export function SchemeBoard({
   const tile = 24 * cam.z;
 
   return (
+    <>
     <div
       ref={viewportRef}
       className={`relative min-h-0 flex-1 overflow-hidden ${
@@ -228,6 +268,7 @@ export function SchemeBoard({
           onDraftClose={stableDraftClose}
           onDraftSpawned={stableDraftSpawned}
           onHandoff={handoffForNodes}
+          onExpand={stableExpand}
         />
       </div>
 
@@ -263,5 +304,28 @@ export function SchemeBoard({
 
       <Minimap layout={layout} cam={cam} vp={vp} onJump={jump} />
     </div>
+    {/* The full-window conversation: the same pane component over the whole
+        viewport, with the live feed and the composer of exactly this
+        conversation. Sibling of the viewport, so its clicks never reach the
+        canvas pan/select handlers. */}
+    {expandedNode ? (
+      <div
+        className="fixed inset-0 z-40 flex flex-col bg-bg p-3"
+        role="dialog"
+        aria-modal="true"
+        aria-label={cleanTitle(expandedNode.file.title, 90)}
+      >
+        <BranchPane
+          file={expandedNode.file}
+          files={files}
+          tasks={expandedNode.tasks}
+          onSelect={overlaySelect}
+          isRoot={expandedNode.isRoot}
+          expanded
+          onToggleExpand={() => setExpanded(null)}
+        />
+      </div>
+    ) : null}
+    </>
   );
 }

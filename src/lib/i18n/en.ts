@@ -473,6 +473,8 @@ export const en = {
   "branch.toggleBackground": "{action} background task {title}",
   "branch.collapse": "Collapse",
   "branch.expand": "Expand",
+  "branch.expandFull": "Expand conversation {title} to the full window",
+  "branch.collapseFull": "Back to the canvas (Esc)",
 
   // TreeAside
   "tree.quiet": "Quiet conversations and tasks",

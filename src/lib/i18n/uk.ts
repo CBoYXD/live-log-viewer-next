@@ -441,6 +441,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "branch.toggleBackground": "{action} фонову задачу {title}",
   "branch.collapse": "Згорнути",
   "branch.expand": "Розгорнути",
+  "branch.expandFull": "Розгорнути розмову {title} на все вікно",
+  "branch.collapseFull": "Повернутися до полотна (Esc)",
 
   "tree.quiet": "Тихі розмови й задачі",
 
