@@ -30,6 +30,12 @@ interface Props {
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
       even though `project` itself did not change. */
   openNonce: number;
+  /** Attention-queue jump: glide the board to this node and ring it. The nonce
+      re-flashes repeated jumps to the same path; prefs stay untouched — a
+      read-only jump must not mutate manual column state. */
+  focusRequest?: { path: string; nonce: number } | null;
+  /** «Show only needs me»: non-null dims every scheme node not in the set. */
+  attentionPaths?: ReadonlySet<string> | null;
   /** The project is shelved: hidden from the rail and the overview. */
   archived: boolean;
   onArchive: (project: string) => void;
@@ -81,7 +87,18 @@ function gotoProject(project: string) {
   location.hash = "#p=" + encodeURIComponent(project);
 }
 
-export function ProjectDashboard({ files, flows, project, openNonce, archived, onArchive, onUnarchive, onMenu }: Props) {
+export function ProjectDashboard({
+  files,
+  flows,
+  project,
+  openNonce,
+  focusRequest,
+  attentionPaths,
+  archived,
+  onArchive,
+  onUnarchive,
+  onMenu,
+}: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const highlightTimer = useRef<number | null>(null);
@@ -163,6 +180,13 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
     if (highlightTimer.current) window.clearTimeout(highlightTimer.current);
     highlightTimer.current = window.setTimeout(() => setHighlight(null), HIGHLIGHT_MS);
   };
+
+  /* An attention jump rides the same channel as switchboard opens: the ref is
+     set here and the every-render effect below flashes it, whether the node is
+     already in the layout or enters it on this render. */
+  useEffect(() => {
+    if (focusRequest) pendingFocusRef.current = focusRequest.path;
+  }, [focusRequest]);
 
   /* A node added from the switchboard enters the layout on the next render;
      flash it then so the camera has something to glide to. */
@@ -374,6 +398,7 @@ export function ProjectDashboard({ files, flows, project, openNonce, archived, o
             flows={flows}
             drafts={drafts}
             focus={highlight}
+            attentionPaths={attentionPaths}
             onSelect={openSwitchboardFile}
             onClose={closeNode}
             onDraftClose={removeDraft}

@@ -185,6 +185,15 @@ export function Viewer() {
      drops out without moving the pointer's neighbors (D12). */
   const cycleRef = useRef<string | null>(null);
 
+  /* Membership key first, Set second: polls rebuild the queue array, but the
+     set identity only moves when membership does, so the memoized node layers
+     never re-render for an unchanged filter (D6). */
+  const attentionKey = useMemo(() => queue.map((item) => item.file.path).sort().join("\n"), [queue]);
+  const attentionPaths = useMemo<ReadonlySet<string> | null>(
+    () => (attentionFilter ? new Set(attentionKey.split("\n").filter(Boolean)) : null),
+    [attentionFilter, attentionKey],
+  );
+
   /* N never leaves the current project (D4): the same items and order
      buildAttentionQueue(files, now, project) yields, taken off the global memo. */
   const projectQueue = useMemo(
@@ -363,6 +372,8 @@ export function Viewer() {
             flows={flows}
             project={project}
             openNonce={openNonce}
+            focusRequest={focusRequest}
+            attentionPaths={attentionPaths}
             archived={archivedProjects.has(project)}
             onArchive={archiveProject}
             onUnarchive={unarchiveProject}

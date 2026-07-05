@@ -30,6 +30,8 @@ interface Props {
   focus: string | null;
   /** Path to ring without moving the camera, used by the mobile full-map overlay. */
   ring?: string | null;
+  /** «Show only needs me» filter: non-null dims every shell without a queue member. */
+  attentionPaths?: ReadonlySet<string> | null;
   onSelect: (file: FileEntry) => void;
   /** Optional map-mode node pick handler; receives the selected node key. */
   onNodePick?: (key: string) => void;
@@ -87,6 +89,7 @@ export function SchemeBoard({
   drafts,
   focus,
   ring,
+  attentionPaths,
   onSelect,
   onNodePick,
   onClose,
@@ -97,6 +100,14 @@ export function SchemeBoard({
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
   const [selected, setSelected] = useState<string | null>(null);
+
+  /* A focus jump also selects its node (D9): the selection ring stays after
+     the 1.8 s highlight expires, marking where the camera landed. */
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (focus) setSelected(focus);
+  }, [focus]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts), [groups, manual, files, flows, drafts]);
   const flowsByImpl = useMemo(() => flowByImplementer(flows), [flows]);
@@ -208,6 +219,7 @@ export function SchemeBoard({
           lite={mapMode}
           selected={selected}
           focus={visualFocus}
+          attentionPaths={attentionPaths ?? null}
           flowsByImpl={flowsByImpl}
           deckFocus={deckFocus}
           onSelect={stableSelect}
