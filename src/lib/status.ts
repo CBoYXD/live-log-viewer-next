@@ -29,8 +29,12 @@ export const STARTUP_GATE = /Enter to confirm|Press enter to continue/i;
 export const APPROVAL_PROMPT =
   /Allow command\?|Do you want to proceed\?|Press enter to approve|approve this (command|action)|\(y\/n\)|Yes, (allow|proceed|run)/i;
 
-/* Rate-limit / usage-limit walls both CLIs draw as a full-screen notice. */
-export const RATE_LIMIT_SCREEN = /rate.?limit|usage limit (reached|hit)|out of (quota|credits)|limit resets/i;
+/* Rate-limit / usage-limit walls both CLIs draw as a full-screen notice.
+   Full phrases only: a bare «rate limit» substring matched ordinary
+   conversation about rate limits on screen and blocked sends into a
+   perfectly ready composer. */
+export const RATE_LIMIT_SCREEN =
+  /You(?:'ve| have) (?:hit|reached) (?:your|the) .{0,24}limit|(?:usage|rate).?limit (?:reached|hit|exceeded)|out of (?:quota|credits)|\d+.hour limit reached|limit resets/i;
 
 export const SHELL_COMMANDS = new Set(["zsh", "bash", "fish", "sh", "dash"]);
 
@@ -68,10 +72,32 @@ export function detectStartupGate(screen: string): StartupGate | null {
 export type BlockingGate = "approval_prompt" | "rate_limit";
 
 export function detectBlockingGate(screen: string): BlockingGate | null {
-  /* A ready composer showing shortcut hints outranks stale approval wording
-     higher up in the scrollback. */
-  if (READY_MARKERS.test(composerLine(screen))) return null;
-  const tail = screen.split("\n").slice(-14).join("\n");
+  const lines = screen.split("\n");
+  let composerIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (COMPOSER_PROMPT.test(lines[i] ?? "")) {
+      composerIdx = i;
+      break;
+    }
+  }
+  /* Ready hints («bypass permissions on», «? for shortcuts») render on the
+     status bar *under* the composer box, never on the ❯ line itself. A drawn
+     composer with ready hints below accepts input, and any approval/limit
+     wording above it is transcript prose — a reply that merely *discussed*
+     rate limits used to block sends here. A live dialog or limit note inside
+     that below-composer region still wins: there the wording is the screen
+     state, not quoted prose. */
+  if (composerIdx !== -1) {
+    const statusRegion = lines.slice(composerIdx + 1).join("\n");
+    if (
+      READY_MARKERS.test(statusRegion) &&
+      !APPROVAL_PROMPT.test(statusRegion) &&
+      !RATE_LIMIT_SCREEN.test(statusRegion)
+    ) {
+      return null;
+    }
+  }
+  const tail = lines.slice(-14).join("\n");
   if (APPROVAL_PROMPT.test(tail)) return "approval_prompt";
   if (RATE_LIMIT_SCREEN.test(tail)) return "rate_limit";
   return null;
