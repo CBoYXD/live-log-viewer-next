@@ -74,14 +74,16 @@ export const SelectionComposer = memo(function SelectionComposer({
           const summary = sendSummary(sent, selection);
           pushTaskToast(summary.kind, summary.text);
           /* Images never live inside a task body — they ride the plain
-             message route to the same targets, exactly like the pane
-             composer sends. A top-level send failure skips them: nothing
-             says the panes are reachable. */
+             message route, exactly like the pane composer sends. Only the
+             targets whose task delivery succeeded get them: a failed target
+             must not receive detached images with no task context. */
           if (images.length) {
+            const okPaths = new Set(sent.results.filter((result) => result.ok).map((result) => result.path));
+            const okTargets = selection.filter((file) => okPaths.has(file.path));
             const errors: (string | null)[] = [];
-            for (const file of selection) errors.push(await tmuxSend(file, "", images));
+            for (const file of okTargets) errors.push(await tmuxSend(file, "", images));
             if (errors.some((error) => error !== null)) {
-              const imageSummary = broadcastSummary(selection, errors);
+              const imageSummary = broadcastSummary(okTargets, errors);
               pushTaskToast(imageSummary.kind, imageSummary.text);
             }
           }

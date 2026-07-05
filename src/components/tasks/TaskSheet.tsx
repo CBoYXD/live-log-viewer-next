@@ -9,7 +9,7 @@ import { MicButtonView } from "@/components/MicButton";
 import { activityDot, cleanTitle, engineBadge, fmtAge, syntheticFile } from "@/components/utils";
 import { useComposer } from "@/hooks/useComposer";
 import { useDictation } from "@/hooks/useDictation";
-import { getLocale, translate, useLocale } from "@/lib/i18n";
+import { useLocale } from "@/lib/i18n";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -99,19 +99,19 @@ function NewTaskView({
           pushTaskToast(summary.kind, summary.text);
           const images = attachments.images.map((image) => ({ base64: image.base64, mime: image.mime }));
           if (images.length) {
-            /* Images ride the plain message route per target; failures get
-               the same «Доставлено N з M» breakdown before the attachments
-               are cleared, so a lost image is never silent. */
+            /* Images ride the plain message route, but only to targets whose
+               task delivery succeeded — a failed target must not get detached
+               images with no task context. Failures show the «Доставлено N з
+               M» breakdown before the attachments clear, so a lost image is
+               never silent. */
             const byPath = new Map(files.map((file) => [file.path, file]));
-            const targetEntries = targets.map((path) => byPath.get(path) ?? syntheticFile(path));
+            const okEntries = sent.results
+              .filter((result) => result.ok)
+              .map((result) => byPath.get(result.path) ?? syntheticFile(result.path));
             const errors: (string | null)[] = [];
-            for (const entry of targetEntries) {
-              errors.push(
-                byPath.has(entry.path) ? await tmuxSend(entry, "", images) : translate(getLocale(), "common.failedSend"),
-              );
-            }
+            for (const entry of okEntries) errors.push(await tmuxSend(entry, "", images));
             if (errors.some((error) => error !== null)) {
-              const imageSummary = broadcastSummary(targetEntries, errors);
+              const imageSummary = broadcastSummary(okEntries, errors);
               pushTaskToast(imageSummary.kind, imageSummary.text);
             }
           }
