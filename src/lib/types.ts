@@ -1,4 +1,5 @@
 import type { Flow, FlowAnnotation } from "@/lib/flows/types";
+import type { BoardTask } from "@/lib/tasks/types";
 
 export type RootKey =
   | "codex-jobs"
@@ -62,6 +63,7 @@ export interface FileEntry {
 export interface FilesResponse {
   files: FileEntry[];
   flows: Flow[];
+  tasks: BoardTask[];
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
