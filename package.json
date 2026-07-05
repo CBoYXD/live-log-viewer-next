@@ -52,5 +52,9 @@
     "unrs-resolver"
   ],
   "description": "Local web UI that renders Codex / Claude Code agent logs as a live chat-style feed with a session parentage tree",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Latand/live-log-viewer-next.git"
+  },
   "license": "MIT"
 }
