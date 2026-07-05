@@ -64,7 +64,7 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
-  const { files, flows: polledFlows } = useFiles();
+  const { files, flows: polledFlows, tasks } = useFiles();
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
@@ -399,6 +399,7 @@ export function Viewer() {
           <ProjectDashboard
             files={files}
             flows={flows}
+            tasks={tasks}
             project={project}
             openNonce={openNonce}
             focusRequest={focusRequest}

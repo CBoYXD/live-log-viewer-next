@@ -35,6 +35,12 @@ interface CameraOptions {
   /** Stationary background tap in world coords (the selection session's
       toggle/exit). Runs before the map-mode pick; true consumes the tap. */
   onWorldTap?: (wx: number, wy: number) => boolean;
+  /** Task-card rects keyed `task::<id>`: focus glides and map taps resolve
+      through them exactly like layout.byPath entries. */
+  taskRects?: ReadonlyMap<string, SchemeRect>;
+  /** One-shot «задача» tool sink: the next canvas click lands here in world
+      coordinates, then the tool reverts to select. Absent in map mode. */
+  onPlaceTask?: (wx: number, wy: number) => void;
 }
 
 export interface SchemeCamera {
@@ -45,6 +51,11 @@ export interface SchemeCamera {
   setMode: (next: Mode) => void;
   /** Hand-like: map mode, hand tool, or Space held — panes go click-through. */
   handLike: boolean;
+  /** One-shot «задача» tool: armed until the placing click or Esc. */
+  taskTool: boolean;
+  setTaskTool: (next: boolean) => void;
+  /** Glide a world rect into view (task panel rows, far-zoom inline edit). */
+  centerOn: (rect: SchemeRect, zMin: number) => void;
   panning: boolean;
   glide: boolean;
   onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
@@ -77,11 +88,14 @@ export function useSchemeCamera({
   setSelected,
   onBackgroundDown,
   onWorldTap,
+  taskRects,
+  onPlaceTask,
 }: CameraOptions): SchemeCamera {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const tapRef = useRef<{ x: number; y: number } | null>(null);
   const [cam, setCam] = useState<Camera>({ x: 0, y: 0, z: 0.5 });
   const [mode, setModeState] = useState<Mode>("select");
+  const [taskTool, setTaskTool] = useState(false);
   const [spacePan, setSpacePan] = useState(false);
   const [panning, setPanning] = useState(false);
   const [glide, setGlide] = useState(false);
@@ -91,6 +105,8 @@ export function useSchemeCamera({
   const pinchRef = useRef<{ d: number; cx: number; cy: number } | null>(null);
   const modeRef = useRef<Mode>(mode);
   const spaceRef = useRef(spacePan);
+  const taskToolRef = useRef(taskTool);
+  const placeTaskRef = useRef(onPlaceTask);
   const glideTimer = useRef<number | null>(null);
   const initedFor = useRef<string | null>(null);
 
@@ -100,6 +116,12 @@ export function useSchemeCamera({
   useEffect(() => {
     spaceRef.current = spacePan;
   }, [spacePan]);
+  useEffect(() => {
+    taskToolRef.current = taskTool;
+  }, [taskTool]);
+  useEffect(() => {
+    placeTaskRef.current = onPlaceTask;
+  });
 
   /* Saved tool wins; a touch-first device without a saved tool starts on the
      hand — panes are still fully usable after an explicit switch to select. */
@@ -116,6 +138,8 @@ export function useSchemeCamera({
     }
   }, []);
   const setMode = useCallback((next: Mode) => {
+    /* Picking hand/select always disarms the one-shot task tool. */
+    setTaskTool(false);
     setModeState(next);
     localStorage.setItem(MODE_KEY, next);
   }, []);
@@ -297,11 +321,11 @@ export function useSchemeCamera({
       return;
     }
     if (focusHandled.current === focus) return;
-    const node = layout.byPath.get(focus);
+    const node = layout.byPath.get(focus) ?? taskRects?.get(focus);
     if (!node) return;
     focusHandled.current = focus;
     centerOn(node, 0.55);
-  }, [focus, layout, centerOn]);
+  }, [focus, layout, taskRects, centerOn]);
 
   /* Wheel: plain — pan (shift turns it horizontal); ctrl/cmd (and trackpad
      pinch) — zoom at the cursor. In select mode a wheel over a scrollable
@@ -352,7 +376,14 @@ export function useSchemeCamera({
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "h" || event.key === "H") setMode("hand");
       else if (event.key === "v" || event.key === "V") setMode("select");
-      else if (event.key === "Escape") setSelected(null);
+      else if (event.key === "t" || event.key === "T") {
+        /* T arms the one-shot «задача» tool; N belongs to the global
+           attention-queue cycle in Viewer. */
+        if (placeTaskRef.current) setTaskTool(true);
+      } else if (event.key === "Escape") {
+        if (taskToolRef.current) setTaskTool(false);
+        else setSelected(null);
+      }
       else if (event.key === "0") fit();
       else if (event.key === "1") zoomTo(1);
       else if (event.key === "+" || event.key === "=") zoomCenter(1.25);
@@ -414,11 +445,25 @@ export function useSchemeCamera({
       return;
     }
     if (event.button !== 0) return;
+    /* Armed «задача» tool: this click places the card and the tool reverts
+       to select — no pan, no selection change. */
+    if (taskTool && !mapMode && placeTaskRef.current) {
+      const rect = viewportRef.current?.getBoundingClientRect();
+      if (rect) {
+        placeTaskRef.current((event.clientX - rect.left - cam.x) / cam.z, (event.clientY - rect.top - cam.y) / cam.z);
+        setTaskTool(false);
+        setMode("select");
+        return;
+      }
+    }
     const handLike = mapMode || mode === "hand" || spacePan;
     if (!handLike) {
+      /* Task cards own their pointer interactions (drag, inline edit) the
+         way buttons and inputs do — the camera never starts a pan on them. */
+      if (target.closest("[data-scheme-task]")) return;
       const nodeEl = target.closest("[data-scheme-node]");
       if (nodeEl) {
-        setSelected(nodeEl.getAttribute("data-scheme-node"), event.shiftKey);
+        setSelected(nodeEl.getAttribute("data-scheme-node"), event.shiftKey || event.ctrlKey || event.metaKey);
         return;
       }
       /* Background press: the stationary tap resolves through onClick below,
@@ -502,6 +547,10 @@ export function useSchemeCamera({
      resolves against the layout geometry instead of the DOM. */
   const pickAt = (wx: number, wy: number): string | null => {
     const hit = (r: SchemeRect) => wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
+    /* Task cards draw above panes, so they win the tap. */
+    if (taskRects) {
+      for (const [key, rect] of taskRects) if (hit(rect)) return key;
+    }
     for (const node of layout.nodes) if (hit(node)) return node.file.path;
     for (const draft of layout.drafts) if (hit(draft)) return draft.key;
     for (const stack of layout.stacks) {
@@ -542,6 +591,9 @@ export function useSchemeCamera({
     mode,
     setMode,
     handLike,
+    taskTool,
+    setTaskTool,
+    centerOn,
     panning,
     glide,
     onPointerDown,

@@ -1,10 +1,13 @@
 "use client";
 
+import { ListTodo } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { X } from "@/components/icons";
+import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
+import type { BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { BranchPane } from "@/components/BranchPane";
@@ -17,6 +20,8 @@ import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/
 
 import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
+import { TASK_W, taskCardHeight } from "@/components/scheme/taskGeometry";
+import { TASK_TONES } from "@/components/tasks/taskModel";
 
 const focusKey = (project: string) => "llvFocus:" + project;
 
@@ -40,6 +45,8 @@ interface Props {
   manual: FileEntry[];
   files: FileEntry[];
   flows: Flow[];
+  /** This project's board tasks: mini-cards on the map, editable in the sheet. */
+  tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
   drafts: string[];
   /** Path an opener wants on screen (same signal the scheme camera gets). */
@@ -58,10 +65,11 @@ interface Props {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, tasks, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
+  const [taskSheet, setTaskSheet] = useState<TaskSheetView | null>(null);
   const swipeRef = useRef<{ x: number; y: number } | null>(null);
   const activeChipRef = useRef<HTMLButtonElement | null>(null);
 
@@ -161,6 +169,11 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
   const pickFromMap = useCallback(
     (key: string) => {
       setMapOpen(false);
+      /* Task mini-cards on the map open in the sheet, not as panes. */
+      if (key.startsWith("task::")) {
+        setTaskSheet({ taskId: key.slice("task::".length) });
+        return;
+      }
       if (byKey.has(key)) {
         setFocusPath(key);
         return;
@@ -217,7 +230,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
         ) : (
           <div className="flex flex-1 items-center justify-center text-center text-[13px] text-dim">{t("mobile.noConvos")}</div>
         )}
-        <MapChip layout={layout} current={resolvedKey} onOpen={() => setMapOpen(true)} />
+        <MapChip layout={layout} tasks={tasks} current={resolvedKey} onOpen={() => setMapOpen(true)} />
+        <button
+          type="button"
+          className="absolute bottom-[168px] right-4 z-30 inline-flex h-9 items-center gap-1 rounded-full border border-line bg-panel/95 px-2.5 text-[11px] font-bold text-ink shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          aria-label={t("tasks.panelToggleAria")}
+          onClick={() => setTaskSheet("list")}
+        >
+          <ListTodo className="h-4 w-4 text-accent" aria-hidden />
+          {tasks.filter((task) => task.status !== "done").length || null}
+        </button>
       </div>
 
       {mapOpen ? (
@@ -240,6 +262,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
             manual={manual}
             files={files}
             flows={flows}
+            tasks={tasks}
             drafts={drafts}
             focus={null}
             ring={resolvedKey}
@@ -253,6 +276,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
             {t("mobile.tapNode")}
           </div>
         </div>
+      ) : null}
+
+      {taskSheet ? (
+        <TaskSheet project={project} tasks={tasks} files={files} initialView={taskSheet} onClose={() => setTaskSheet(null)} />
       ) : null}
     </div>
   );
@@ -319,7 +346,17 @@ const CHIP_H = 64;
 /** Live thumbnail of the whole scheme floating over the focused pane: every
     node as an engine-colored block, the pinned one framed. A tap unfolds the
     full map. */
-function MapChip({ layout, current, onOpen }: { layout: SchemeLayout; current: string | null; onOpen: () => void }) {
+function MapChip({
+  layout,
+  tasks,
+  current,
+  onOpen,
+}: {
+  layout: SchemeLayout;
+  tasks: BoardTask[];
+  current: string | null;
+  onOpen: () => void;
+}) {
   const { t } = useLocale();
   const scale = Math.min(CHIP_W / layout.width, CHIP_H / layout.height);
   const ox = (CHIP_W - layout.width * scale) / 2;
@@ -377,6 +414,16 @@ function MapChip({ layout, current, onOpen }: { layout: SchemeLayout; current: s
               opacity={node.file.activity === "live" ? 0.85 : 0.35}
               stroke={node.file.path === current ? "#5a51e0" : undefined}
               strokeWidth={node.file.path === current ? 5 / scale : undefined}
+            />
+          ))}
+          {tasks.map((task) => (
+            <circle
+              key={task.id}
+              cx={task.pos.x + TASK_W / 2}
+              cy={task.pos.y + taskCardHeight(task) / 2}
+              r={3 / scale}
+              fill={TASK_TONES[task.status].color}
+              opacity={task.status === "done" ? 0.5 : 0.95}
             />
           ))}
         </g>

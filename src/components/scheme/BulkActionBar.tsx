@@ -4,6 +4,7 @@ import { CircleCheck, CircleX, Focus, Loader2, OctagonMinus, Repeat2, RotateCcw,
 import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { ComposerBar } from "@/components/ComposerBar";
+import { createTask, sendTask } from "@/components/tasks/taskApi";
 import { cleanTitle } from "@/components/utils";
 import { useComposer } from "@/hooks/useComposer";
 import type { Flow, FlowsResponse, RoleConfig } from "@/lib/flows/types";
@@ -11,6 +12,7 @@ import { useLocale } from "@/lib/i18n";
 
 import { canBulkFlow, canBulkInterrupt, canBulkKill, runBulk, withPresenceGuard, type BulkItemResult, type BulkRunner } from "./bulkActions";
 import type { SchemeNode } from "./layout";
+import { TASK_W } from "./taskGeometry";
 
 type ActionId = "message" | "interrupt" | "kill" | "remove" | "flow";
 
@@ -67,12 +69,15 @@ function ActionButton({
  * and the bar's props stay identity-stable through them.
  */
 export const BulkActionBar = memo(function BulkActionBar({
+  project,
   nodes,
   flowsByImpl,
   onRemove,
   onFit,
   onExit,
 }: {
+  /** Board project — the home of a task created through the toggle. */
+  project: string;
   nodes: SchemeNode[];
   flowsByImpl: Map<string, Flow>;
   onRemove: (path: string) => void;
@@ -81,6 +86,10 @@ export const BulkActionBar = memo(function BulkActionBar({
 }) {
   const { t } = useLocale();
   const [running, setRunning] = useState<ActionId | null>(null);
+  /* «Створити задачу» (default on): the text becomes a tracked task card
+     near the selection centroid, delivered as assignments; off is the plain
+     broadcast with no persisted trace. */
+  const [asTask, setAsTask] = useState(true);
   /* Titles are captured into the report at launch: a killed node leaves the
      layout before its result row renders, and the report must still name it. */
   const [report, setReport] = useState<{
@@ -135,6 +144,21 @@ export const BulkActionBar = memo(function BulkActionBar({
     void execute(last.action, failed, last.runner);
   };
 
+  /* New task cards land near the selection centroid (or a home corner when
+     the session is armed but empty). Read at submit time through nodesRef so
+     the composer callback stays free of per-frame node identities. */
+  const taskPos = () => {
+    const list = nodesRef.current;
+    if (!list.length) return { x: 120, y: 120 };
+    let cx = 0;
+    let cy = 0;
+    for (const node of list) {
+      cx += node.x + node.w / 2;
+      cy += node.y + node.h / 2;
+    }
+    return { x: Math.round(cx / list.length - TASK_W / 2), y: Math.round(cy / list.length - 60) };
+  };
+
   const composer = useComposer({
     initialText: () => "",
     persistText: () => {},
@@ -145,6 +169,38 @@ export const BulkActionBar = memo(function BulkActionBar({
       composer.setBusy(true);
       try {
         const byPath = new Map(nodes.map((node) => [node.file.path, node]));
+        if (asTask) {
+          if (!text) {
+            composer.setStatus({ kind: "err", text: t("tasks.composerNeedsText") });
+            return;
+          }
+          const created = await createTask({ project, text, pos: taskPos() });
+          if ("error" in created) {
+            composer.setStatus({ kind: "err", text: created.error });
+            return;
+          }
+          const taskId = created.task.id;
+          /* Per-target task delivery through the same report/retry machinery
+             as the broadcast; images ride the plain message route only to
+             targets whose task delivery succeeded. */
+          const items = await execute("message", [...byPath.keys()], async (path) => {
+            const sent = await sendTask(taskId, [path]);
+            if ("error" in sent) return { ok: false as const, error: sent.error };
+            const result = sent.results[0];
+            if (!result?.ok) return { ok: false as const, error: result?.error ?? t("common.failedSend") };
+            if (images.length) {
+              const node = byPath.get(path);
+              return postJson("/api/tmux", { pid: node?.file.pid ?? undefined, path, text: "", images });
+            }
+            return { ok: true as const };
+          });
+          /* An armed-but-empty session still captures the card. */
+          if (!byPath.size || (items.length && items.every((item) => item.ok))) {
+            composer.setText("");
+            composer.attachments.clear();
+          }
+          return;
+        }
         const items = await execute("message", [...byPath.keys()], (path) => {
           const node = byPath.get(path);
           return postJson("/api/tmux", { pid: node?.file.pid ?? undefined, path, text, images });
@@ -202,9 +258,24 @@ export const BulkActionBar = memo(function BulkActionBar({
           sendTitleRecording={t("composer.stopAndSendTitle")}
           sendIdleClassName="border-accent bg-accent hover:opacity-90"
           leftSlot={
-            <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-2 py-1 text-[10px] font-bold text-[#555]">
-              {t("bulk.selectedCount", { count: nodes.length })}
-            </span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="inline-flex min-w-0 items-center gap-1 rounded-full bg-chip px-2 py-1 text-[10px] font-bold text-[#555]">
+                {t("bulk.selectedCount", { count: nodes.length })}
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={asTask}
+                title={t("tasks.composerToggleTitle")}
+                onClick={() => setAsTask((value) => !value)}
+                className={`inline-flex h-6 shrink-0 items-center gap-1 rounded-full border px-2 text-[10px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  asTask ? "border-accent bg-accent/10 text-accent" : "border-line bg-panel text-dim hover:text-ink"
+                }`}
+              >
+                <span className={`h-1.5 w-1.5 rounded-full ${asTask ? "bg-accent" : "bg-[#c9c9d1]"}`} aria-hidden />
+                {t("tasks.composerToggle")}
+              </button>
+            </div>
           }
         />
       </form>
