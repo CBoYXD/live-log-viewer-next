@@ -1,4 +1,5 @@
 import type { Flow, FlowAnnotation } from "@/lib/flows/types";
+import type { Workflow } from "@/lib/workflows/types";
 
 export type RootKey =
   | "codex-jobs"
@@ -62,6 +63,7 @@ export interface FileEntry {
 export interface FilesResponse {
   files: FileEntry[];
   flows: Flow[];
+  workflows: Workflow[];
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
