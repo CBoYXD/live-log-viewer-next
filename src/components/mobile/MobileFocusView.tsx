@@ -1,5 +1,6 @@
 "use client";
 
+import { Map as MapIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { X } from "@/components/icons";
@@ -15,9 +16,9 @@ import { RoundDeck } from "@/components/flows/RoundDeck";
 import { canHandoff, HandoffHandle } from "@/components/HandoffHandle";
 import { paneState, type PaneState } from "@/components/paneState";
 import type { BranchGroup } from "@/components/projectModel";
-import { activityDot, cleanTitle, engineBadge, engineColor } from "@/components/utils";
+import { activityDot, cleanTitle, engineBadge } from "@/components/utils";
 
-import { buildSchemeLayout, type SchemeLayout } from "@/components/scheme/layout";
+import { buildSchemeLayout } from "@/components/scheme/layout";
 import { SchemeBoard } from "@/components/scheme/SchemeBoard";
 
 const focusKey = (project: string) => "llvFocus:" + project;
@@ -55,10 +56,10 @@ interface Props {
 
 /**
  * The phone presentation of a project: one conversation pinned nearly
- * full-screen, a strip of status chips to hop between conversations, a
- * minimap chip that unfolds the whole scheme as a pick-only map. The same
- * data the scheme draws — nothing on the diagram is unreachable, it is just
- * shown one pane at a time.
+ * full-screen, a strip of status chips to hop between conversations, a map
+ * button docked in that strip that unfolds the whole scheme as a pick-only
+ * map. The same data the scheme draws — nothing on the diagram is
+ * unreachable, it is just shown one pane at a time.
  */
 export function MobileFocusView({ project, groups, manual, files, flows, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
   const { t } = useLocale();
@@ -177,6 +178,19 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
       {entries.length > 1 ? (
         <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-panel px-2 py-1.5">
+          {/* The map lives here as a docked button (sticky, so it survives the
+              strip's own scroll) — a floating thumbnail over the feed kept
+              covering the tool rows. The ring masks chips scrolling under the
+              gap next to it. */}
+          <button
+            type="button"
+            className="sticky left-0 z-10 flex h-7 w-8 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim ring-4 ring-panel hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            aria-label={t("mobile.openMap")}
+            title={t("mobile.openMap")}
+            onClick={() => setMapOpen(true)}
+          >
+            <MapIcon className="h-4 w-4" aria-hidden />
+          </button>
           {entries.map((entry) => (
             <StripChip
               key={entry.key}
@@ -189,7 +203,15 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
         </div>
       ) : null}
 
-      <div className="relative flex min-h-0 flex-1 flex-col p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
+      {/* Extra bottom padding when the handoff handle hangs off the pane —
+          without it the handle lands on whatever renders below the view. */}
+      <div
+        className={`relative flex min-h-0 flex-1 flex-col p-1.5 ${
+          onHandoff && activeNode && canHandoff(activeNode.file)
+            ? "pb-[max(3rem,env(safe-area-inset-bottom))]"
+            : "pb-[max(0.375rem,env(safe-area-inset-bottom))]"
+        }`}
+      >
         {activeNode ? (
           <div key={activeNode.file.path} className="relative flex min-h-0 flex-1">
             <BranchPane
@@ -229,7 +251,6 @@ export function MobileFocusView({ project, groups, manual, files, flows, drafts,
         ) : (
           <div className="flex flex-1 items-center justify-center text-center text-[13px] text-dim">{t("mobile.noConvos")}</div>
         )}
-        <MapChip layout={layout} current={resolvedKey} onOpen={() => setMapOpen(true)} />
       </div>
 
       {mapOpen ? (
@@ -321,78 +342,6 @@ function StripChip({
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${activityDot(file.activity)}`} />
       {entry.isRoot ? null : <span aria-hidden>⤷</span>}
       {active ? <span className="max-w-[52vw] truncate">{title}</span> : <span>{waiting ? "⏸ " : ""}{badge.label}</span>}
-    </button>
-  );
-}
-
-const CHIP_W = 96;
-const CHIP_H = 64;
-
-/** Live thumbnail of the whole scheme floating over the focused pane: every
-    node as an engine-colored block, the pinned one framed. A tap unfolds the
-    full map. */
-function MapChip({ layout, current, onOpen }: { layout: SchemeLayout; current: string | null; onOpen: () => void }) {
-  const { t } = useLocale();
-  const scale = Math.min(CHIP_W / layout.width, CHIP_H / layout.height);
-  const ox = (CHIP_W - layout.width * scale) / 2;
-  const oy = (CHIP_H - layout.height * scale) / 2;
-  return (
-    <button
-      type="button"
-      className="absolute bottom-[92px] right-4 z-30 overflow-hidden rounded-[10px] border border-line bg-panel/95 shadow-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-      style={{ width: CHIP_W, height: CHIP_H }}
-      aria-label={t("mobile.openMap")}
-      onClick={onOpen}
-    >
-      <svg width={CHIP_W} height={CHIP_H} aria-hidden>
-        <g transform={`translate(${ox} ${oy}) scale(${scale})`}>
-          {layout.stacks.map((stack) => (
-            <rect key={stack.key} x={stack.x} y={stack.y} width={stack.w} height={stack.h} rx={24} fill="#c9c9d1" opacity={0.45} />
-          ))}
-          {layout.drafts.map((draft) => (
-            <rect
-              key={draft.key}
-              x={draft.x}
-              y={draft.y}
-              width={draft.w}
-              height={draft.h}
-              rx={24}
-              fill="#9a9aa4"
-              opacity={0.3}
-              stroke={draft.key === current ? "#5a51e0" : undefined}
-              strokeWidth={draft.key === current ? 5 / scale : undefined}
-            />
-          ))}
-          {layout.decks.map((deck) => (
-            <rect
-              key={deck.key}
-              x={deck.x}
-              y={deck.y}
-              width={deck.w}
-              height={deck.h}
-              rx={24}
-              fill="#5a51e0"
-              opacity={0.35}
-              stroke={deck.key === current ? "#5a51e0" : undefined}
-              strokeWidth={deck.key === current ? 5 / scale : undefined}
-            />
-          ))}
-          {layout.nodes.map((node) => (
-            <rect
-              key={node.file.path}
-              x={node.x}
-              y={node.y}
-              width={node.w}
-              height={node.h}
-              rx={24}
-              fill={engineColor(node.file)}
-              opacity={node.file.activity === "live" ? 0.85 : 0.35}
-              stroke={node.file.path === current ? "#5a51e0" : undefined}
-              strokeWidth={node.file.path === current ? 5 / scale : undefined}
-            />
-          ))}
-        </g>
-      </svg>
     </button>
   );
 }
