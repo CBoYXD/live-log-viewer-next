@@ -128,7 +128,7 @@ export function kidsIndex(files: FileEntry[]): Map<string, FileEntry[]> {
   return map;
 }
 
-function subtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEntry[] {
+export function subtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEntry[] {
   const out: FileEntry[] = [];
   const stack = [...(kids.get(root.path) ?? [])];
   const seen = new Set<string>([root.path]);
@@ -140,6 +140,14 @@ function subtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEntry[] {
     stack.push(...(kids.get(node.path) ?? []));
   }
   return out;
+}
+
+/** Subtree sizes for every entry, on one shared kids index. */
+export function descendantCounts(files: FileEntry[]): Map<string, number> {
+  const kids = kidsIndex(files);
+  const counts = new Map<string, number>();
+  for (const file of files) counts.set(file.path, subtree(file, kids).length);
+  return counts;
 }
 
 /** Descendants that deserve a full transcript column next to the root. */

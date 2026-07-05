@@ -8,7 +8,7 @@ import type { ActionEvent, FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/lib/title";
 
 import { ATTENTION_STATES, claimedReviewerPaths, flowByImplementer, stateLabel } from "@/components/flows/flowModel";
-import { isAuxTask, isConversation, isSubagent, kidsIndex, projectKey } from "@/components/projectModel";
+import { descendantCounts, isAuxTask, isConversation, isSubagent, projectKey } from "@/components/projectModel";
 import { fmtAge } from "@/components/utils";
 
 const DAY = 86400;
@@ -32,25 +32,6 @@ export interface SwitchboardData {
   recent: SwitchboardItem[];
   older: SwitchboardItem[];
   livePreview: SwitchboardItem[];
-}
-
-function descendantCounts(files: FileEntry[]): Map<string, number> {
-  const kids = kidsIndex(files);
-  const counts = new Map<string, number>();
-  for (const file of files) {
-    const stack = [...(kids.get(file.path) ?? [])];
-    const seen = new Set<string>();
-    let count = 0;
-    while (stack.length) {
-      const child = stack.pop()!;
-      if (seen.has(child.path)) continue;
-      seen.add(child.path);
-      count += 1;
-      stack.push(...(kids.get(child.path) ?? []));
-    }
-    counts.set(file.path, count);
-  }
-  return counts;
 }
 
 function recentBucketSort(a: SwitchboardItem, b: SwitchboardItem): number {
