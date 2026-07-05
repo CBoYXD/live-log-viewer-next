@@ -48,16 +48,62 @@ function resolveWithFallback(root: string, name: string): string {
    the move. The legacy dirs are left in place untouched. */
 const migrated = new Set<string>();
 
-/** Copy-once move of a legacy dir into its new home; exported for tests. */
+/* Completion marker inside the target dir. A bare "target exists" check
+   cannot distinguish a finished migration from a dir that fresh state writes
+   created after an interrupted one — only the sentinel says the legacy
+   content actually arrived. */
+const MIGRATED_SENTINEL = ".migrated-from-legacy";
+
+/**
+ * Copy-once move of a legacy dir into its new home; exported for tests.
+ *
+ * The copy lands in a temp sibling first and reaches the target through an
+ * atomic rename, so a crash mid-copy leaves no half-filled target. A target
+ * that exists without the sentinel (state writes raced an earlier failed
+ * attempt) heals by copying the legacy entries it is missing, never
+ * overwriting newer files. Failures are logged and stay un-memoized, so the
+ * next call retries instead of silently accepting an empty state dir.
+ */
 export function migrateLegacyDir(target: string, legacy: string): void {
   if (migrated.has(target)) return;
-  migrated.add(target);
+  const sentinel = path.join(target, MIGRATED_SENTINEL);
+  const stamp = () => `${new Date().toISOString()} ${legacy}\n`;
   try {
-    if (fs.existsSync(target) || !fs.existsSync(legacy)) return;
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    fs.cpSync(legacy, target, { recursive: true });
-  } catch {
-    /* best-effort: a failed copy just means starting with empty state */
+    if (fs.existsSync(sentinel)) {
+      migrated.add(target);
+      return;
+    }
+    if (!fs.existsSync(legacy)) {
+      /* Nothing to migrate: mark that decision too, so a legacy dir that
+         appears later (a rollback, a restored backup) never clobbers state
+         accumulated here in the meantime. */
+      fs.mkdirSync(target, { recursive: true });
+      fs.writeFileSync(sentinel, stamp());
+      migrated.add(target);
+      return;
+    }
+    if (!fs.existsSync(target)) {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      const tmp = `${target}.migrating.${process.pid}`;
+      fs.rmSync(tmp, { recursive: true, force: true });
+      try {
+        fs.cpSync(legacy, tmp, { recursive: true });
+        fs.writeFileSync(path.join(tmp, MIGRATED_SENTINEL), stamp());
+        fs.renameSync(tmp, target);
+      } catch (error) {
+        fs.rmSync(tmp, { recursive: true, force: true });
+        throw error;
+      }
+      migrated.add(target);
+      return;
+    }
+    /* Partial target from a pre-sentinel run: fill in whatever legacy
+       entries are missing, keep everything already written here. */
+    fs.cpSync(legacy, target, { recursive: true, force: false, errorOnExist: false });
+    fs.writeFileSync(sentinel, stamp());
+    migrated.add(target);
+  } catch (error) {
+    console.error(`viewer state migration ${legacy} -> ${target} failed; will retry:`, error);
   }
 }
 
