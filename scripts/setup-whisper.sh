@@ -3,7 +3,18 @@
 # pre-downloads the model so the first dictation is not the slow one.
 set -euo pipefail
 
-VENV="${LLV_WHISPER_VENV:-$HOME/.cache/live-log-viewer/whisper-venv}"
+# New installs land in agent-log-viewer; an existing live-log-viewer venv is
+# reused so a re-run does not orphan it (mirrors the app's cache-dir fallback).
+CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}"
+NEW_VENV="$CACHE_ROOT/agent-log-viewer/whisper-venv"
+LEGACY_VENV="$CACHE_ROOT/live-log-viewer/whisper-venv"
+if [ -n "${LLV_WHISPER_VENV:-}" ]; then
+  VENV="$LLV_WHISPER_VENV"
+elif [ ! -d "$NEW_VENV" ] && [ -d "$LEGACY_VENV" ]; then
+  VENV="$LEGACY_VENV"
+else
+  VENV="$NEW_VENV"
+fi
 MODEL="${LLV_WHISPER_MODEL:-small}"
 DEVICE="${LLV_WHISPER_DEVICE:-cpu}"
 

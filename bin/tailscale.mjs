@@ -5,7 +5,6 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
-export const INSTALL_HINT = "Tailscale не знайдено. Встановіть: https://tailscale.com/download — і повторіть.";
 export const OPERATOR_HINT =
   "Tailscale вимагає прав оператора. Виконайте один раз у своєму терміналі:\nsudo tailscale set --operator=$USER — і перезапустіть.";
 
@@ -13,6 +12,54 @@ const TOKEN_PATTERN = /^[0-9a-f]{32}$/;
 const MACOS_TAILSCALE = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
 
 export class TailscaleError extends Error {}
+
+async function hasCommand(name) {
+  const pathEntries = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  for (const entry of pathEntries) {
+    if (await isExecutable(join(entry, name))) return true;
+  }
+  return false;
+}
+
+/**
+ * One-time setup walkthrough shown when the tailscale binary is missing:
+ * exact copy-pasteable commands for this machine's package manager instead
+ * of a bare download link.
+ */
+export async function buildInstallHint() {
+  const steps = [];
+  if (process.platform === "darwin") {
+    steps.push(
+      "  1. Встановіть застосунок:   brew install --cask tailscale-app   (або з App Store)",
+      "  2. Відкрийте Tailscale з Applications і увійдіть у свій акаунт.",
+    );
+  } else {
+    if (await hasCommand("pacman")) {
+      steps.push("  1. Встановіть:               sudo pacman -S tailscale");
+    } else if (await hasCommand("apt-get")) {
+      steps.push("  1. Встановіть:               curl -fsSL https://tailscale.com/install.sh | sh");
+    } else if (await hasCommand("dnf")) {
+      steps.push("  1. Встановіть:               curl -fsSL https://tailscale.com/install.sh | sh");
+    } else {
+      steps.push("  1. Встановіть:               https://tailscale.com/download");
+    }
+    steps.push(
+      "  2. Запустіть службу:         sudo systemctl enable --now tailscaled",
+      "  3. Увійдіть у акаунт:        sudo tailscale up   (відкриє браузер для входу)",
+      "  4. Дозвольте serve без sudo: sudo tailscale set --operator=$USER",
+    );
+  }
+
+  return [
+    "Tailscale не знайдено. Це разове налаштування на ~2 хвилини:",
+    "",
+    ...steps,
+    "",
+    "Потім повторіть цю саму команду — viewer підніметься з QR для телефона.",
+    "На телефоні: встановіть застосунок Tailscale і увійдіть тим самим акаунтом.",
+    "Доступ матимуть лише ваші пристрої в tailnet — назовні нічого не відкривається.",
+  ].join("\n");
+}
 
 async function isExecutable(path) {
   try {
@@ -36,7 +83,7 @@ export async function detectTailscale() {
     return MACOS_TAILSCALE;
   }
 
-  throw new TailscaleError(INSTALL_HINT);
+  throw new TailscaleError(await buildInstallHint());
 }
 
 function runJson(command, args) {
@@ -82,7 +129,15 @@ export async function readStatus(tailscalePath) {
 
   const backendState = typeof status.BackendState === "string" ? status.BackendState : "";
   if (backendState === "NeedsLogin" || backendState === "Stopped") {
-    throw new TailscaleError("Tailscale не запущено або потрібен вхід. Виконайте `tailscale up` і повторіть.");
+    throw new TailscaleError(
+      [
+        "Tailscale встановлено, але не запущено або потрібен вхід:",
+        "",
+        "  sudo tailscale up   (відкриє браузер для входу)",
+        "",
+        "Після входу повторіть цю саму команду.",
+      ].join("\n"),
+    );
   }
 
   const rawDnsName = typeof status.Self?.DNSName === "string" ? status.Self.DNSName : "";

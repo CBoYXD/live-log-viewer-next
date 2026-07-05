@@ -6,8 +6,9 @@ import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
 
 import { readCodexAuth, type CodexAuth } from "@/lib/codexAuth";
+import { cacheEntryPath } from "@/lib/configDir";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { resolveTranscribeBackend } from "@/lib/transcribeBackend";
+import { readElevenLabsApiKey, resolveTranscribeBackend } from "@/lib/transcribeBackend";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -24,7 +25,6 @@ const LANGUAGE_RE = /^[a-z]{2}(?:-[A-Z]{2})?$/;
 
 /* Local faster-whisper path (default). Model and device are overridable per
    machine; CPU int8 keeps it dependency-free where there is no CUDA setup. */
-const WHISPER_VENV = process.env.LLV_WHISPER_VENV || path.join(os.homedir(), ".cache", "live-log-viewer", "whisper-venv");
 const WHISPER_MODEL = process.env.LLV_WHISPER_MODEL || "small";
 const WHISPER_DEVICE = process.env.LLV_WHISPER_DEVICE || "cpu";
 const WHISPER_TIMEOUT_MS = 120_000;
@@ -38,8 +38,14 @@ interface UpstreamResult {
   body: string;
 }
 
+/* Resolved per request so a venv created after the server started is picked up,
+   and the legacy cache dir is honored when only the old venv exists. */
+function whisperVenv(): string {
+  return process.env.LLV_WHISPER_VENV || cacheEntryPath("whisper-venv");
+}
+
 function localTranscribe(audioPath: string, language: string): Promise<TranscribeResponse> {
-  const python = path.join(WHISPER_VENV, "bin", "python");
+  const python = path.join(whisperVenv(), "bin", "python");
   const script = path.join(process.cwd(), "scripts", "whisper_transcribe.py");
   return new Promise((resolve, reject) => {
     execFile(
@@ -65,6 +71,30 @@ function localTranscribe(audioPath: string, language: string): Promise<Transcrib
       },
     );
   });
+}
+
+/* ElevenLabs Scribe batch STT. The realtime scribe_v2 model is WebSocket-only;
+   for the record-then-transcribe flow the batch endpoint takes the webm as-is. */
+const ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text";
+const ELEVENLABS_MODEL = process.env.LLV_ELEVENLABS_STT_MODEL || "scribe_v1";
+
+async function elevenLabsTranscribe(apiKey: string, file: File, language: string): Promise<TranscribeResponse> {
+  const form = new FormData();
+  form.append("model_id", ELEVENLABS_MODEL);
+  form.append("file", file, "dictation.webm");
+  if (language) form.append("language_code", language);
+  const res = await fetch(ELEVENLABS_STT_URL, {
+    method: "POST",
+    headers: { "xi-api-key": apiKey },
+    body: form,
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_S * 1000),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}${body ? ` — ${body.slice(0, 200)}` : ""}`);
+  }
+  const json = (await res.json()) as { text?: unknown };
+  return { text: typeof json.text === "string" ? json.text : "" };
 }
 
 function callTranscribe(auth: CodexAuth, audioPath: string, mime: string, language: string): Promise<UpstreamResult> {
@@ -125,6 +155,24 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeRes
   const rawLanguage = form.get("language");
   const language = typeof rawLanguage === "string" && LANGUAGE_RE.test(rawLanguage) ? rawLanguage : "";
   const backend = resolveTranscribeBackend();
+
+  if (backend === "elevenlabs") {
+    const apiKey = readElevenLabsApiKey();
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "нема ключа ElevenLabs (~/.config/agent-log-viewer/elevenlabs-api-key або ELEVENLABS_API_KEY)" },
+        { status: 503 },
+      );
+    }
+    try {
+      return NextResponse.json(await elevenLabsTranscribe(apiKey, file, language));
+    } catch (error) {
+      return NextResponse.json(
+        { error: `ElevenLabs STT: ${error instanceof Error ? error.message : String(error)}` },
+        { status: 502 },
+      );
+    }
+  }
 
   const tmpPath = path.join(os.tmpdir(), `viewer-dictation-${Date.now()}-${Math.floor(Math.random() * 1e6)}.webm`);
   try {
