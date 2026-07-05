@@ -1,0 +1,131 @@
+import { afterAll, expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+/* The state dir must point at a sandbox before store.ts computes its
+   module-level constants, so the store loads dynamically after the env set. */
+process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
+const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, normalizeStages, normalizeTemplate, saveWorkflows } =
+  await import("./store");
+
+type WorkflowTemplate = import("./types").WorkflowTemplate;
+
+afterAll(() => {
+  fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
+});
+
+const IMPLEMENT = {
+  kind: "implement",
+  agent: { engine: "codex", model: null, effort: "xhigh" },
+  scope: "Backend/API",
+} as const;
+
+const REVIEW = {
+  kind: "review-loop",
+  reviewer: { engine: "codex", model: null, effort: "xhigh" },
+  fixer: { engine: "codex", model: null, effort: "low" },
+  roundLimit: 5,
+  reviewerMode: "headless",
+} as const;
+
+test("normalizeStages accepts implement+ then one closing review-loop", () => {
+  const ok = normalizeStages([IMPLEMENT, IMPLEMENT, REVIEW]);
+  expect("stages" in ok && ok.stages.length).toBe(3);
+});
+
+test("normalizeStages rejects a pipeline without a review-loop", () => {
+  const res = normalizeStages([IMPLEMENT, IMPLEMENT]);
+  expect("error" in res).toBe(true);
+});
+
+test("normalizeStages rejects a review-loop that is not last", () => {
+  const res = normalizeStages([REVIEW, IMPLEMENT]);
+  expect("error" in res).toBe(true);
+});
+
+test("normalizeStages rejects a second review-loop", () => {
+  const res = normalizeStages([IMPLEMENT, REVIEW, REVIEW]);
+  expect("error" in res).toBe(true);
+});
+
+test("normalizeStages injects the codex-low fixer default and review defaults", () => {
+  const res = normalizeStages([IMPLEMENT, { kind: "review-loop", reviewer: { engine: "claude", model: "fable" } }]);
+  if ("error" in res) throw new Error(res.error);
+  const review = res.stages[1]!;
+  if (review.kind !== "review-loop") throw new Error("expected review stage");
+  expect(review.fixer).toEqual(DEFAULT_FIXER);
+  expect(review.roundLimit).toBe(5);
+  expect(review.reviewerMode).toBe("headless");
+});
+
+test("normalizeTemplate defaults finish to pr and trims optional commands", () => {
+  const template = normalizeTemplate({ name: " demo ", stages: [IMPLEMENT, REVIEW], setup: " bun install " });
+  expect(template?.name).toBe("demo");
+  expect(template?.finish).toBe("pr");
+  expect(template?.setup).toBe("bun install");
+  expect(template?.verify).toBeUndefined();
+});
+
+test("normalizeTemplate rejects an invalid stage list", () => {
+  expect(normalizeTemplate({ name: "bad", stages: [IMPLEMENT] })).toBeNull();
+});
+
+test("templates seed the canonical fullstack pipeline on first load", () => {
+  const templates = loadTemplates();
+  expect(templates.map((template) => template.name)).toContain("fullstack");
+  const fullstack = templates.find((template) => template.name === "fullstack")!;
+  expect(fullstack.stages.at(-1)?.kind).toBe("review-loop");
+});
+
+test("workflows round-trip through the store", () => {
+  const template = normalizeTemplate({ name: "demo", stages: [IMPLEMENT, REVIEW], finish: "merge" })!;
+  const wf = buildWorkflow({
+    id: "abcd1234",
+    name: "demo",
+    task: "Fix the login flow",
+    repoDir: "/home/user/proj/repo",
+    template,
+    mode: "manual",
+    now: "2026-07-05T00:00:00.000Z",
+  });
+  saveWorkflows([wf]);
+  const loaded = loadWorkflows();
+  expect(loaded).toEqual([wf]);
+});
+
+test("buildWorkflow derives sibling worktree dir and wf/ branch from the task", () => {
+  const template = normalizeTemplate({ name: "demo", stages: [IMPLEMENT, REVIEW] })!;
+  const wf = buildWorkflow({
+    id: "abcd1234",
+    name: "demo",
+    task: "Fix the LOGIN flow!!",
+    repoDir: "/home/user/proj/repo",
+    template,
+    mode: "auto",
+    now: "2026-07-05T00:00:00.000Z",
+  });
+  expect(wf.worktreeDir).toBe("/home/user/proj/repo-wf-abcd1234");
+  expect(wf.branch).toBe("wf/fix-the-login-flow-abcd1234");
+  expect(wf.stageRuns.length).toBe(2);
+  expect(wf.state).toBe("provisioning");
+});
+
+test("buildWorkflow freezes the template: later template mutation stays invisible", () => {
+  const template = normalizeTemplate({ name: "demo", stages: [IMPLEMENT, REVIEW] }) as WorkflowTemplate;
+  const wf = buildWorkflow({
+    id: "abcd1234",
+    name: "demo",
+    task: "task",
+    repoDir: "/home/user/proj/repo",
+    template,
+    mode: "auto",
+    now: "2026-07-05T00:00:00.000Z",
+  });
+  const stage = template.stages[0]!;
+  if (stage.kind === "implement") stage.scope = "MUTATED";
+  template.name = "mutated";
+  const frozen = wf.template.stages[0]!;
+  expect(frozen.kind === "implement" && frozen.scope).toBe("Backend/API");
+  expect(wf.template.name).toBe("demo");
+});
