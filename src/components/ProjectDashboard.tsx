@@ -400,22 +400,26 @@ export function ProjectDashboard({
           <ArchiveProjectButton files={projectFiles} onArchive={() => onArchive(project)} />
         )}
         <DeleteProjectButton files={projectFiles} />
-        <button
-          type="button"
-          onClick={addDraft}
-          aria-label={t("dash.newConvo")}
-          className="ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
-        </button>
-        <button
-          type="button"
-          onClick={addWorkflowDraft}
-          aria-label={t("dash.newWorkflow")}
-          className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        >
-          <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
-        </button>
+        {isMobile ? (
+          <>
+            <button
+              type="button"
+              onClick={addDraft}
+              aria-label={t("dash.newConvo")}
+              className="ml-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+            </button>
+            <button
+              type="button"
+              onClick={addWorkflowDraft}
+              aria-label={t("dash.newWorkflow")}
+              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
+            </button>
+          </>
+        ) : null}
       </div>
 
       {projectWorkflows.length ? (
@@ -439,49 +443,74 @@ export function ProjectDashboard({
         </div>
       ) : null}
 
-      {hasNodes ? (
-        isMobile ? (
-          <MobileFocusView
-            project={project}
-            groups={schemeGroups}
-            manual={schemeManual}
-            files={files}
-            flows={flows}
-            drafts={drafts}
-            focus={highlight}
-            onSelect={openSwitchboardFile}
-            onClose={closeNode}
-            onDraftClose={removeDraft}
-            onDraftSpawned={draftSpawned}
-            onHandoff={addHandoffDraft}
-          />
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        {hasNodes ? (
+          isMobile ? (
+            <MobileFocusView
+              project={project}
+              groups={schemeGroups}
+              manual={schemeManual}
+              files={files}
+              flows={flows}
+              drafts={drafts}
+              focus={highlight}
+              onSelect={openSwitchboardFile}
+              onClose={closeNode}
+              onDraftClose={removeDraft}
+              onDraftSpawned={draftSpawned}
+              onHandoff={addHandoffDraft}
+            />
+          ) : (
+            <SchemeBoard
+              project={project}
+              groups={schemeGroups}
+              manual={schemeManual}
+              files={files}
+              flows={flows}
+              drafts={drafts}
+              focus={highlight}
+              attentionPaths={attentionPaths}
+              onSelect={openSwitchboardFile}
+              onClose={closeNode}
+              onDraftClose={removeDraft}
+              onDraftSpawned={draftSpawned}
+              onHandoff={addHandoffDraft}
+            />
+          )
+        ) : projectFiles.length ? (
+          <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
         ) : (
-          <SchemeBoard
-            project={project}
-            groups={schemeGroups}
-            manual={schemeManual}
-            files={files}
-            flows={flows}
-            drafts={drafts}
-            focus={highlight}
-            attentionPaths={attentionPaths}
-            onSelect={openSwitchboardFile}
-            onClose={closeNode}
-            onDraftClose={removeDraft}
-            onDraftSpawned={draftSpawned}
-            onHandoff={addHandoffDraft}
-          />
-        )
-      ) : projectFiles.length ? (
-        <QuietFileList files={projectFiles} onOpen={openSwitchboardFile} />
-      ) : (
-        <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-          <div>
-            <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
-            <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+          <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+            <div>
+              <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
+              <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+        {/* The create cluster floats in the bottom-left corner of the board —
+            away from the fixed attention pill in the top-right, above the
+            residual strip. On the phone the header keeps these buttons. */}
+        {isMobile ? null : (
+          <div className="pointer-events-none absolute bottom-4 left-4 z-30 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={addDraft}
+              aria-label={t("dash.newConvo")}
+              className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+            </button>
+            <button
+              type="button"
+              onClick={addWorkflowDraft}
+              aria-label={t("dash.newWorkflow")}
+              className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.workflow")}
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}

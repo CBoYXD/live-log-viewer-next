@@ -14,7 +14,7 @@ import { outputHolders, pidAlive } from "./process";
 import { goalFor, planFor } from "./plan";
 import { pendingQuestionFor } from "./questions";
 import { assignTranscriptPids } from "./transcripts";
-import { waitingInputFor } from "./waitingInput";
+import { waitingInputProbe } from "./waitingInput";
 
 function applyProcessState(entry: FileEntry, holders: Map<string, number>, job: Record<string, unknown> | null) {
   if (entry.root === "codex-jobs") {
@@ -94,7 +94,15 @@ export async function listFiles(): Promise<FileEntry[]> {
   await Promise.all(entries.map(async (entry) => {
     const pending = pendingQuestionFor(entry);
     entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
-    entry.waitingInput = await waitingInputFor(entry);
+    const probe = await waitingInputProbe(entry);
+    entry.waitingInput = probe.waiting;
+    /* A stalled transcript whose pane sits at a plain composer was interrupted
+       mid-turn (Esc leaves the turn open in the jsonl): the agent is idle, not
+       blocked, so it must not wear the «перервано або чекає дозволу» state. */
+    if (probe.atComposer && entry.activity === "stalled") {
+      entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle";
+      entry.activityReason = "pane_at_composer";
+    }
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);

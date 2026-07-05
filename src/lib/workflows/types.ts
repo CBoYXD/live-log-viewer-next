@@ -55,6 +55,9 @@ export type Workflow = {
   id: string; // short uuid slice, like flows
   name: string; // template name or "ad-hoc"
   task: string; // user's brief
+  /** Scanner project key of repoDir, stamped at creation: the dashboard
+      group where the strip renders before any agent transcript exists. */
+  project: string;
   repoDir: string;
   worktreeDir: string;
   branch: string; // wf/<slug>

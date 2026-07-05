@@ -77,6 +77,15 @@ function implementStageOf(value: Partial<ImplementStage>): ImplementStage | null
   return { kind: "implement", agent, scope: value.scope.trim() };
 }
 
+/** W5 holds regardless of what the templates file says: the fixer is always
+    codex at low effort. A codex fixer may still name a model; anything else
+    collapses to the default. */
+function normalizeFixer(value: unknown): RoleConfig {
+  const role = roleOf(value);
+  if (!role || role.engine !== "codex") return { ...DEFAULT_FIXER };
+  return { engine: "codex", model: role.model, effort: "low" };
+}
+
 /** Missing fixer/limits fall back to the W5/W9 defaults instead of failing. */
 function reviewStageOf(value: Partial<ReviewStage>): ReviewStage | null {
   const reviewer = roleOf(value.reviewer);
@@ -84,7 +93,7 @@ function reviewStageOf(value: Partial<ReviewStage>): ReviewStage | null {
   return {
     kind: "review-loop",
     reviewer,
-    fixer: roleOf(value.fixer) ?? { ...DEFAULT_FIXER },
+    fixer: normalizeFixer(value.fixer),
     roundLimit: Number.isInteger(value.roundLimit) && (value.roundLimit as number) >= 0 ? Math.min(value.roundLimit as number, 50) : 5,
     reviewerMode: value.reviewerMode === "pane" ? "pane" : "headless",
   };
@@ -156,6 +165,7 @@ export function loadWorkflows(): Workflow[] {
   const workflows = Array.isArray(raw?.workflows) ? raw.workflows.filter(isWorkflow) : [];
   return workflows.map((wf) => ({
     ...wf,
+    project: wf.project ?? "",
     pausedState: wf.pausedState ?? null,
     setupPid: wf.setupPid ?? null,
     srcPath: wf.srcPath ?? null,
@@ -202,6 +212,7 @@ export function buildWorkflow(input: {
   id: string;
   name: string;
   task: string;
+  project: string;
   repoDir: string;
   template: WorkflowTemplate;
   mode: "auto" | "manual";
@@ -212,6 +223,7 @@ export function buildWorkflow(input: {
     id: input.id,
     name: input.name,
     task: input.task,
+    project: input.project,
     repoDir: input.repoDir,
     worktreeDir: path.join(path.dirname(input.repoDir), `${repoName}-wf-${input.id}`),
     branch: `wf/${slugify(input.task)}-${input.id}`,

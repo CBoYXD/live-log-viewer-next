@@ -54,7 +54,7 @@ describe("attentionId", () => {
     expect(attentionId(both, NOW)).toBe("toolu_1");
     const wait = entry({ path: "/w", activity: "stalled", waitingInput: waiting(NOW - 20) });
     expect(attentionId(wait, NOW)).toBe(`/w:waiting:${NOW - 20}`);
-    const stalled = entry({ path: "/s", activity: "stalled", mtime: NOW - 300 });
+    const stalled = entry({ path: "/s", activity: "stalled", proc: "running", mtime: NOW - 300 });
     expect(attentionId(stalled, NOW)).toBe(`/s:stalled:${NOW - 300}`);
     expect(attentionId(entry({ path: "/idle" }), NOW)).toBeNull();
     expect(attentionId(entry({ path: "/live", activity: "live" }), NOW)).toBeNull();
@@ -67,15 +67,24 @@ describe("attentionId", () => {
     expect(attentionId(q, NOW)).toBe(q.pendingQuestion!.toolUseId);
     const w = entry({ path: "/b", waitingInput: waiting(NOW - 33.7) });
     expect(attentionId(w, NOW)).toBe(`${w.path}:waiting:${Math.floor(w.waitingInput!.since)}`);
-    const s = entry({ path: "/c", activity: "stalled", mtime: NOW - 400.9 });
+    const s = entry({ path: "/c", activity: "stalled", proc: "running", mtime: NOW - 400.9 });
     expect(attentionId(s, NOW)).toBe(`${s.path}:stalled:${Math.floor(s.mtime)}`);
   });
 
   test("stalled TTL boundary: in at 2h, out just past it", () => {
-    const inside = entry({ path: "/in", activity: "stalled", mtime: NOW - STALLED_ATTENTION_TTL });
+    const inside = entry({ path: "/in", activity: "stalled", proc: "running", mtime: NOW - STALLED_ATTENTION_TTL });
     expect(attentionId(inside, NOW)).toBe(`/in:stalled:${NOW - STALLED_ATTENTION_TTL}`);
-    const outside = entry({ path: "/out", activity: "stalled", mtime: NOW - STALLED_ATTENTION_TTL - 1 });
+    const outside = entry({ path: "/out", activity: "stalled", proc: "running", mtime: NOW - STALLED_ATTENTION_TTL - 1 });
     expect(attentionId(outside, NOW)).toBeNull();
+  });
+
+  test("a stalled session without a live process never counts as attention", () => {
+    const abandoned = entry({ path: "/dead", activity: "stalled", proc: null });
+    expect(attentionId(abandoned, NOW)).toBeNull();
+    const exited = entry({ path: "/done", activity: "stalled", proc: "done" });
+    expect(attentionId(exited, NOW)).toBeNull();
+    const killed = entry({ path: "/killed", activity: "stalled", proc: "killed" });
+    expect(attentionId(killed, NOW)).toBeNull();
   });
 
   test("a returned subagent never counts as stalled attention", () => {
@@ -89,7 +98,7 @@ describe("attentionId", () => {
 describe("buildAttentionQueue", () => {
   test("blocked segment precedes stalled regardless of since", () => {
     const files = [
-      entry({ path: "/old-stall", activity: "stalled", mtime: NOW - 7000 }),
+      entry({ path: "/old-stall", activity: "stalled", proc: "running", mtime: NOW - 7000 }),
       entry({ path: "/fresh-q", pendingQuestion: question("toolu_q", NOW - 5) }),
     ];
     const queue = buildAttentionQueue(files, NOW);
@@ -131,7 +140,7 @@ describe("buildAttentionQueue", () => {
     const files = [
       entry({ path: "/q", pendingQuestion: question("toolu_s", NOW - 111) }),
       entry({ path: "/w", waitingInput: waiting(NOW - 222) }),
-      entry({ path: "/s", activity: "stalled", mtime: NOW - 333 }),
+      entry({ path: "/s", activity: "stalled", proc: "running", mtime: NOW - 333 }),
     ];
     const bySince = new Map(buildAttentionQueue(files, NOW).map((item) => [item.file.path, item.since]));
     expect(bySince.get("/q")).toBe(NOW - 111);

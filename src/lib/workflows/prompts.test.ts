@@ -21,6 +21,7 @@ function makeWorkflow(): Workflow {
     id: "wf123456",
     name: "fullstack",
     task: "Add dark mode to the settings page",
+    project: "repo",
     repoDir: "/home/user/proj/repo",
     template: TEMPLATE,
     mode: "auto",

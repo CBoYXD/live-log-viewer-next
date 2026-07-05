@@ -9,6 +9,7 @@ import { lastAssistantMessage } from "@/lib/flows/findings";
 import { loadFlows } from "@/lib/flows/store";
 import type { CreateFlowRequest, Flow, RoleConfig } from "@/lib/flows/types";
 import { persistHandoffLineage, rememberHandoffChild } from "@/lib/handoffLineage";
+import { projectForCwd } from "@/lib/scanner/describe";
 import { isShellCommand } from "@/lib/status";
 import { paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
@@ -59,6 +60,8 @@ export interface WorkflowPorts {
   getFlow(id: string): Flow | null;
   /** Newest flow bound to this implementer, for restart adoption. */
   findFlowByImplementer(implementerPath: string): Flow | null;
+  /** Scanner project key of a directory (worktrees resolve to the main repo). */
+  projectForCwd(cwd: string): string | null;
   linkChild(childPath: string, parentPath: string): void;
   now(): string;
 }
@@ -87,6 +90,7 @@ export function defaultPorts(): WorkflowPorts {
       loadFlows()
         .filter((flow) => flow.implementerPath === implementerPath)
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0] ?? null,
+    projectForCwd,
     linkChild: (child, parent) => {
       rememberHandoffChild(child, parent);
       persistHandoffLineage();
@@ -564,6 +568,9 @@ export function createWorkflowFromRequest(
     id: crypto.randomUUID().slice(0, 8),
     name: template.name,
     task,
+    /* The scanner's own project key: agents born in the sibling worktree
+       resolve to the main repo's project, so the strip must land there too. */
+    project: ports.projectForCwd(repoDir) ?? path.basename(repoDir),
     repoDir,
     template,
     mode: req.mode === "manual" ? "manual" : "auto",

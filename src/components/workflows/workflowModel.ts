@@ -14,18 +14,18 @@ export function isWorkflowDraftId(id: string): boolean {
   return id.startsWith(WORKFLOW_DRAFT_PREFIX);
 }
 
-/** Workflows a project's dashboard shows: those whose agents live in the
-    project's files, plus fresh ones matched by repo/worktree directory name
-    (project slugs end with the directory basename) so the strip appears
-    while provisioning, before any transcript exists. */
+/** Workflows a project's dashboard shows. The server stamps each workflow
+    with the scanner's own project key for its repoDir, so the strip appears
+    in the right group from the provisioning moment on, before any transcript
+    exists; the agent-path matches keep older records without the stamp
+    visible once their agents show up. */
 export function workflowsForProject(workflows: Workflow[], project: string, files: FileEntry[]): Workflow[] {
   const projectPaths = new Set(files.filter((file) => file.project === project).map((file) => file.path));
-  const basename = (dir: string) => dir.split("/").filter(Boolean).at(-1) ?? "";
   return workflows.filter((wf) => {
     if (wf.state === "closed") return false;
+    if (wf.project === project) return true;
     if (wf.stageRuns.some((run) => run.agentPath && projectPaths.has(run.agentPath))) return true;
-    if (wf.fixerPath && projectPaths.has(wf.fixerPath)) return true;
-    return basename(wf.worktreeDir) === project || basename(wf.repoDir) === project;
+    return Boolean(wf.fixerPath && projectPaths.has(wf.fixerPath));
   });
 }
 

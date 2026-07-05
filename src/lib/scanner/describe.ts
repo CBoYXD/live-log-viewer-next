@@ -119,6 +119,13 @@ function projectInfoFromCwd(cwd: string): { project: string; worktree?: string }
   return project ? { project, worktree: worktree?.worktree } : null;
 }
 
+/** The project key a session running in `cwd` gets from the scanner. The
+    workflow engine stamps this on new workflows so their strip lands in the
+    same dashboard group as the agents the worktree will host. */
+export function projectForCwd(cwd: string): string | null {
+  return projectInfoFromCwd(cwd)?.project ?? null;
+}
+
 function worktreeFromSlug(slug: string): { project: string; worktree: string } | null {
   const marker = "--claude-worktrees-";
   const index = slug.indexOf(marker);

@@ -1,6 +1,6 @@
 import type { FileEntry } from "@/lib/types";
 
-import { isSubagent, projectKey } from "./projectModel";
+import { projectKey } from "./projectModel";
 
 /**
  * The attention queue: which agents are blocked on the user right now, oldest
@@ -27,10 +27,6 @@ export interface AttentionItem {
    switchboard's isAwaitingUser so the queue and the «waiting» bucket agree. */
 export const STALLED_ATTENTION_TTL = 2 * 3600;
 
-function isReturnedSubagent(file: FileEntry): boolean {
-  return isSubagent(file) && file.proc !== "running";
-}
-
 /** Epoch seconds an ISO timestamp names, or null when it does not parse. */
 function isoSeconds(iso: string): number | null {
   const ms = Date.parse(iso);
@@ -48,7 +44,10 @@ function isoSeconds(iso: string): number | null {
 export function attentionId(file: FileEntry, now: number = Date.now() / 1000): string | null {
   if (file.pendingQuestion) return file.pendingQuestion.toolUseId;
   if (file.waitingInput) return `${file.path}:waiting:${Math.floor(file.waitingInput.since)}`;
-  if (file.activity === "stalled" && !isReturnedSubagent(file) && now - file.mtime <= STALLED_ATTENTION_TTL) {
+  /* The stalled tier needs a live process behind the transcript: an open turn
+     whose agent already exited is an abandoned session, not a pending
+     permission prompt — only someone still at the terminal can wait on you. */
+  if (file.activity === "stalled" && file.proc === "running" && now - file.mtime <= STALLED_ATTENTION_TTL) {
     return `${file.path}:stalled:${Math.floor(file.mtime)}`;
   }
   return null;

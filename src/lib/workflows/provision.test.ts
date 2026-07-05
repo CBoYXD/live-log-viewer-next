@@ -32,6 +32,7 @@ function makeWorkflow(repoDir: string, overrides: Partial<Workflow> = {}): Workf
     id: "wfid1234",
     name: "demo",
     task: "Add a greeting file",
+    project: "repo",
     repoDir,
     template: TEMPLATE,
     mode: "auto",

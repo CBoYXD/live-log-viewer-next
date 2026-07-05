@@ -126,6 +126,7 @@ function makeHarness() {
     getFlow: (id) => state.flows.get(id) ?? null,
     findFlowByImplementer: (implementerPath) =>
       [...state.flows.values()].find((flow) => flow.implementerPath === implementerPath) ?? null,
+    projectForCwd: (cwd) => (cwd === "/repos/repo" ? "repo" : null),
     linkChild: (child, parent) => calls.push(`link:${child}<-${parent}`),
     now,
   };
@@ -163,6 +164,18 @@ test("createWorkflowFromRequest validates task, repo and stages", () => {
   const { ports: failing, state } = makeHarness();
   state.execFail = "--git-dir";
   expect(createWorkflowFromRequest({ task: "t", repoDir: "/r", stages: STAGES as never }, failing).status).toBe(400);
+});
+
+test("createWorkflowFromRequest stamps the scanner project key, basename as fallback", () => {
+  const { ports } = makeHarness();
+  const stamped = createWf(ports);
+  expect(stamped.project).toBe("repo");
+  saveWorkflows([]);
+  const fallback = createWorkflowFromRequest(
+    { task: "t", repoDir: "/elsewhere/deep/tool-dir", stages: STAGES as never },
+    ports,
+  );
+  expect(fallback.workflow?.project).toBe("tool-dir");
 });
 
 test("happy path: provision → two stages → review flow → PR", async () => {

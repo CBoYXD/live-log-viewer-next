@@ -59,6 +59,21 @@ test("normalizeStages injects the codex-low fixer default and review defaults", 
   expect(review.reviewerMode).toBe("headless");
 });
 
+test("fixer overrides keep the W5 contract: always codex at low effort", () => {
+  const claudeFixer = normalizeStages([IMPLEMENT, { ...REVIEW, fixer: { engine: "claude", model: "fable", effort: null } }]);
+  if ("error" in claudeFixer) throw new Error(claudeFixer.error);
+  const claudeStage = claudeFixer.stages[1]!;
+  if (claudeStage.kind !== "review-loop") throw new Error("expected review stage");
+  expect(claudeStage.fixer).toEqual(DEFAULT_FIXER);
+
+  /* A codex fixer may pick its model; the effort still clamps to low. */
+  const codexFixer = normalizeStages([IMPLEMENT, { ...REVIEW, fixer: { engine: "codex", model: "gpt-5.5", effort: "xhigh" } }]);
+  if ("error" in codexFixer) throw new Error(codexFixer.error);
+  const codexStage = codexFixer.stages[1]!;
+  if (codexStage.kind !== "review-loop") throw new Error("expected review stage");
+  expect(codexStage.fixer).toEqual({ engine: "codex", model: "gpt-5.5", effort: "low" });
+});
+
 test("normalizeTemplate defaults finish to pr and trims optional commands", () => {
   const template = normalizeTemplate({ name: " demo ", stages: [IMPLEMENT, REVIEW], setup: " bun install " });
   expect(template?.name).toBe("demo");
@@ -84,6 +99,7 @@ test("workflows round-trip through the store", () => {
     id: "abcd1234",
     name: "demo",
     task: "Fix the login flow",
+    project: "repo",
     repoDir: "/home/user/proj/repo",
     template,
     mode: "manual",
@@ -100,6 +116,7 @@ test("buildWorkflow derives sibling worktree dir and wf/ branch from the task", 
     id: "abcd1234",
     name: "demo",
     task: "Fix the LOGIN flow!!",
+    project: "repo",
     repoDir: "/home/user/proj/repo",
     template,
     mode: "auto",
@@ -117,6 +134,7 @@ test("buildWorkflow freezes the template: later template mutation stays invisibl
     id: "abcd1234",
     name: "demo",
     task: "task",
+    project: "repo",
     repoDir: "/home/user/proj/repo",
     template,
     mode: "auto",
