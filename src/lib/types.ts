@@ -208,3 +208,38 @@ export interface LimitsPayload {
   /** ISO timestamp from the first failed refresh behind this fallback payload. */
   staleSince?: string | null;
 }
+
+/** Host memory pressure for the rail block, all byte fields absolute.
+    swapTotal 0 means "no swap (or the swap probe failed)" — hide the row. */
+export interface ResourcesSystem {
+  ramTotal: number;
+  ramAvailable: number;
+  swapTotal: number;
+  swapUsed: number;
+  /** ISO timestamp of the snapshot behind these numbers. */
+  capturedAt: string;
+}
+
+/** One tmux pane hosting an agent CLI, with its whole process tree's memory.
+    `path` is null for orphans — panes running an agent the scanner could not
+    match to any transcript; they are still killable via their target. */
+export interface ResourceSession {
+  target: string;
+  panePid: number;
+  path: string | null;
+  engine: "claude" | "codex" | null;
+  title: string | null;
+  project: string | null;
+  activity: Activity | null;
+  lastActiveAt: string | null;
+  /** Tree totals across the pane pid and every descendant (MCP children included). */
+  rssBytes: number;
+  swapBytes: number;
+  procCount: number;
+}
+
+/** GET /api/resources response. `system` is null when no platform probe worked. */
+export interface ResourcesPayload {
+  system: ResourcesSystem | null;
+  sessions: ResourceSession[];
+}

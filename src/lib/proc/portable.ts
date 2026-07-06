@@ -1,7 +1,9 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 
-import type { ProcBackend, ProcSnapshotEntry } from "./types";
+import { parsePsMemory, parseSwapUsage, parseVmStat } from "./memory";
+import type { ProcBackend, ProcessMemory, ProcSnapshotEntry, SystemMemory } from "./types";
 
 /**
  * macOS (and any non-Linux POSIX) backend: no `/proc`, so process state comes
@@ -193,6 +195,49 @@ function listProcesses(): ProcSnapshotEntry[] {
   return list;
 }
 
+/**
+ * macOS memory pressure: total from the OS API, available approximated from
+ * `vm_stat` page counts, swap from `sysctl vm.swapusage`. Every parse is
+ * defensive — a host where `vm_stat` is missing (e.g. the portable backend
+ * forced on Linux) yields null and the UI hides the block; a failed swap
+ * probe alone hides only the swap row (swapTotal 0).
+ */
+function systemMemory(): SystemMemory | null {
+  const ramTotal = os.totalmem();
+  const ramAvailable = parseVmStat(runCapture("vm_stat", []));
+  if (!ramTotal || ramAvailable === null) return null;
+  const swap = parseSwapUsage(runCapture("sysctl", ["-n", "vm.swapusage"]));
+  return {
+    ramTotal,
+    ramAvailable: Math.min(ramAvailable, ramTotal),
+    swapTotal: swap?.swapTotal ?? 0,
+    swapUsed: swap?.swapUsed ?? 0,
+  };
+}
+
+/** One bulk `ps` pass; per-process swap has no portable source, so swapBytes
+    is 0 and callers show RSS alone. */
+function processMemory(pids: Iterable<number>): Map<number, ProcessMemory> {
+  const wanted = new Set<number>();
+  for (const pid of pids) {
+    if (Number.isInteger(pid) && pid > 0) wanted.add(pid);
+  }
+  const map = new Map<number, ProcessMemory>();
+  if (wanted.size === 0) return map;
+  for (const [pid, rssBytes] of parsePsMemory(runCapture("ps", ["-axo", "pid=,rss="]))) {
+    if (wanted.has(pid)) map.set(pid, { rssBytes, swapBytes: 0 });
+  }
+  return map;
+}
+
+function ppidMap(): Map<number, number> {
+  const map = new Map<number, number>();
+  for (const [pid, row] of snapshot()) {
+    if (row.ppid !== null) map.set(pid, row.ppid);
+  }
+  return map;
+}
+
 function scanFdTargetsUnder(underDir: string, visit: (target: string, pid: number, writable: () => boolean) => void): void {
   if (!underDir || !fs.existsSync(underDir)) return;
   parseFdEntries(runCapture("lsof", ["-w", "+D", underDir, "-Fpfan"]), visit);
@@ -228,6 +273,9 @@ export const portableBackend: ProcBackend = {
   readPpid,
   readEnvVar,
   listProcesses,
+  systemMemory,
+  processMemory,
+  ppidMap,
   scanFdTargetsUnder,
   scanFdTargetsFor,
   pidWritesPath,

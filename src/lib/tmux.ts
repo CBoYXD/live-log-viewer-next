@@ -74,7 +74,16 @@ export function collectImagePayloads(body: { image?: unknown; images?: unknown }
 /** A resolved tmux target in `session:window.pane` form (e.g. `0:1.0`). */
 export type TmuxTarget = string;
 
-let paneMemo: { at: number; map: Map<number, TmuxTarget> } | null = null;
+/** One pane, addressed two ways: the display coordinates shown in the UI and
+    the stable `%N` pane id. Coordinates renumber as windows close (this repo's
+    users run `renumber-windows on`), so anything that acts on a pane later —
+    a kill in particular — must go through `paneId`. */
+export interface PaneRef {
+  target: TmuxTarget;
+  paneId: string;
+}
+
+let paneMemo: { at: number; map: Map<number, PaneRef> } | null = null;
 
 interface RunResult {
   code: number | null;
@@ -97,19 +106,21 @@ function runTmux(args: string[], input?: Buffer | string): Promise<RunResult> {
   });
 }
 
-/** pane_pid → target map from `tmux list-panes -a`, memoised for a few seconds. */
-async function panePidMap(): Promise<Map<number, TmuxTarget>> {
+/** pane_pid → pane map from `tmux list-panes -a`, memoised for a few seconds.
+    `fresh` bypasses the memo — a rebuild right after a kill must observe the
+    pane's absence immediately, or the killed session ghosts back in. */
+export async function panePidMap(fresh = false): Promise<Map<number, PaneRef>> {
   const now = Date.now();
-  if (paneMemo && now - paneMemo.at < PANE_MAP_TTL_MS) return paneMemo.map;
+  if (!fresh && paneMemo && now - paneMemo.at < PANE_MAP_TTL_MS) return paneMemo.map;
 
-  const map = new Map<number, TmuxTarget>();
+  const map = new Map<number, PaneRef>();
   let result: RunResult;
   try {
     result = await runTmux([
       "list-panes",
       "-a",
       "-F",
-      "#{session_name}:#{window_index}.#{pane_index} #{pane_pid}",
+      "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}",
     ]);
   } catch {
     paneMemo = { at: now, map };
@@ -117,11 +128,11 @@ async function panePidMap(): Promise<Map<number, TmuxTarget>> {
   }
   if (result.code === 0) {
     for (const line of result.stdout.split("\n")) {
-      const sep = line.lastIndexOf(" ");
-      if (sep < 0) continue;
-      const target = line.slice(0, sep).trim();
-      const panePid = Number(line.slice(sep + 1).trim());
-      if (target && Number.isInteger(panePid) && panePid > 0) map.set(panePid, target);
+      const [target = "", paneId = "", pidRaw = ""] = line.split("\t");
+      const panePid = Number(pidRaw.trim());
+      if (target.trim() && paneId.startsWith("%") && Number.isInteger(panePid) && panePid > 0) {
+        map.set(panePid, { target: target.trim(), paneId: paneId.trim() });
+      }
     }
   }
   paneMemo = { at: now, map };
@@ -145,7 +156,7 @@ export async function resolveTarget(pid: number): Promise<TmuxTarget | null> {
   let cursor: number | null = pid;
   for (let hop = 0; hop < MAX_ANCESTRY_HOPS && cursor !== null && cursor > 1; hop += 1) {
     const hit = panes.get(cursor);
-    if (hit) return hit;
+    if (hit) return hit.target;
     if (seen.has(cursor) || isHelperArgv(readArgv(cursor))) break;
     seen.add(cursor);
     cursor = readPpid(cursor);
@@ -293,6 +304,18 @@ export async function sendInterrupt(target: TmuxTarget): Promise<void> {
   const res = await runTmux(["send-keys", "-t", target, "Escape"]);
   logEvent("interrupt", { target, result: res.code === 0 ? "ok" : "error", reason: res.stderr.trim() || undefined });
   if (res.code !== 0) throw new Error(res.stderr.trim() || "не вдалося надіслати Escape");
+}
+
+/**
+ * Current shell pid of the pane at `target`, or null when no such pane exists.
+ * Used to re-verify a pane's identity right before killing it by display
+ * coordinates — tmux renumbers `session:window.pane` targets as windows close,
+ * so coordinates recorded earlier may point at a different pane by kill time.
+ */
+export async function panePidOf(target: TmuxTarget): Promise<number | null> {
+  const res = await runTmux(["display-message", "-p", "-t", target, "#{pane_pid}"]).catch(() => null);
+  const pid = res && res.code === 0 ? Number(res.stdout.trim()) : NaN;
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
 /**

@@ -6,6 +6,24 @@
  * memoization, ppid-chain walks) on top of these primitives.
  */
 
+/** Whole-host memory pressure, all fields in bytes. `ramAvailable` is the
+    kernel's reclaim-aware headroom (MemAvailable / vm_stat estimate); plain
+    "free" excludes reclaimable caches and badly understates it. A host
+    without swap has swapTotal 0. */
+export interface SystemMemory {
+  ramTotal: number;
+  ramAvailable: number;
+  swapTotal: number;
+  swapUsed: number;
+}
+
+/** One process's resident + swapped footprint in bytes. Backends that cannot
+    attribute swap per process (portable) report swapBytes 0. */
+export interface ProcessMemory {
+  rssBytes: number;
+  swapBytes: number;
+}
+
 /** One live process, as much as a backend can cheaply report about it. */
 export interface ProcSnapshotEntry {
   pid: number;
@@ -38,6 +56,25 @@ export interface ProcBackend {
 
   /** Every live process on the system, for the claude/codex scan in `agentProcesses`. */
   listProcesses(): ProcSnapshotEntry[];
+
+  /**
+   * Host memory pressure, or null when the platform probe fails (no
+   * /proc/meminfo and no vm_stat) — null tells callers to hide the numbers,
+   * since zeros would render as a full-pressure host.
+   */
+  systemMemory(): SystemMemory | null;
+
+  /**
+   * Resident + swapped bytes for each of `pids` that is still alive; pids
+   * that vanished mid-scan are simply absent from the result.
+   */
+  processMemory(pids: Iterable<number>): Map<number, ProcessMemory>;
+
+  /**
+   * pid → ppid for every live process, in one pass — the input for process
+   * tree walks (an agent pane's MCP children hold most of its memory).
+   */
+  ppidMap(): Map<number, number>;
 
   /**
    * Visits every open-file fd on the system whose target lives under

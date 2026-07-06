@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ProcBackend, ProcSnapshotEntry } from "./types";
+import { parseMeminfo, parseProcStatus } from "./memory";
+import type { ProcBackend, ProcessMemory, ProcSnapshotEntry, SystemMemory } from "./types";
 
 const PROC = "/proc";
 
@@ -71,6 +72,48 @@ function readEnvVar(pid: number, name: string): string | null {
     if (pair.startsWith(prefix)) value = pair.slice(prefix.length);
   }
   return value;
+}
+
+function systemMemory(): SystemMemory | null {
+  try {
+    return parseMeminfo(fs.readFileSync(path.join(PROC, "meminfo"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/** VmRSS + VmSwap per pid from /proc/<pid>/status. A smaps read would be
+    orders of magnitude slower, and status granularity is enough for a
+    cleanup UI. */
+function processMemory(pids: Iterable<number>): Map<number, ProcessMemory> {
+  const map = new Map<number, ProcessMemory>();
+  for (const pid of pids) {
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    try {
+      map.set(pid, parseProcStatus(fs.readFileSync(path.join(PROC, String(pid), "status"), "utf8")));
+    } catch {
+      /* exited mid-scan: omit */
+    }
+  }
+  return map;
+}
+
+function ppidMap(): Map<number, number> {
+  const map = new Map<number, number>();
+  let procEntries: fs.Dirent[];
+  try {
+    procEntries = fs.readdirSync(PROC, { withFileTypes: true });
+  } catch {
+    return map;
+  }
+  for (const procEntry of procEntries) {
+    if (!procEntry.isDirectory() || !/^\d+$/.test(procEntry.name)) continue;
+    const pid = Number(procEntry.name);
+    const fields = statFields(pid);
+    const ppid = fields ? Number(fields[1]) : NaN;
+    if (Number.isInteger(ppid) && ppid > 0) map.set(pid, ppid);
+  }
+  return map;
 }
 
 function listProcesses(): ProcSnapshotEntry[] {
@@ -196,6 +239,9 @@ export const linuxBackend: ProcBackend = {
   readPpid,
   readEnvVar,
   listProcesses,
+  systemMemory,
+  processMemory,
+  ppidMap,
   scanFdTargetsUnder,
   scanFdTargetsFor,
   pidWritesPath,
