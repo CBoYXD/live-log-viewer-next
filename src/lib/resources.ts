@@ -73,6 +73,37 @@ function entriesByPid(entries: FileEntry[]): Map<number, FileEntry> {
   return byPid;
 }
 
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
+
+/**
+ * session-uuid → transcript entry, keyed by the uuid in the file basename
+ * (claude `<uuid>.jsonl`, codex `rollout-<ts>-<uuid>.jsonl`). Pid attribution
+ * needs the CLI to hold its transcript open, which an idle session at the
+ * prompt does not — the uuid the CLI was launched with (`--session-id`,
+ * `--resume`, `codex resume <id>`) still names it.
+ */
+function entriesBySessionUuid(entries: FileEntry[]): Map<string, FileEntry> {
+  const byUuid = new Map<string, FileEntry>();
+  for (const entry of entries) {
+    if (!entry.path.endsWith(".jsonl")) continue;
+    const base = entry.path.slice(entry.path.lastIndexOf("/") + 1);
+    const uuid = base.match(UUID_RE)?.[0];
+    if (!uuid) continue;
+    const current = byUuid.get(uuid);
+    if (!current || (current.parent && !entry.parent)) byUuid.set(uuid, entry);
+  }
+  return byUuid;
+}
+
+/** Last uuid-shaped token in the CLI's argv, if any. */
+function argvSessionUuid(argv: string[]): string | null {
+  for (let i = argv.length - 1; i >= 0; i--) {
+    const match = argv[i].match(UUID_RE);
+    if (match) return match[0];
+  }
+  return null;
+}
+
 /** `fresh` skips the pane/agent-process memos too, all the way down: a
     rebuild triggered right after a kill would otherwise read 5s-old caches
     and re-list (and re-allowlist) the session that was just killed. */
@@ -84,9 +115,11 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
   const sessions: ResourceSession[] = [];
   if (panes.size > 0) {
     const ppids = procBackend.ppidMap();
-    const agentEngine = new Map<number, AgentEngine>();
-    for (const proc of agentProcesses(fresh)) agentEngine.set(proc.pid, proc.engine);
-    const byPid = entriesByPid(await listFiles());
+    const agents = new Map<number, { engine: AgentEngine; argv: string[]; cwd: string }>();
+    for (const proc of agentProcesses(fresh)) agents.set(proc.pid, { engine: proc.engine, argv: proc.argv, cwd: proc.cwd });
+    const files = await listFiles();
+    const byPid = entriesByPid(files);
+    const byUuid = entriesBySessionUuid(files);
 
     /* Trees first, memory second: one processMemory() batch over the union
        keeps the portable backend at a single `ps` spawn for all panes. */
@@ -94,7 +127,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
     const treePids = new Set<number>();
     for (const [panePid, pane] of panes) {
       const tree = descendantPids(panePid, ppids);
-      const agentPids = tree.filter((pid) => agentEngine.has(pid));
+      const agentPids = tree.filter((pid) => agents.has(pid));
       if (agentPids.length === 0) continue; // plain shell / editor / dev-server pane
       paneTrees.push({ target: pane.target, paneId: pane.paneId, panePid, tree, agentPids });
       for (const pid of tree) treePids.add(pid);
@@ -111,16 +144,28 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
         rssBytes += mem.rssBytes;
         swapBytes += mem.swapBytes;
       }
-      const entry = agentPids.map((pid) => byPid.get(pid)).find(Boolean) ?? null;
+      /* Pid attribution first (live sessions), argv session-uuid second (idle
+         CLIs sitting at their prompt no longer hold the transcript open). */
+      const entry =
+        agentPids.map((pid) => byPid.get(pid)).find(Boolean) ??
+        agentPids
+          .map((pid) => {
+            const uuid = argvSessionUuid(agents.get(pid)?.argv ?? []);
+            return uuid ? byUuid.get(uuid) : undefined;
+          })
+          .find(Boolean) ??
+        null;
+      const lead = agents.get(agentPids[0]) ?? null;
       sessions.push({
         target,
         panePid,
         path: entry?.path ?? null,
-        engine: agentEngine.get(agentPids[0]) ?? null,
+        engine: lead?.engine ?? null,
         title: entry?.title ?? null,
         project: entry?.project || null,
         activity: entry?.activity ?? null,
         lastActiveAt: entry ? isoFromUnix(entry.mtime) : null,
+        cwd: lead?.cwd ?? null,
         rssBytes,
         swapBytes,
         procCount: tree.length,

@@ -8,7 +8,8 @@ import { getLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { LogChunk } from "@/lib/types";
 
-const POLL_MS = 1200;
+import { subscribeLog } from "./logBus";
+
 /** Longest single jsonl line we are willing to chase across history chunks. */
 const OLDER_CHUNK_HOPS = 4;
 
@@ -16,6 +17,10 @@ const utf8len = (text: string) => new TextEncoder().encode(text).length;
 
 export interface LogTailState {
   lines: string[];
+  /** Absolute index of `lines[0]` in the tail stream: grows as the cap trims
+      the front, goes negative when history is prepended. Feed sessions use it
+      to parse only lines they have not seen. */
+  linesStart: number;
   size: number;
   loading: boolean;
   error: string | null;
@@ -42,7 +47,9 @@ export interface LogTailState {
  */
 export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 2500): LogTailState {
   const capRef = useRef(cap);
-  const [lines, setLines] = useState<string[]>([]);
+  /* One atomic window state: the lines plus the absolute index of lines[0],
+     updated together so a trim and its start shift can never tear. */
+  const [win, setWin] = useState<{ lines: string[]; start: number }>({ lines: [], start: 0 });
   const [size, setSize] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,16 +63,11 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
   const tailRef = useRef("");
   const firstRef = useRef(true);
   const genRef = useRef(0);
-  const pausedRef = useRef(false);
   const olderBusyRef = useRef(false);
 
   useEffect(() => {
     capRef.current = cap;
   }, [cap]);
-
-  useEffect(() => {
-    pausedRef.current = paused || pausedInput;
-  }, [paused, pausedInput]);
 
   const resetWindow = () => {
     offsetRef.current = 0;
@@ -76,38 +78,46 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
   };
 
   const clear = useCallback(() => {
-    setLines([]);
+    setWin({ lines: [], start: 0 });
     resetWindow();
   }, []);
 
   useEffect(() => {
     genRef.current += 1;
     resetWindow();
-    setLines([]);
+    setWin({ lines: [], start: 0 });
     setSize(file?.size ?? 0);
     setError(null);
     setLoading(Boolean(file));
   }, [file?.path]);
 
+  /* Forward polling rides the shared log bus: one batched request per tick
+     for every mounted pane. A paused pane unsubscribes entirely — the server
+     must not keep re-reading bytes nobody consumes — and resuming triggers
+     the bus's immediate tick, so catch-up beats the old fixed interval. */
   useEffect(() => {
-    if (!file) return;
+    if (!file || paused || pausedInput) return;
     let alive = true;
     const gen = genRef.current;
-    const poll = async () => {
-      if (!alive || pausedRef.current) return;
-      try {
-        const res = await fetch(`/api/log?path=${encodeURIComponent(file.path)}&offset=${offsetRef.current}`);
-        const json = (await res.json()) as LogChunk | { error?: string };
+    const unsubscribe = subscribeLog({
+      path: file.path,
+      getOffset: () => offsetRef.current,
+      onChunk: (result) => {
         if (!alive || gen !== genRef.current) return;
-        if ("error" in json && json.error) {
-          setError(json.error);
+        if ("transportError" in result) {
+          setError(translate(getLocale(), "common.serverUnavailable"));
           setLoading(false);
           return;
         }
-        const chunk = json as LogChunk;
+        if ("error" in result && result.error) {
+          setError(result.error);
+          setLoading(false);
+          return;
+        }
+        const chunk = result as LogChunk;
         if (offsetRef.current > chunk.size) {
           resetWindow();
-          setLines([]);
+          setWin({ lines: [], start: 0 });
         }
         if (chunk.data) {
           let data = tailRef.current + chunk.data;
@@ -124,9 +134,16 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
           const parts = data.split("\n");
           tailRef.current = parts.pop() ?? "";
           const complete = parts.map((line) => line.trim()).filter(Boolean);
-          if (offsetRef.current === 0) setLines(complete);
+          if (offsetRef.current === 0) setWin({ lines: complete, start: 0 });
           else if (complete.length)
-            setLines((prev) => (capRef.current > 0 ? prev.concat(complete).slice(-capRef.current) : prev.concat(complete)));
+            setWin((prev) => {
+              const merged = prev.lines.concat(complete);
+              const capNow = capRef.current;
+              if (capNow > 0 && merged.length > capNow) {
+                return { lines: merged.slice(-capNow), start: prev.start + (merged.length - capNow) };
+              }
+              return { lines: merged, start: prev.start };
+            });
           firstRef.current = false;
         }
         offsetRef.current = chunk.offset;
@@ -136,20 +153,13 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
            moves only when bytes actually arrived (status reads "last data"). */
         if (chunk.data) setTickTime(new Date());
         setLoading(false);
-      } catch {
-        if (alive && gen === genRef.current) {
-          setError(translate(getLocale(), "common.serverUnavailable"));
-          setLoading(false);
-        }
-      }
-    };
-    void poll();
-    const t = setInterval(poll, POLL_MS);
+      },
+    });
     return () => {
       alive = false;
-      clearInterval(t);
+      unsubscribe();
     };
-  }, [file?.path]);
+  }, [file?.path, paused, pausedInput]);
 
   const loadOlder = useCallback(async (): Promise<number> => {
     if (!file || olderBusyRef.current || startRef.current <= 0) return 0;
@@ -185,7 +195,7 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
       startRef.current = newStart;
       setHasMore(newStart > 0);
       if (complete.length) {
-        setLines((prev) => complete.concat(prev));
+        setWin((prev) => ({ lines: complete.concat(prev.lines), start: prev.start - complete.length }));
         setPrependGen((value) => value + 1);
       }
       return complete.length;
@@ -197,5 +207,5 @@ export function useLogTail(file: FileEntry | null, pausedInput = false, cap = 25
     }
   }, [file?.path]);
 
-  return { lines, size, loading, error, tickTime, paused, setPaused, clear, hasMore, loadingOlder, loadOlder, prependGen };
+  return { lines: win.lines, linesStart: win.start, size, loading, error, tickTime, paused, setPaused, clear, hasMore, loadingOlder, loadOlder, prependGen };
 }

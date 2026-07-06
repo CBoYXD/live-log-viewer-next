@@ -319,6 +319,12 @@ function CleanupPanel({
   );
 }
 
+/** Last two path segments — enough to recognize a worktree or project dir. */
+function tailPath(dir: string): string {
+  const parts = dir.split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || dir;
+}
+
 function SessionRow({
   session,
   busy,
@@ -349,12 +355,15 @@ function SessionRow({
       >
         {session.engine === "codex" ? "Codex" : session.engine === "claude" ? "Claude" : "?"}
       </span>
-      <span className="min-w-0 flex-1" title={`${session.target} · ${t("resources.procs", { count: session.procCount })}`}>
+      <span
+        className="min-w-0 flex-1"
+        title={[session.cwd, session.target, t("resources.procs", { count: session.procCount })].filter(Boolean).join(" · ")}
+      >
         <span className="block truncate text-[12px] font-semibold">
-          {session.title ?? t("resources.orphan")}
+          {session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
         </span>
         <span className="block truncate text-[10.5px] text-dim">
-          {session.project ? session.project + " · " : ""}
+          {session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
           {lastActive !== null ? fmtAge(lastActive) : session.target}
         </span>
       </span>

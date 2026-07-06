@@ -72,6 +72,38 @@ export type Item =
   | { kind: "compact"; ts: unknown; trigger?: string; preTokens?: number; summary?: string }
   | { kind: "raw"; text: string; err: boolean };
 
+/** One rendered feed row: `key` is stable across incremental re-feeds, so a
+    row keeps its DOM node (and its memoized render) while the tail grows. */
+export interface FeedEntry {
+  key: string;
+  item: Item;
+}
+
+export interface FeedSnapshot {
+  items: FeedEntry[];
+  hiddenServiceCount: number;
+}
+
+export interface FeedSessionConfig {
+  engine: string;
+  fmt: string;
+  showSvc: boolean;
+  /** Lowercased needle; empty string disables filtering. */
+  lineFilter: string;
+}
+
+export interface FeedSession {
+  /**
+   * Consume the current line window and return the rendered feed. `start` is
+   * the absolute index of `lines[0]` in the tail stream (see useLogTail's
+   * `linesStart`): the session parses only lines it has not seen, drops items
+   * whose source lines slid out of the window, and keeps every untouched
+   * item's identity so memoized rows skip re-rendering. A window that moved
+   * backwards (prepend, truncation) resets the session and re-parses.
+   */
+  feed(lines: string[], start: number, isLive: boolean): FeedSnapshot;
+}
+
 const BLOB_MIN = 20_000;
 const BLOB_KEEP = 200_000;
 const MEM_CITATION_RE = /<oai-mem-citation>\s*<citation_entries>([\s\S]*?)<\/citation_entries>\s*<rollout_ids>([\s\S]*?)<\/rollout_ids>\s*<\/oai-mem-citation>/g;
@@ -204,25 +236,6 @@ function newCmd(cmd: string, icon: GlyphName = "shell"): Call {
   return { cmd: redacted, display: displayCmd(redacted), icon, output: "", status: "run", label: tr("render.executing"), open: false };
 }
 
-function attach(call: Call | undefined, output: string, errFlag?: boolean) {
-  if (!call) return null;
-  const code = output.match(/exited with code (\d+)/)?.[1];
-  const body = output
-    .replace(/^Chunk ID:[^\n]*\n/, "")
-    .replace(/Wall time:[^\n]*\n/, "")
-    .replace(/Original token count:[^\n]*\n?/, "")
-    .trim();
-  const isErr = errFlag === true || (code !== undefined && code !== "0");
-  call.status = isErr ? "err" : "ok";
-  call.label = isErr ? (code && code !== "0" ? "exit " + code : tr("render.error")) : "ok";
-  call.open ||= isErr;
-  if (body) {
-    const limit = isErr ? 60_000 : 12_000;
-    call.output = (call.output + "\n" + redactSecrets(body)).trim().slice(-limit);
-  }
-  return call;
-}
-
 const CMD_GROUP_MIN = 4;
 
 /* First word of the tool-name prefix ("Bash: ls" → "Bash"); Codex shell/exec
@@ -231,69 +244,71 @@ function toolNameOf(cmd: string): string {
   return cmd.match(/^([A-Za-z][\w.]*): /)?.[1] ?? "cmd";
 }
 
-/* Collapses runs of >=4 consecutive cmd items into one cmd-group item so a
-   long unbroken command series reads as a single summary line. "think" items
-   inside a run don't break it (and are absorbed into the group, since they
-   carry no signal once the run they annotate is folded); prose/user/tmsg/
-   edit/review/image do break it. The last run of a live transcript is never
-   folded, so the currently running call always stays visible. */
-function groupCmdRuns(items: Item[], isLive: boolean): Item[] {
-  const out: Item[] = [];
-  let i = 0;
-  while (i < items.length) {
-    if (items[i].kind !== "cmd") {
-      out.push(items[i]);
-      i += 1;
-      continue;
-    }
-    let j = i;
-    const cmdItems: Extract<Item, { kind: "cmd" }>[] = [];
-    while (j < items.length) {
-      const cur = items[j];
-      if (cur.kind === "cmd") cmdItems.push(cur);
-      else if (cur.kind !== "think") break;
-      j += 1;
-    }
-    const isLastRun = j === items.length;
-    if (cmdItems.length >= CMD_GROUP_MIN && !(isLive && isLastRun)) {
-      const byTool: Record<string, number> = {};
-      let okCount = 0;
-      let errCount = 0;
-      for (const it of cmdItems) {
-        const tool = toolNameOf(it.call.cmd);
-        byTool[tool] = (byTool[tool] ?? 0) + 1;
-        if (it.call.status === "ok") okCount += 1;
-        else if (it.call.status === "err") errCount += 1;
-      }
-      out.push({
-        kind: "cmd-group",
-        ids: cmdItems.map((it) => it.id),
-        calls: cmdItems.map((it) => it.call),
-        t0: cmdItems[0]?.ts,
-        t1: cmdItems.at(-1)?.ts,
-        byTool,
-        okCount,
-        errCount,
-        hasErr: errCount > 0,
-      });
-      i = j;
-    } else {
-      out.push(items[i]);
-      i += 1;
-    }
-  }
-  return out;
+interface StoredEntry {
+  /** Monotonic push counter — the React key; consecutive within `entries`. */
+  seq: number;
+  /** Absolute index of the source line, for window-slide eviction. */
+  src: number;
+  item: Item;
 }
 
-export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, lineFilter: string) {
-  const calls = new Map<string, Call>();
-  const tmsgs = new Map<string, Tmsg>();
-  const items: Item[] = [];
+interface CallRec {
+  call: Call;
+  seq: number;
+}
+
+/**
+ * The stateful line-window parser behind a feed pane. All cross-line effects
+ * (tool_result attaching to its call, teammate delivery echoes, compaction
+ * summaries, prose/echo dedup) mutate copy-on-write: the affected entry gets
+ * a new item object while every other entry keeps its identity — that is what
+ * lets memoized FeedItems skip markdown re-render on every tail tick.
+ */
+export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
+  const { showSvc, lineFilter } = cfg;
+  const jsonl = cfg.fmt === "claude" || cfg.fmt === "codex";
+
+  const entries: StoredEntry[] = [];
+  const calls = new Map<string, CallRec>();
+  /* Outgoing teammate messages awaiting their delivery echo, by tool_use id;
+     the reverse map exists only so window-slide eviction can prune. */
+  const tmsgSeqs = new Map<string, number>();
+  const tmsgKeyBySeq = new Map<number, string>();
+  /* Hidden service rows are counted, not stored; per-line counts let the
+     total shrink when their source lines slide out of the window. */
+  const hiddenSvcBySrc = new Map<number, number>();
   let hiddenServiceCount = 0;
-  let lastProse = "";
+  let pushSeq = 0;
+  let curSrc = 0;
+  /** Absolute index just past the last consumed line; null before first feed. */
+  let consumedEnd: number | null = null;
+  /** Window start of the previous feed — a start that moved backwards means
+      prepended history, which a sequential parser cannot resume across. */
+  let lastStart = -Infinity;
+  /* Dedup/marker state remembers the source line it came from: when that line
+     slides out of the window the state clears, matching what a re-parse of
+     the shortened window would know. */
+  let lastProse: { text: string; src: number } | null = null;
+  let lastUser: { text: string; at: number; src: number } | null = null;
+  let codexCompacted: { src: number } | null = null;
+  let plainBlock: { lines: string[]; src: number } | null = null;
+  let lastPlainCall: CallRec | null = null;
+  /* Snapshot cache + fold-group identity reuse across re-feeds. */
+  let prevGroups = new Map<number, CmdGroupItem>();
+  let snapshot: FeedSnapshot | null = null;
+  let snapshotLive: boolean | null = null;
+
+  const entryIndex = (seq: number): number => (entries.length ? seq - entries[0].seq : -1);
+
+  const push = (item: Item): number => {
+    entries.push({ seq: pushSeq, src: curSrc, item });
+    snapshot = null;
+    return pushSeq++;
+  };
+
   const pushBlobIfHuge = (text: string): boolean => {
     if (!looksLikeBlob(text)) return false;
-    items.push({ kind: "blob", bytes: text.length, text: redactSecrets(text).slice(0, BLOB_KEEP) });
+    push({ kind: "blob", bytes: text.length, text: redactSecrets(text).slice(0, BLOB_KEEP) });
     return true;
   };
   const pushImage = (block: Record<string, unknown>, fileWrap: Record<string, unknown>) => {
@@ -303,7 +318,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
     const mt = textPart(source.media_type) || textPart(fileWrap.type);
     const media = mt.startsWith("image/") ? mt : "image/png";
     const dims = rec(fileWrap.dimensions);
-    items.push({
+    push({
       kind: "image",
       media,
       data,
@@ -316,15 +331,17 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
      block inside `text`, rendering them as structured cards. Runs for both the
      codex feed and quoted review text inside a claude transcript. Non-structured
      segments are handed back through `fallback` so callers keep their own bubble
-     style (prose vs user). Returns true when at least one card was produced. */
-  const pushStructured = (ts: unknown, text: string, fallback: (segment: string) => void): boolean => {
+     style (prose vs user). Returns true when at least one card was produced.
+     `emit` defaults to the session store; the pending-plain-block preview passes
+     a transient collector instead. */
+  const pushStructured = (ts: unknown, text: string, fallback: (segment: string) => void, emit: (item: Item) => void = push): boolean => {
     MEM_CITATION_RE.lastIndex = 0;
     const hasCitation = MEM_CITATION_RE.test(text);
     MEM_CITATION_RE.lastIndex = 0;
     if (!hasCitation) {
       const review = parseReview(text.trim(), ts);
       if (!review) return false;
-      items.push(review);
+      emit(review);
       return true;
     }
     let handled = false;
@@ -334,7 +351,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       if (!trimmed) return;
       const review = parseReview(trimmed, ts);
       if (review) {
-        items.push(review);
+        emit(review);
         handled = true;
       } else {
         fallback(trimmed);
@@ -344,7 +361,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       const whole = match[0];
       const index = match.index ?? 0;
       pushTextPart(text.slice(last, index));
-      items.push(parseMemCitation(whole, match[1] ?? "", match[2] ?? ""));
+      emit(parseMemCitation(whole, match[1] ?? "", match[2] ?? ""));
       handled = true;
       last = index + whole.length;
     }
@@ -365,38 +382,82 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
     return { cleaned, cites };
   };
   const addProse = (ts: unknown, text: string) => {
-    if (!text.trim() || text === lastProse) return;
-    lastProse = text;
+    if (!text.trim() || text === lastProse?.text) return;
+    lastProse = { text, src: curSrc };
     if (pushBlobIfHuge(text)) return;
-    const engine = file.engine === "codex" ? "codex" : "claude";
-    if (pushStructured(ts, text, (segment) => items.push({ kind: "prose", ts, text: segment, engine }))) return;
-    items.push({ kind: "prose", ts, text, engine });
+    const engine = cfg.engine === "codex" ? "codex" : "claude";
+    if (pushStructured(ts, text, (segment) => push({ kind: "prose", ts, text: segment, engine }))) return;
+    push({ kind: "prose", ts, text, engine });
   };
   const addCmd = (ts: unknown, cmd: string, callId?: string, icon?: GlyphName) => {
-    const id = callId || "plain-" + items.length + "-" + String(ts ?? "");
+    const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
     const call = newCmd(cmd, icon);
-    calls.set(id, call);
-    items.push({ kind: "cmd", id, call, ts });
+    const seq = push({ kind: "cmd", id, call, ts });
+    const callRec: CallRec = { call, seq };
+    calls.set(id, callRec);
+    lastPlainCall = callRec;
+    return call;
+  };
+  /* Attaches a result to its call copy-on-write: the record gets a fresh Call
+     and the owning entry a fresh item, so exactly one row changes identity. */
+  const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean) => {
+    if (!callRec) return null;
+    const code = output.match(/exited with code (\d+)/)?.[1];
+    const body = output
+      .replace(/^Chunk ID:[^\n]*\n/, "")
+      .replace(/Wall time:[^\n]*\n/, "")
+      .replace(/Original token count:[^\n]*\n?/, "")
+      .trim();
+    const isErr = errFlag === true || (code !== undefined && code !== "0");
+    const call: Call = { ...callRec.call };
+    call.status = isErr ? "err" : "ok";
+    call.label = isErr ? (code && code !== "0" ? "exit " + code : tr("render.error")) : "ok";
+    call.open ||= isErr;
+    if (body) {
+      const limit = isErr ? 60_000 : 12_000;
+      call.output = (call.output + "\n" + redactSecrets(body)).trim().slice(-limit);
+    }
+    callRec.call = call;
+    const idx = entryIndex(callRec.seq);
+    if (idx >= 0 && idx < entries.length) {
+      const old = entries[idx].item;
+      if (old.kind === "cmd") {
+        entries[idx] = { ...entries[idx], item: { ...old, call } };
+        snapshot = null;
+      }
+    }
     return call;
   };
   const addOutput = (callId: string | undefined, output: string, err?: boolean) => {
     if (!callId) return;
-    const tmsg = tmsgs.get(callId);
-    if (tmsg) {
+    const tseq = tmsgSeqs.get(callId);
+    if (tseq !== undefined) {
       /* The routing echo repeats the whole message body; keep only the delivery state. */
-      tmsg.delivery = err || /"success"\s*:\s*false/.test(output) ? "err" : "ok";
-      tmsg.msgId = output.match(/"msg_id"\s*:\s*"([^"]+)"/)?.[1];
+      const idx = entryIndex(tseq);
+      if (idx >= 0 && idx < entries.length) {
+        const old = entries[idx].item;
+        if (old.kind === "tmsg") {
+          const delivery: "ok" | "err" = err || /"success"\s*:\s*false/.test(output) ? "err" : "ok";
+          const msgId = output.match(/"msg_id"\s*:\s*"([^"]+)"/)?.[1];
+          entries[idx] = { ...entries[idx], item: { ...old, delivery, msgId } };
+          snapshot = null;
+        }
+      }
       return;
     }
     const call = attach(calls.get(callId), output, err);
-    if (!call && output && showSvc) items.push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
+    if (!call && output && showSvc) push({ kind: "svc", text: "output: " + redactSecrets(output).slice(0, 200) });
   };
   const addSvc = (text: string) => {
-    if (showSvc) items.push({ kind: "svc", text: text.slice(0, 300) });
-    else hiddenServiceCount += 1;
+    if (showSvc) push({ kind: "svc", text: text.slice(0, 300) });
+    else {
+      hiddenServiceCount += 1;
+      hiddenSvcBySrc.set(curSrc, (hiddenSvcBySrc.get(curSrc) ?? 0) + 1);
+      snapshot = null;
+    }
   };
   const addNote = (text: string) => {
-    items.push({ kind: "note", text });
+    push({ kind: "note", text });
   };
   /* Inbound teammate traffic arrives as user text wrapped in <teammate-message>;
      idle_notification JSON bodies collapse to a thin service-style row. */
@@ -410,7 +471,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
           const obj = JSON.parse(trimmed) as Record<string, unknown>;
           if (obj.type === "idle_notification") {
             const at = hhmm(obj.timestamp);
-            items.push({ kind: "tnote", text: tr("render.left", { peer, at: at ? " · " + at : "" }) });
+            push({ kind: "tnote", text: tr("render.left", { peer, at: at ? " · " + at : "" }) });
             return "";
           }
         } catch {
@@ -422,58 +483,55 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
          render the content as a review card. The strict start anchor keeps task
          briefs that merely mention APPROVE/REQUEST_CHANGES as plain text. */
       const review = VERDICT_LINE_RE.test(cleaned) ? parseReview(cleaned, ts) : null;
-      items.push({ kind: "tmsg", ts, dir: "in", peer, summary, text: review ? "" : cleaned });
-      if (review) items.push(review);
-      for (const cite of cites) items.push(cite);
+      push({ kind: "tmsg", ts, dir: "in", peer, summary, text: review ? "" : cleaned });
+      if (review) push(review);
+      for (const cite of cites) push(cite);
       return "";
     });
     const leftover = rest.replace(/Another Claude session sent a message:\s*/g, "").trim();
     if (!leftover || pushBlobIfHuge(leftover)) return;
-    if (SYS_MSG_RE.test(leftover)) return void items.push({ kind: "sysmsg", label: sysMsgLabel(leftover), text: leftover });
+    if (SYS_MSG_RE.test(leftover)) return void push({ kind: "sysmsg", label: sysMsgLabel(leftover), text: leftover });
     const { cleaned, images } = extractInboxImages(leftover);
-    if (cleaned && !pushStructured(ts, cleaned, (segment) => items.push({ kind: "user", ts, text: segment }))) {
-      items.push({ kind: "user", ts, text: cleaned });
+    if (cleaned && !pushStructured(ts, cleaned, (segment) => push({ kind: "user", ts, text: segment }))) {
+      push({ kind: "user", ts, text: cleaned });
     }
-    for (const image of images) items.push({ kind: "inbox-image", name: image.name, path: image.path });
+    for (const image of images) push({ kind: "inbox-image", name: image.name, path: image.path });
   };
   /* Codex user turns carry no envelopes to unwrap: the bubble text plus a card
      per attached inbox image. A rollout logs the same turn twice — as a
      response_item and as an event_msg echo right next to it — so an exact
      repeat with nothing rendered in between folds away; a message the user
      really sent twice has agent output between the copies and stays. */
-  let lastUser: { text: string; at: number } | null = null;
   const addPlainUser = (ts: unknown, text: string) => {
-    if (lastUser && lastUser.text === text && lastUser.at === items.length) return;
+    if (lastUser && lastUser.text === text && lastUser.at === pushSeq) return;
     const { cleaned, images } = extractInboxImages(text);
-    if (cleaned) items.push({ kind: "user", ts, text: cleaned });
-    for (const image of images) items.push({ kind: "inbox-image", name: image.name, path: image.path });
-    lastUser = { text, at: items.length };
+    if (cleaned) push({ kind: "user", ts, text: cleaned });
+    for (const image of images) push({ kind: "inbox-image", name: image.name, path: image.path });
+    lastUser = { text, at: pushSeq, src: curSrc };
   };
   /* Harness turns fold into a sysmsg row; the same echo dedup applies since
      they arrive through the same doubled user-role records. */
   const addSysMsg = (text: string, fallbackLabel?: string) => {
-    if (lastUser && lastUser.text === text && lastUser.at === items.length) return;
-    items.push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text });
-    lastUser = { text, at: items.length };
+    if (lastUser && lastUser.text === text && lastUser.at === pushSeq) return;
+    push({ kind: "sysmsg", label: sysMsgLabel(text, fallbackLabel), text });
+    lastUser = { text, at: pushSeq, src: curSrc };
   };
-  /* One Codex compaction leaves two markers (a `compacted` record, then an
-     event_msg echo a few hidden records later); the flag folds the pair. */
-  let codexCompacted = false;
   const addCompact = (ts: unknown, meta?: { trigger?: string; preTokens?: number }) => {
-    items.push({ kind: "compact", ts, trigger: meta?.trigger, preTokens: meta?.preTokens });
+    push({ kind: "compact", ts, trigger: meta?.trigger, preTokens: meta?.preTokens });
   };
   /* The Claude compact summary follows its boundary record; attach it there,
      skipping the service rows that may sit between them. */
   const attachCompactSummary = (ts: unknown, summary: string) => {
-    for (let i = items.length - 1; i >= 0; i -= 1) {
-      const it = items[i];
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const it = entries[i].item;
       if (it.kind === "compact") {
-        it.summary = summary;
+        entries[i] = { ...entries[i], item: { ...it, summary } };
+        snapshot = null;
         return;
       }
       if (it.kind !== "svc" && it.kind !== "note") break;
     }
-    items.push({ kind: "compact", ts, summary });
+    push({ kind: "compact", ts, summary });
   };
   const renderCodex = (obj: Record<string, unknown>) => {
     const p = rec(obj.payload);
@@ -491,7 +549,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       if (p.type === "task_started") return addNote(tr("render.taskStarted") + (ts ? " · " + hhmm(ts) : ""));
       if (p.type === "task_complete") return addNote(tr("render.taskComplete") + (ts ? " · " + hhmm(ts) : ""));
       if (p.type === "context_compacted") {
-        if (codexCompacted) return void (codexCompacted = false);
+        if (codexCompacted) return void (codexCompacted = null);
         return addCompact(ts);
       }
       return addSvc(textPart(p.type) || "event");
@@ -520,7 +578,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
         }
         if (name === "apply_patch") {
           const files = String(args.input ?? "").match(/(Add|Update|Delete) File: [^\n]+/g);
-          items.push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
+          push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
           return;
         }
         if (name === "write_stdin") return addSvc(tr("render.stdinSession", { id: String(args.session_id ?? "") }));
@@ -532,7 +590,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
          JSON-encoded string), so no JSON.parse step is needed here. */
       if (p.type === "custom_tool_call" && textPart(p.name) === "apply_patch") {
         const files = textPart(p.input).match(/(Add|Update|Delete) File: [^\n]+/g);
-        items.push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
+        push({ kind: "edit", files: files ? files.join(", ").replace(/(Add|Update|Delete) File: /g, "") : tr("render.patch") });
         return;
       }
       if (p.type === "custom_tool_call_output") return addOutput(textPart(p.call_id), typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? ""));
@@ -540,7 +598,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       return addSvc(textPart(p.type) || "item");
     }
     if (obj.type === "compacted") {
-      codexCompacted = true;
+      codexCompacted = { src: curSrc };
       return addCompact(ts);
     }
     addSvc(textPart(obj.type) || tr("render.record"));
@@ -585,7 +643,7 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
       for (const part of arr(rec(obj.message).content)) {
         if (part.type === "text" && textPart(part.text).trim()) addProse(ts, textPart(part.text));
         else if (part.type === "thinking" && textPart(part.thinking).trim()) {
-          items.push({ kind: "think", text: textPart(part.thinking).replace(/\s+/g, " ").trim() });
+          push({ kind: "think", text: textPart(part.thinking).replace(/\s+/g, " ").trim() });
         } else if (part.type === "tool_use" && textPart(part.name) === "SendMessage") {
           const input = rec(part.input);
           const message = input.message;
@@ -600,10 +658,14 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
               summary: String(input.summary ?? ""),
               text: review ? "" : cleaned,
             };
-            items.push(item);
-            if (review) items.push(review);
-            for (const cite of cites) items.push(cite);
-            if (textPart(part.id)) tmsgs.set(textPart(part.id), item);
+            const seq = push(item);
+            if (review) push(review);
+            for (const cite of cites) push(cite);
+            const key = textPart(part.id);
+            if (key) {
+              tmsgSeqs.set(key, seq);
+              tmsgKeyBySeq.set(seq, key);
+            }
           } else {
             addSvc(`SendMessage → ${String(input.to ?? "")} · ${textPart(rec(message).type) || tr("render.protocol")}`);
           }
@@ -624,19 +686,32 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
   /* Job .output logs echo the final review/citation block as bare lines after the
      [codex] stream ends; collect that run so it renders as one structured card
      instead of per-line raw rows. Falls back to the old raw rows when the block
-     turns out not to be structured. */
-  let plainBlock: string[] | null = null;
+     turns out not to be structured. A block still open at the window end is
+     previewed transiently by the snapshot (pendingPlainItems) and committed
+     only when its terminator arrives — an incremental feed must not consume
+     state it may need for the block's continuation. */
+  const rawLinesInto = (emit: (item: Item) => void) => (segment: string) => {
+    for (const raw of segment.split("\n")) {
+      if (raw.trim()) emit({ kind: "raw", text: redactSecrets(raw), err: /error|failed|traceback|exception/i.test(raw) });
+    }
+  };
   const flushPlainBlock = () => {
     if (!plainBlock) return;
-    const text = plainBlock.join("\n").trim();
+    const text = plainBlock.lines.join("\n").trim();
     plainBlock = null;
     if (!text) return;
-    const pushRawLines = (segment: string) => {
-      for (const raw of segment.split("\n")) {
-        if (raw.trim()) items.push({ kind: "raw", text: redactSecrets(raw), err: /error|failed|traceback|exception/i.test(raw) });
-      }
-    };
+    const pushRawLines = rawLinesInto(push);
     if (!pushStructured(null, text, pushRawLines)) pushRawLines(text);
+  };
+  const pendingPlainItems = (): Item[] => {
+    if (!plainBlock) return [];
+    const text = plainBlock.lines.join("\n").trim();
+    if (!text) return [];
+    const out: Item[] = [];
+    const emit = (item: Item) => out.push(item);
+    const fallback = rawLinesInto(emit);
+    if (!pushStructured(null, text, fallback, emit)) fallback(text);
+    return out;
   };
   const renderPlain = (rawLine: string) => {
     // Shell .output files carry terminal ANSI/OSC escapes; strip them for display.
@@ -644,7 +719,8 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
     if (plainBlock) {
       if (/^\[codex\]/.test(line)) flushPlainBlock();
       else {
-        plainBlock.push(line);
+        plainBlock.lines.push(line);
+        snapshot = null;
         return;
       }
     }
@@ -654,36 +730,186 @@ export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, li
     const rest = m?.[2] ?? line;
     if (!rest || /^Assistant message captured/.test(rest)) return;
     if (!m && (VERDICT_LINE_RE.test(line) || line.startsWith("<oai-mem-citation>"))) {
-      plainBlock = [line];
+      plainBlock = { lines: [line], src: curSrc };
+      snapshot = null;
       return;
     }
-    if (/^Running command: /.test(rest)) return addCmd(ts, rest.replace(/^Running command: /, "").replace(/^\/usr\/bin\/zsh -lc /, ""));
+    if (/^Running command: /.test(rest)) return void addCmd(ts, rest.replace(/^Running command: /, "").replace(/^\/usr\/bin\/zsh -lc /, ""));
     if (/^Command (completed|failed)/.test(rest)) {
-      const last = [...calls.values()].at(-1);
-      if (last) {
-        attach(last, /^Command failed/.test(rest) ? rest + "\n" + tr("render.jobLogNote") : rest, /^Command failed/.test(rest));
+      if (lastPlainCall) {
+        attach(lastPlainCall, /^Command failed/.test(rest) ? rest + "\n" + tr("render.jobLogNote") : rest, /^Command failed/.test(rest));
       }
       return;
     }
-    if (/^Applying \d+ file/.test(rest)) return items.push({ kind: "edit", files: rest });
+    if (/^Applying \d+ file/.test(rest)) return void push({ kind: "edit", files: rest });
     if (m && !/^(Running|Command|Applying)/.test(rest)) return addProse(ts, rest);
     if (pushBlobIfHuge(line)) return;
-    items.push({ kind: "raw", text: redactSecrets(line), err: /error|failed|traceback|exception/i.test(line) });
+    push({ kind: "raw", text: redactSecrets(line), err: /error|failed|traceback|exception/i.test(line) });
   };
-  for (const line of lines) {
-    if (lineFilter && !line.toLowerCase().includes(lineFilter)) continue;
-    if (file.fmt === "claude" || file.fmt === "codex") {
+  const consume = (line: string) => {
+    if (lineFilter && !line.toLowerCase().includes(lineFilter)) return;
+    if (jsonl) {
       try {
         const obj = JSON.parse(line);
         if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-          if (file.fmt === "claude") renderClaude(obj);
+          if (cfg.fmt === "claude") renderClaude(obj);
           else renderCodex(obj);
         }
       } catch {
         renderPlain(line);
       }
     } else renderPlain(line);
-  }
-  flushPlainBlock();
-  return { items: groupCmdRuns(items, file.activity === "live"), hiddenServiceCount };
+  };
+
+  const reset = () => {
+    entries.length = 0;
+    calls.clear();
+    tmsgSeqs.clear();
+    tmsgKeyBySeq.clear();
+    hiddenSvcBySrc.clear();
+    hiddenServiceCount = 0;
+    lastProse = null;
+    lastUser = null;
+    codexCompacted = null;
+    plainBlock = null;
+    lastPlainCall = null;
+    prevGroups = new Map();
+    snapshot = null;
+    /* pushSeq keeps counting across resets so React keys never collide. */
+  };
+
+  /** Evicts entries and state owned by lines that left the window. Returns
+      true when a pending plain block lost its opening line — sequential state
+      that cannot be resumed, so the caller re-parses the window whole. */
+  const dropBefore = (start: number): boolean => {
+    while (entries.length && entries[0].src < start) {
+      const gone = entries.shift()!;
+      snapshot = null;
+      if (gone.item.kind === "cmd") {
+        const callRec = calls.get(gone.item.id);
+        /* A later tool_result for an evicted call now falls back to the svc
+           row, exactly like a full re-parse of the shortened window would. */
+        if (callRec && callRec.seq === gone.seq) calls.delete(gone.item.id);
+      }
+      const tkey = tmsgKeyBySeq.get(gone.seq);
+      if (tkey !== undefined) {
+        tmsgKeyBySeq.delete(gone.seq);
+        if (tmsgSeqs.get(tkey) === gone.seq) tmsgSeqs.delete(tkey);
+      }
+    }
+    for (const [src, count] of hiddenSvcBySrc) {
+      if (src >= start) break;
+      hiddenServiceCount -= count;
+      hiddenSvcBySrc.delete(src);
+      snapshot = null;
+    }
+    if (lastProse && lastProse.src < start) lastProse = null;
+    if (lastUser && lastUser.src < start) lastUser = null;
+    if (codexCompacted && codexCompacted.src < start) codexCompacted = null;
+    if (lastPlainCall && entryIndex(lastPlainCall.seq) < 0) lastPlainCall = null;
+    return plainBlock !== null && plainBlock.src < start;
+  };
+
+  /* Collapses runs of >=4 consecutive cmd entries into one cmd-group item so a
+     long unbroken command series reads as a single summary line. "think" items
+     inside a run don't break it (and are absorbed into the group, since they
+     carry no signal once the run they annotate is folded); prose/user/tmsg/
+     edit/review/image do break it. The last run of a live transcript is never
+     folded, so the currently running call always stays visible. A group whose
+     members' calls are all identity-equal to the previous snapshot's is reused
+     as-is, keeping its card memoized. */
+  const buildSnapshot = (isLive: boolean): FeedSnapshot => {
+    const out: FeedEntry[] = [];
+    const nextGroups = new Map<number, CmdGroupItem>();
+    let i = 0;
+    while (i < entries.length) {
+      const head = entries[i];
+      if (head.item.kind !== "cmd") {
+        out.push({ key: String(head.seq), item: head.item });
+        i += 1;
+        continue;
+      }
+      let j = i;
+      const cmdEntries: { seq: number; item: Extract<Item, { kind: "cmd" }> }[] = [];
+      while (j < entries.length) {
+        const cur = entries[j];
+        if (cur.item.kind === "cmd") cmdEntries.push({ seq: cur.seq, item: cur.item });
+        else if (cur.item.kind !== "think") break;
+        j += 1;
+      }
+      const isLastRun = j === entries.length;
+      if (cmdEntries.length >= CMD_GROUP_MIN && !(isLive && isLastRun)) {
+        const gkey = cmdEntries[0].seq;
+        const prev = prevGroups.get(gkey);
+        let group: CmdGroupItem;
+        if (prev && prev.calls.length === cmdEntries.length && cmdEntries.every((entry, k) => prev.calls[k] === entry.item.call)) {
+          group = prev;
+        } else {
+          const byTool: Record<string, number> = {};
+          let okCount = 0;
+          let errCount = 0;
+          for (const entry of cmdEntries) {
+            const tool = toolNameOf(entry.item.call.cmd);
+            byTool[tool] = (byTool[tool] ?? 0) + 1;
+            if (entry.item.call.status === "ok") okCount += 1;
+            else if (entry.item.call.status === "err") errCount += 1;
+          }
+          group = {
+            kind: "cmd-group",
+            ids: cmdEntries.map((entry) => entry.item.id),
+            calls: cmdEntries.map((entry) => entry.item.call),
+            t0: cmdEntries[0]?.item.ts,
+            t1: cmdEntries.at(-1)?.item.ts,
+            byTool,
+            okCount,
+            errCount,
+            hasErr: errCount > 0,
+          };
+        }
+        nextGroups.set(gkey, group);
+        out.push({ key: "g" + gkey, item: group });
+        i = j;
+      } else {
+        out.push({ key: String(head.seq), item: head.item });
+        i += 1;
+      }
+    }
+    prevGroups = nextGroups;
+    pendingPlainItems().forEach((item, idx) => out.push({ key: "pb" + idx, item }));
+    return { items: out, hiddenServiceCount };
+  };
+
+  const feed = (lines: string[], start: number, isLive: boolean): FeedSnapshot => {
+    const end = start + lines.length;
+    /* A window that moved backwards (prepended history, truncation reset) or
+       past unseen lines cannot be resumed — re-parse it whole. */
+    if (consumedEnd === null || end < consumedEnd || start > consumedEnd || start < lastStart) {
+      reset();
+      consumedEnd = start;
+    }
+    lastStart = start;
+    if (dropBefore(start)) {
+      reset();
+      consumedEnd = start;
+    }
+    for (let i = consumedEnd - start; i < lines.length; i += 1) {
+      curSrc = start + i;
+      consume(lines[i]);
+    }
+    consumedEnd = end;
+    if (!snapshot || snapshotLive !== isLive) {
+      snapshot = buildSnapshot(isLive);
+      snapshotLive = isLive;
+    }
+    return snapshot;
+  };
+
+  return { feed };
+}
+
+/** One-shot parse of a whole window — a fresh session fed once. */
+export function buildFeed(file: FileEntry, lines: string[], showSvc: boolean, lineFilter: string) {
+  const session = createFeedSession({ engine: file.engine, fmt: file.fmt, showSvc, lineFilter });
+  const snap = session.feed(lines, 0, file.activity === "live");
+  return { items: snap.items.map((entry) => entry.item), hiddenServiceCount: snap.hiddenServiceCount };
 }

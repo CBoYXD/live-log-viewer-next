@@ -232,6 +232,8 @@ export interface ResourceSession {
   project: string | null;
   activity: Activity | null;
   lastActiveAt: string | null;
+  /** Agent CLI working directory — the identity fallback for orphan rows. */
+  cwd: string | null;
   /** Tree totals across the pane pid and every descendant (MCP children included). */
   rssBytes: number;
   swapBytes: number;
