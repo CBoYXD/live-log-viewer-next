@@ -7,8 +7,9 @@
  */
 
 /** Whole-host memory pressure, all fields in bytes. `ramAvailable` is the
-    kernel's reclaim-aware headroom (MemAvailable / vm_stat estimate), not the
-    misleadingly small "free". A host without swap has swapTotal 0. */
+    kernel's reclaim-aware headroom (MemAvailable / vm_stat estimate); plain
+    "free" excludes reclaimable caches and badly understates it. A host
+    without swap has swapTotal 0. */
 export interface SystemMemory {
   ramTotal: number;
   ramAvailable: number;
@@ -58,8 +59,8 @@ export interface ProcBackend {
 
   /**
    * Host memory pressure, or null when the platform probe fails (no
-   * /proc/meminfo and no vm_stat) — callers hide the numbers rather than
-   * showing zeros.
+   * /proc/meminfo and no vm_stat) — null tells callers to hide the numbers,
+   * since zeros would render as a full-pressure host.
    */
   systemMemory(): SystemMemory | null;
 

@@ -16,7 +16,7 @@ describe("parseMeminfo", () => {
     "",
   ].join("\n");
 
-  test("reads MemAvailable, not MemFree", () => {
+  test("headroom comes from MemAvailable even when MemFree is present", () => {
     const mem = parseMeminfo(MEMINFO);
     expect(mem).not.toBeNull();
     expect(mem!.ramTotal).toBe(32762024 * KIB);

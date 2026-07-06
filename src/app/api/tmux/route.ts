@@ -81,12 +81,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   /* Resource-panel cleanup: kills an agent session's pane. Only targets from
      the last /api/resources snapshot are accepted (server-held allowlist) —
      an arbitrary client-named pane, e.g. the user's own work shell, is
-     refused. The kill itself never trusts the display coordinates: it
-     addresses the stable `%N` pane id recorded in the snapshot, verifies the
-     pane still runs the snapshot's pane pid right before killing, and
-     consumes the target afterwards. Display coordinates renumber as windows
-     close (`renumber-windows on`), so a stale or repeated POST could
-     otherwise take down a different pane than the one the panel showed. */
+     refused. The kill addresses the stable `%N` pane id recorded in the
+     snapshot, verifies the pane still runs the snapshot's pane pid right
+     before killing, and consumes the target afterwards. Display coordinates
+     renumber as windows close (`renumber-windows on`), so a stale or
+     repeated POST aimed at coordinates could take down a different pane
+     than the one the panel showed. */
   if (body.action === "kill-target") {
     const target = typeof body.target === "string" ? body.target : "";
     const ref = allowedKillTarget(target);

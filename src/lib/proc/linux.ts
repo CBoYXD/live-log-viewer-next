@@ -82,9 +82,9 @@ function systemMemory(): SystemMemory | null {
   }
 }
 
-/** VmRSS + VmSwap per pid from /proc/<pid>/status. Deliberately not smaps —
-    a smaps read is orders of magnitude slower and status granularity is
-    enough for a cleanup UI. */
+/** VmRSS + VmSwap per pid from /proc/<pid>/status. A smaps read would be
+    orders of magnitude slower, and status granularity is enough for a
+    cleanup UI. */
 function processMemory(pids: Iterable<number>): Map<number, ProcessMemory> {
   const map = new Map<number, ProcessMemory>();
   for (const pid of pids) {

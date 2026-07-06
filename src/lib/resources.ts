@@ -30,8 +30,8 @@ const globalStore = globalThis as unknown as {
 
 /**
  * Server-held allowlist for the kill-target action: only pane targets present
- * in the last resources snapshot may be killed, never a client-supplied
- * arbitrary target (which could name the user's own work pane). Each target
+ * in the last resources snapshot may be killed. A client-supplied arbitrary
+ * target could name the user's own work pane, so it is refused. Each target
  * keeps the stable pane id and pane pid it had in the snapshot: display
  * coordinates renumber as windows close (`renumber-windows on`), so the kill
  * must address the pane by id and verify the pid still matches.

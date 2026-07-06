@@ -159,12 +159,13 @@ export function ResourcesFooter() {
   );
 }
 
-/** Kills one session through the kill-target action — for transcript-backed
-    rows too, not just orphans. The server resolves the target to the stable
-    pane id recorded in the resources snapshot and verifies the pane pid
-    before killing; the transcript-path kill would instead re-resolve display
-    coordinates at kill time, which mid-bulk (after earlier kills renumbered
-    windows) can name a different pane. Returns the error text, if any. */
+/** Kills one session through the kill-target action; every row — transcript-
+    backed and orphan alike — takes this path. The server resolves the target
+    to the stable pane id recorded in the resources snapshot and verifies the
+    pane pid before killing, so the kill survives window renumbering mid-bulk
+    (a transcript-path kill re-resolves display coordinates at kill time and
+    can name a different pane after earlier kills shifted window indexes).
+    Returns the error text, if any. */
 async function killSession(session: ResourceSession): Promise<string | null> {
   const res = await fetch("/api/tmux", {
     method: "POST",

@@ -20,7 +20,7 @@ describe("kill-target allowlist", () => {
     expect(allowedKillTarget("main:0.0")).toBeNull();
   });
 
-  test("a new snapshot replaces the allowlist, never accumulates", () => {
+  test("a new snapshot fully replaces the allowlist", () => {
     noteSessionTargets([{ target: "agents:1.0", ref: { panePid: 111, paneId: "%11" } }]);
     noteSessionTargets([{ target: "agents:2.0", ref: { panePid: 222, paneId: "%22" } }]);
     expect(allowedKillTarget("agents:1.0")).toBeNull();
