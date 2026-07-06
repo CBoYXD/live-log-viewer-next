@@ -68,30 +68,54 @@ function applyProcessState(entry: FileEntry, holders: Map<string, number>, job: 
  * Steps 3-5 run only on the capped shortlist.
  */
 const NO_HOLDERS: Map<string, number> = new Map();
+const YIELD_EVERY = 75;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function forEachEntryYielding(entries: FileEntry[], visit: (entry: FileEntry) => void): Promise<void> {
+  for (let index = 0; index < entries.length; index += 1) {
+    visit(entries[index]!);
+    if ((index + 1) % YIELD_EVERY === 0) await yieldToEventLoop();
+  }
+}
+
+async function forEachEntryBatchYielding(
+  entries: FileEntry[],
+  visit: (entry: FileEntry) => Promise<void>,
+): Promise<void> {
+  for (let start = 0; start < entries.length; start += YIELD_EVERY) {
+    await Promise.all(entries.slice(start, start + YIELD_EVERY).map(visit));
+    if (start + YIELD_EVERY < entries.length) await yieldToEventLoop();
+  }
+}
 
 export async function listFiles(): Promise<FileEntry[]> {
-  const entries = discoverFiles();
+  const entries = await discoverFiles();
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;
   // activity() only consults holders on the same claude-tasks/.output path.
   const needsHolders = entries.some((entry) => entry.root === "claude-tasks" && entry.path.endsWith(".output"));
   const holders = needsHolders ? outputHolders() : NO_HOLDERS;
   const jobs = new Map<string, Record<string, unknown> | null>();
-  for (const entry of entries) {
+  await forEachEntryYielding(entries, (entry) => {
     const job = entry.root === "codex-jobs" ? readJson(entry.path.replace(/\.log$/, ".json")) : null;
     jobs.set(entry.path, job);
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size, job);
     entry.activity = verdict.state;
     entry.activityReason = verdict.reason;
     entry.model = entryModel(entry);
-  }
-  for (const entry of entries) {
+  });
+  await forEachEntryYielding(entries, (entry) => {
     applyProcessState(entry, holders, jobs.get(entry.path) ?? null);
-  }
+  });
   assignTranscriptPids(entries);
   // After pid assignment: the claude effort source is the live process argv.
-  for (const entry of entries) entry.effort = entryEffort(entry);
-  await Promise.all(entries.map(async (entry) => {
+  await forEachEntryYielding(entries, (entry) => {
+    entry.effort = entryEffort(entry);
+  });
+  await forEachEntryBatchYielding(entries, async (entry) => {
     const pending = pendingQuestionFor(entry);
     entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
     const probe = await waitingInputProbe(entry);
@@ -106,11 +130,11 @@ export async function listFiles(): Promise<FileEntry[]> {
     entry.plan = planFor(entry);
     entry.goal = goalFor(entry);
     entry.ctx = ctxFor(entry);
-  }));
-  for (const entry of entries) {
+  });
+  await forEachEntryYielding(entries, (entry) => {
     if (entry.pendingQuestion || entry.waitingInput) void notifyQuestion(entry);
-  }
-  linkEntries(entries);
+  });
+  await linkEntries(entries);
   await tickFlows(entries);
   /* Workflows tick after flows: a workflow watching its embedded flow sees
      the state that same poll just produced. */

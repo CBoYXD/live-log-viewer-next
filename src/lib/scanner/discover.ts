@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { access, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { FileEntry, RootKey } from "../types";
@@ -20,45 +21,78 @@ interface RawEntry {
   st: fs.Stats;
 }
 
-function walk(rootName: RootKey, root: string, dir: string, out: RawEntry[]) {
+type Roots = Record<RootKey, string>;
+type Limit = <T>(work: () => Promise<T>) => Promise<T>;
+
+function createLimiter(max: number): Limit {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function limit<T>(work: () => Promise<T>): Promise<T> {
+    if (active >= max) await new Promise<void>((resolve) => queue.push(resolve));
+    active += 1;
+    try {
+      return await work();
+    } finally {
+      active -= 1;
+      queue.shift()?.();
+    }
+  };
+}
+
+async function walk(rootName: RootKey, roots: Roots, root: string, dir: string, limit: Limit): Promise<RawEntry[]> {
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    entries = await limit(() => readdir(dir, { withFileTypes: true }));
   } catch {
-    return;
+    return [];
   }
-  for (const entry of entries) {
+  const chunks = await Promise.all(entries.map(async (entry): Promise<RawEntry[]> => {
     if (entry.isDirectory()) {
-      if (entry.name.startsWith(".git")) continue;
-      walk(rootName, root, path.join(dir, entry.name), out);
-      continue;
+      if (entry.name.startsWith(".git")) return [];
+      return walk(rootName, roots, root, path.join(dir, entry.name), limit);
     }
-    if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) continue;
+    if (!entry.isFile() || !EXTS.some((ext) => entry.name.endsWith(ext))) return [];
     const pathname = path.join(dir, entry.name);
-    if (rootName === "claude-projects" && pathname.includes(path.sep + "tool-results" + path.sep)) continue;
+    if (rootName === "claude-projects" && pathname.includes(path.sep + "tool-results" + path.sep)) return [];
     let st: fs.Stats;
     try {
-      st = fs.statSync(pathname);
+      st = await limit(() => stat(pathname));
     } catch {
-      continue;
+      return [];
     }
-    const isTask = rootName === "claude-tasks" ? taskParts(ROOTS["claude-tasks"], pathname) : null;
-    if (rootName === "claude-tasks" && !isTask) continue;
-    if (st.size === 0 && !isTask) continue;
+    const isTask = rootName === "claude-tasks" ? taskParts(roots["claude-tasks"], pathname) : null;
+    if (rootName === "claude-tasks" && !isTask) return [];
+    if (st.size === 0 && !isTask) return [];
     if (isTask) {
       const [slug, sid, tid] = isTask;
-      const twin = path.join(ROOTS["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
-      if (fs.existsSync(twin)) continue;
+      const twin = path.join(roots["claude-projects"], slug, sid, "subagents", "agent-" + tid + ".jsonl");
+      try {
+        await limit(() => access(twin));
+        return [];
+      } catch {
+        /* no mirrored subagent */
+      }
     }
-    out.push({ rootName, root, path: pathname, st });
+    return [{ rootName, root, path: pathname, st }];
+  }));
+  return chunks.flat();
+}
+
+async function rootExists(root: string, limit: Limit): Promise<boolean> {
+  try {
+    await limit(() => access(root));
+    return true;
+  } catch {
+    return false;
   }
 }
 
-export function discoverFiles(): FileEntry[] {
-  const raw: RawEntry[] = [];
-  for (const [rootName, root] of Object.entries(ROOTS) as [RootKey, string][]) {
-    if (fs.existsSync(root)) walk(rootName, root, root, raw);
-  }
+export async function discoverFiles(roots: Roots = ROOTS): Promise<FileEntry[]> {
+  const limit = createLimiter(48);
+  const raw = (await Promise.all((Object.entries(roots) as [RootKey, string][]).map(async ([rootName, root]) => {
+    if (!(await rootExists(root, limit))) return [];
+    return walk(rootName, roots, root, root, limit);
+  }))).flat();
   // describe() reads file heads, so it runs only on the capped shortlist; the
   // walk stays a cheap stat pass over every candidate.
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
