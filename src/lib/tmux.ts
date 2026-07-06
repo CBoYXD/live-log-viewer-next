@@ -98,7 +98,7 @@ function runTmux(args: string[], input?: Buffer | string): Promise<RunResult> {
 }
 
 /** pane_pid → target map from `tmux list-panes -a`, memoised for a few seconds. */
-async function panePidMap(): Promise<Map<number, TmuxTarget>> {
+export async function panePidMap(): Promise<Map<number, TmuxTarget>> {
   const now = Date.now();
   if (paneMemo && now - paneMemo.at < PANE_MAP_TTL_MS) return paneMemo.map;
 

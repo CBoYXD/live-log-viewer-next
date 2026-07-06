@@ -10,9 +10,10 @@ import {
   targetForKnownPid,
   type DeliveryOutcome,
 } from "@/lib/delivery";
+import { killTargetAllowed } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { pathAllowed } from "@/lib/scanner/roots";
-import { collectImagePayloads, liveResumePane } from "@/lib/tmux";
+import { collectImagePayloads, killPane, liveResumePane } from "@/lib/tmux";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -59,7 +60,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { pid?: unknown; path?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown };
+  let body: { pid?: unknown; path?: unknown; text?: unknown; image?: unknown; images?: unknown; action?: unknown; key?: unknown; label?: unknown; question?: unknown; target?: unknown };
   try {
     body = (await req.json()) as {
       pid?: unknown;
@@ -71,9 +72,27 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       key?: unknown;
       label?: unknown;
       question?: unknown;
+      target?: unknown;
     };
   } catch {
     return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+  }
+
+  /* Orphan-session cleanup: kills a pane by tmux target instead of a
+     transcript path. Only targets from the last /api/resources snapshot are
+     accepted (server-held allowlist) — an arbitrary client-named pane, e.g.
+     the user's own work shell, is refused. */
+  if (body.action === "kill-target") {
+    const target = typeof body.target === "string" ? body.target : "";
+    if (!killTargetAllowed(target)) {
+      return NextResponse.json({ error: "невідома ціль — онови список ресурсів" }, { status: 400 });
+    }
+    try {
+      await killPane(target);
+      return NextResponse.json({ ok: true, target });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    }
   }
 
   const pid = Number(body.pid);
