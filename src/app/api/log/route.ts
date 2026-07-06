@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
+import { readTailChunk } from "@/lib/logRead";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { listFiles } from "@/lib/scanner";
 import { MAX_CHUNK, pathAllowed, ROOTS } from "@/lib/scanner/roots";
@@ -23,19 +24,18 @@ export async function GET(
 ): Promise<NextResponse<LogChunk | ApiError>> {
   const path = req.nextUrl.searchParams.get("path") ?? "";
 
-  let stat;
-  try {
-    stat = await fs.stat(path);
-  } catch {
-    stat = null;
-  }
-  if (!path || !stat?.isFile() || !pathAllowed(path)) {
-    return NextResponse.json({ error: "path not allowed" }, { status: 403 });
-  }
-  const size = stat.size;
-
   const beforeParam = req.nextUrl.searchParams.get("before");
   if (beforeParam !== null) {
+    let stat;
+    try {
+      stat = await fs.stat(path);
+    } catch {
+      stat = null;
+    }
+    if (!path || !stat?.isFile() || !pathAllowed(path)) {
+      return NextResponse.json({ error: "path not allowed" }, { status: 403 });
+    }
+    const size = stat.size;
     let before = Number(beforeParam);
     if (!Number.isFinite(before) || before < 0) before = 0;
     if (before > size) before = size;
@@ -55,24 +55,9 @@ export async function GET(
     }
   }
 
-  let offset = Number(req.nextUrl.searchParams.get("offset") ?? "0");
-  if (!Number.isFinite(offset) || offset < 0) offset = 0;
-  if (offset > size) offset = 0;
-  if (offset === 0 && size > MAX_CHUNK) offset = size - MAX_CHUNK;
-
-  const fh = await fs.open(path, "r");
-  try {
-    const buf = Buffer.alloc(Math.min(MAX_CHUNK, Math.max(0, size - offset)));
-    const { bytesRead } = await fh.read(buf, 0, buf.length, offset);
-    return NextResponse.json({
-      offset: offset + bytesRead,
-      start: offset,
-      size,
-      data: buf.subarray(0, bytesRead).toString("utf-8"),
-    });
-  } finally {
-    await fh.close();
-  }
+  const chunk = await readTailChunk(path, Number(req.nextUrl.searchParams.get("offset") ?? "0"));
+  if (!chunk) return NextResponse.json({ error: "path not allowed" }, { status: 403 });
+  return NextResponse.json(chunk);
 }
 
 /**

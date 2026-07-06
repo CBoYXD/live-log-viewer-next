@@ -10,7 +10,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 
-import { buildFeed } from "./feed/parse";
+import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
 import { QuestionCard } from "./feed/QuestionCard";
 import { isSubagent } from "./projectModel";
@@ -27,6 +27,13 @@ const COMPACT_STEP = 500;
     a far smaller tab memory budget (iOS kills the renderer past it), so the
     window shrinks there; «показати раніше» still walks the full history. */
 const TAIL_CAP = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches ? 500 : 2500;
+/** Focused (non-compact) panes read with more context but must not grow the
+    window forever while the magnet holds — a live agent left open overnight
+    used to accumulate an unbounded line array. A released reader still keeps
+    everything, so trimming never shifts what is being read. */
+const FOCUS_CAP = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches ? 1000 : 6000;
+
+const EMPTY_FEED: FeedSnapshot = { items: [], hiddenServiceCount: 0 };
 
 /** How long after a programmatic glue a not-at-bottom scroll event is treated
     as layout settling (content-visibility estimates, pane resizes) and glued
@@ -81,7 +88,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
   const [magnet, setMagnetState] = useState(() => (file ? (scrollMemory.get(file.path)?.magnet ?? follow) : follow));
   /* Released reader must never lose lines above the viewport: the tail cap
      applies only while the magnet holds the bottom in view anyway. */
-  const tail = useLogTail(file, paused, magnet && compact ? TAIL_CAP : 0);
+  const tail = useLogTail(file, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
   const scroller = useRef<HTMLDivElement | null>(null);
   const content = useRef<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ top: number; height: number } | null>(null);
@@ -167,13 +174,22 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
     }
   }, [file?.pendingQuestion?.toolUseId, file?.proc, file, locale]);
 
-  /* buildFeed reads only engine/fmt/activity off the file: depending on those
-     fields (not the object identity, which changes every /api/files poll)
-     keeps item identities stable, so memoized FeedItems skip re-rendering. */
-  const feed = useMemo(
-    () => (file ? buildFeed(file, tail.lines, showSvc, lineFilter.toLowerCase()) : { items: [], hiddenServiceCount: 0 }),
+  /* The incremental feed session parses only lines it has not seen and keeps
+     untouched item identities, so a tail tick re-renders one or two rows, not
+     the whole window. The session is keyed on the fields that change the
+     parse itself (path/format/filters/locale — not the file object identity,
+     which changes every /api/files poll); anything else reuses it. Feeding
+     inside the memo is safe: feed() is idempotent for an unchanged window. */
+  const lf = lineFilter.toLowerCase();
+  const session: FeedSession | null = useMemo(
+    () => (file ? createFeedSession({ engine: file.engine, fmt: file.fmt, showSvc, lineFilter: lf }) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [file?.path, file?.engine, file?.fmt, file?.activity, tail.lines, showSvc, lineFilter, locale],
+    [file?.path, file?.engine, file?.fmt, showSvc, lf, locale],
+  );
+  const feed = useMemo(
+    () => (file && session ? session.feed(tail.lines, tail.linesStart, file.activity === "live") : EMPTY_FEED),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [session, file?.activity, tail.lines, tail.linesStart],
   );
   const hiddenLocal = Math.max(0, feed.items.length - visibleCount);
   const visibleItems = hiddenLocal ? feed.items.slice(-visibleCount) : feed.items;
@@ -248,7 +264,7 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
   };
   const canRevealOlder = hiddenLocal > 0 || tail.hasMore;
 
-  const lastItem = feed.items.at(-1);
+  const lastItem = feed.items.at(-1)?.item;
   const working: { icon: LucideIcon; label: string } =
     lastItem?.kind === "cmd" && lastItem.call.status === "run"
       ? { icon: Wrench, label: t("feed.running", { tool: lastItem.call.cmd.split(/[\s:]/, 1)[0] || t("feed.tool") }) }
@@ -350,18 +366,18 @@ export function LogFeed({ file, files, onSelect, showSvc, lineFilter, onStatus, 
             {compact ? null : <TaskHeader file={file} files={files} onSelect={onSelect} />}
             {feed.items.length ? (
               <>
-                {visibleItems.map((item, idx) => {
-                  const key = idx + feed.items.length - visibleItems.length;
-                  /* Compact panes live on the zoomable canvas: off-screen rows
-                     skip layout/paint entirely via content-visibility. */
-                  return compact ? (
+                {visibleItems.map(({ key, item }) =>
+                  /* Session-stable keys: a row keeps its DOM node while the
+                     window slides. Compact panes live on the zoomable canvas:
+                     off-screen rows skip layout/paint via content-visibility. */
+                  compact ? (
                     <div key={key} className="feed-cv">
                       <FeedItem item={item} />
                     </div>
                   ) : (
                     <FeedItem key={key} item={item} />
-                  );
-                })}
+                  ),
+                )}
                 {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (
                   <div className="my-4 rounded-[8px] border border-line bg-chip px-4 py-3 text-[13px] font-semibold text-dim">{endedQuestion}</div>
