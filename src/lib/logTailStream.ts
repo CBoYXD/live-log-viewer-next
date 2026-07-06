@@ -215,7 +215,7 @@ export class LogTailStreamSession {
   private async restat(): Promise<void> {
     if (this.closed) return;
     for (const state of this.states) {
-      if (this.closed || !state.watcher) continue;
+      if (this.closed) continue;
       let stat;
       try {
         stat = await fsp.stat(state.path);
@@ -226,7 +226,7 @@ export class LogTailStreamSession {
         this.queue(state);
         continue;
       }
-      if (state.size === null || stat.size !== state.size || stat.size < state.offset) this.queue(state);
+      if (!state.watcher || state.size === null || stat.size !== state.size || stat.size < state.offset) this.queue(state);
     }
   }
 }

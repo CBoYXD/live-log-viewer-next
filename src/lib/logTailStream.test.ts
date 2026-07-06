@@ -83,6 +83,27 @@ describe("LogTailStreamSession", () => {
     }
   });
 
+  test("file growth still arrives when native watching fails", async () => {
+    const file = writeLog("watch-fails.log", "one\n");
+    const events: LogTailStreamEvent[] = [];
+    const session = new LogTailStreamSession([{ id: "log", path: file, offset: 4 }], {
+      restatMs: 20,
+      heartbeatMs: 60_000,
+      watchFile: () => {
+        throw new Error("watch unavailable");
+      },
+      onEvent: (event) => events.push(event),
+    });
+    try {
+      session.start();
+      await waitFor(() => events.length >= 1);
+      fs.appendFileSync(file, "two\n");
+      await waitFor(() => events.some((event) => event.id === "log" && !("error" in event.chunk) && event.chunk.data === "two\n"));
+    } finally {
+      session.close();
+    }
+  });
+
   test("teardown closes watchers and stops timers", async () => {
     const file = writeLog("teardown.log", "ready\n");
     let openCount = 0;
