@@ -3,7 +3,7 @@
 import { ListTodo } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { X } from "@/components/icons";
+import { Loader2, X } from "@/components/icons";
 import { TaskSheet, type TaskSheetView } from "@/components/tasks/TaskSheet";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -51,6 +51,7 @@ interface Props {
   tasks: BoardTask[];
   /** Ids of not-yet-spawned conversation drafts, focusable like nodes. */
   drafts: string[];
+  loaded: boolean;
   /** Path an opener wants on screen (same signal the scheme camera gets). */
   focus: string | null;
   onSelect: (file: FileEntry) => void;
@@ -67,7 +68,7 @@ interface Props {
  * data the scheme draws — nothing on the diagram is unreachable, it is just
  * shown one pane at a time.
  */
-export function MobileFocusView({ project, groups, manual, files, flows, tasks, drafts, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
+export function MobileFocusView({ project, groups, manual, files, flows, tasks, drafts, loaded, focus, onSelect, onClose, onDraftClose, onDraftSpawned, onHandoff }: Props) {
   const { t } = useLocale();
   const [focusPath, setFocusPath] = useState<string | null>(null);
   const [mapOpen, setMapOpen] = useState(false);
@@ -239,8 +240,13 @@ export function MobileFocusView({ project, groups, manual, files, flows, tasks, 
               onSpawned={(file) => onDraftSpawned(activeDraft.id, file)}
             />
           )
-        ) : (
+        ) : loaded ? (
           <div className="flex flex-1 items-center justify-center text-center text-[13px] text-dim">{t("mobile.noConvos")}</div>
+        ) : (
+          <div className="flex flex-1 items-center justify-center gap-2 text-center text-[13px] text-dim">
+            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+            {t("common.loading")}
+          </div>
         )}
         <MapChip layout={layout} tasks={tasks} current={resolvedKey} onOpen={() => setMapOpen(true)} />
         <button

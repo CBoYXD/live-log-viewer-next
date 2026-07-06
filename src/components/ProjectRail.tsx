@@ -8,7 +8,7 @@ import type { Workflow } from "@/lib/workflows/types";
 
 import { AccessQrButton } from "./AccessQrButton";
 import { FlipRow } from "./FlipRow";
-import { Archive, ChevronRight } from "./icons";
+import { Archive, ChevronRight, Loader2 } from "./icons";
 import { LanguageToggle } from "./LanguageToggle";
 import { LimitsFooter } from "./LimitsFooter";
 import { buildProjectSummaries, OVERVIEW } from "./projectModel";
@@ -24,13 +24,14 @@ interface Props {
   /** Shelved projects: pulled out of the main list into the archive section. */
   archivedProjects: ReadonlySet<string>;
   selected: string;
+  loaded: boolean;
   /** Attention clock owned by Viewer — advances when a stalled entry crosses
       its TTL, so the rail badges expire together with the queue. */
   now: number;
   onSelect: (project: string) => void;
 }
 
-export function ProjectRail({ files, workflows, archivedProjects, selected, now, onSelect }: Props) {
+export function ProjectRail({ files, workflows, archivedProjects, selected, loaded, now, onSelect }: Props) {
   const { t } = useLocale();
   const [query, setQuery] = useState("");
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -131,7 +132,14 @@ export function ProjectRail({ files, workflows, archivedProjects, selected, now,
           </>
         ) : null}
         {!activeRows.length && !archivedRows.length ? (
-          <div className="px-3 py-4 text-center text-[12px] text-dim">{t("common.nothingFound")}</div>
+          loaded ? (
+            <div className="px-3 py-4 text-center text-[12px] text-dim">{t("common.nothingFound")}</div>
+          ) : (
+            <div className="flex items-center justify-center gap-2 px-3 py-4 text-[12px] text-dim">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              {t("common.loading")}
+            </div>
+          )
         ) : null}
       </nav>
       <ResourcesFooter />

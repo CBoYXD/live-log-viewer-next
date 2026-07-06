@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { X } from "@/components/icons";
+import { Loader2, X } from "@/components/icons";
 import { useArchivedPaths } from "@/hooks/useArchivedPaths";
 import { useTimeline } from "@/hooks/useTimeline";
 import { useSwitchboardData, type SwitchboardItem } from "@/hooks/useSwitchboardData";
@@ -20,6 +20,7 @@ interface Props {
   files: FileEntry[];
   flows: Flow[];
   project: string;
+  loaded: boolean;
   onOpenFile: (file: FileEntry) => void;
 }
 
@@ -74,7 +75,7 @@ function Section({
   );
 }
 
-export function Switchboard({ files, flows, project, onOpenFile }: Props) {
+export function Switchboard({ files, flows, project, loaded, onOpenFile }: Props) {
   const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -168,7 +169,14 @@ export function Switchboard({ files, flows, project, onOpenFile }: Props) {
                 ) : null}
               </section>
               {!data.waiting.length && !data.working.length && !data.recent.length && !data.older.length ? (
-                <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
+                loaded ? (
+                  <div className="pt-[18vh] text-center text-[13px] font-semibold text-dim">{t("common.nothingFound")}</div>
+                ) : (
+                  <div className="flex items-center justify-center gap-2 pt-[18vh] text-[13px] font-semibold text-dim">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                    {t("common.loading")}
+                  </div>
+                )
               ) : null}
               {archivedItems.length ? (
                 <section className="shrink-0">

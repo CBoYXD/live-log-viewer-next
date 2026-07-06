@@ -36,6 +36,7 @@ interface Props {
   workflows: Workflow[];
   tasks: BoardTask[];
   project: string;
+  loaded: boolean;
   /** Bumped by Viewer on every openFile so a same-project open re-reads prefs
       even though `project` itself did not change. */
   openNonce: number;
@@ -105,6 +106,7 @@ export function ProjectDashboard({
   workflows,
   tasks,
   project,
+  loaded,
   openNonce,
   focusRequest,
   attentionPaths,
@@ -515,6 +517,7 @@ export function ProjectDashboard({
             flows={flows}
             tasks={projectTasks}
             drafts={drafts}
+            loaded={loaded}
             focus={highlight}
             onSelect={openSwitchboardFile}
             onClose={closeNode}
@@ -582,7 +585,7 @@ export function ProjectDashboard({
 
       {/* The corner pill would sit on the focused pane's composer; on the
           phone the strip, the map and the toast cover its job. */}
-      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} onOpenFile={openSwitchboardFile} />}
+      {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
 
       {residual.length ? <ResidualStrip items={residual} onSelect={openSwitchboardFile} /> : null}
 

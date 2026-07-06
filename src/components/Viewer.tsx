@@ -64,7 +64,7 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
-  const { files, flows: polledFlows, workflows, tasks } = useFiles();
+  const { files, flows: polledFlows, workflows, tasks, loaded } = useFiles();
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
@@ -363,11 +363,11 @@ export function Viewer() {
   return (
     <div className="flex h-full">
       {isMobile ? null : (
-        <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
+        <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
       )}
       {isMobile && drawerOpen ? (
         <div className="fixed inset-0 z-50 flex">
-          <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} onSelect={selectProject} />
+          <ProjectRail files={files} workflows={workflows} archivedProjects={archivedProjects} selected={project} now={clock} loaded={loaded} onSelect={selectProject} />
           <button
             type="button"
             className="min-w-0 flex-1 bg-ink/35"
@@ -421,6 +421,7 @@ export function Viewer() {
             workflows={workflows}
             tasks={tasks}
             project={project}
+            loaded={loaded}
             openNonce={openNonce}
             focusRequest={focusRequest}
             attentionPaths={attentionPaths}

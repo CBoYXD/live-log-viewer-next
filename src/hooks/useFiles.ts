@@ -17,9 +17,10 @@ export interface FilesData {
   flows: Flow[];
   workflows: Workflow[];
   tasks: BoardTask[];
+  loaded: boolean;
 }
 
-const EMPTY: FilesData = { files: [], flows: [], workflows: [], tasks: [] };
+const EMPTY: FilesData = { files: [], flows: [], workflows: [], tasks: [], loaded: false };
 
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
 export function useFiles(): FilesData {
@@ -43,17 +44,20 @@ export function useFiles(): FilesData {
         /* The flows rollout changes the payload from a bare array to
            {files, flows}; accept both so client and server can deploy in
            either order. */
-        if (Array.isArray(parsed)) setData({ files: parsed, flows: [], workflows: [], tasks: [] });
+        if (Array.isArray(parsed)) setData({ files: parsed, flows: [], workflows: [], tasks: [], loaded: true });
         else {
           setData({
             files: parsed.files ?? [],
             flows: parsed.flows ?? [],
             workflows: parsed.workflows ?? [],
             tasks: parsed.tasks ?? [],
+            loaded: true,
           });
         }
       } catch {
         /* keep previous list */
+      } finally {
+        if (alive) setData((d) => (d.loaded ? d : { ...d, loaded: true }));
       }
     };
     void load();
