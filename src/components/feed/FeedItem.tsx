@@ -4,6 +4,7 @@ import { memo } from "react";
 
 import { Brain, Check, ChevronUp, Command, GlyphIcon, Mail, Sparkle, X } from "../icons";
 import { hhmm } from "../utils";
+import { CopyButton } from "./CopyButton";
 import { InboxImageCard } from "./InboxImage";
 import { md, mdBlocks } from "./markdown";
 import { tr, type Item } from "./parse";
@@ -32,12 +33,17 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
     const cls = item.engine === "codex" ? "bg-codex" : "bg-claude";
     const AvatarIcon = item.engine === "codex" ? Command : Sparkle;
     return (
-      <div className="my-3.5 flex gap-2.5">
+      <div className="group/msg my-3.5 flex gap-2.5">
         <div className={`mt-1 flex h-6.5 w-6.5 shrink-0 items-center justify-center rounded-full text-white ${cls}`}>
           <AvatarIcon className="h-3.5 w-3.5" aria-hidden />
         </div>
-        <div className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+        <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
           {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] text-dim">{hhmm(item.ts)}</div> : null}
+          <CopyButton
+            text={item.text}
+            label={tr("feed.copyMd")}
+            className="absolute right-0 top-0 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
+          />
           {mdBlocks(item.text)}
         </div>
       </div>
@@ -46,7 +52,12 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
   if (item.kind === "user") {
     const long = item.text.length > 500;
     return (
-      <div className="my-3.5 flex justify-end">
+      <div className="group/msg my-3.5 flex items-start justify-end gap-1.5">
+        <CopyButton
+          text={item.text}
+          label={tr("feed.copyMd")}
+          className="mt-2 opacity-0 transition-opacity focus-visible:opacity-100 group-hover/msg:opacity-100 [@media(hover:none)]:opacity-60"
+        />
         <div className="max-w-[75%] whitespace-pre-wrap break-words rounded-2xl bg-user px-4 py-2.5">
           {long ? (
             <details className="group/usr">

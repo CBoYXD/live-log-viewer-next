@@ -11,6 +11,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "common.show": "показати",
   "common.showAll": "показати все",
   "common.collapse": "згорнути",
+  "common.copy": "Копіювати",
+  "common.copied": "скопійовано",
+  "common.clickToCopy": "клік — скопіювати",
   "common.yes": "Так",
   "common.no": "Ні",
   "common.send": "Надіслати",
@@ -250,6 +253,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "lightbox.zoomIn": "Збільшити",
 
   "feed.agentEnded": "агент завершився",
+  "feed.copyCode": "Скопіювати код",
+  "feed.copyMd": "Скопіювати повідомлення (Markdown)",
   "feed.running": "виконує {tool}…",
   "feed.tool": "інструмент",
   "feed.thinking": "думає…",

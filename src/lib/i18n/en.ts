@@ -12,6 +12,9 @@ export const en = {
   "common.show": "show",
   "common.showAll": "show all",
   "common.collapse": "collapse",
+  "common.copy": "Copy",
+  "common.copied": "copied",
+  "common.clickToCopy": "click to copy",
   "common.yes": "Yes",
   "common.no": "No",
   "common.send": "Send",
@@ -271,6 +274,8 @@ export const en = {
 
   // LogFeed
   "feed.agentEnded": "agent finished",
+  "feed.copyCode": "Copy code",
+  "feed.copyMd": "Copy message (Markdown)",
   "feed.running": "running {tool}…",
   "feed.tool": "tool",
   "feed.thinking": "thinking…",
