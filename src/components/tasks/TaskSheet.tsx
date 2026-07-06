@@ -101,7 +101,7 @@ function NewTaskView({
           if (images.length) {
             /* Images ride the plain message route, but only to targets whose
                task delivery succeeded — a failed target must not get detached
-               images with no task context. Failures show the «Доставлено N з
+               images with no task context. Failures show the «Delivered N of
                M» breakdown before the attachments clear, so a lost image is
                never silent. */
             const byPath = new Map(files.map((file) => [file.path, file]));

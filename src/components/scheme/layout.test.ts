@@ -14,7 +14,7 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
     project: "demo",
     title: overrides.path,
     engine: "claude",
-    kind: "сесія",
+    kind: "session",
     fmt: "claude",
     parent: null,
     mtime: 1_000,
@@ -68,7 +68,7 @@ function flow(overrides: Partial<Flow> & { id: string; implementerPath: string }
 describe("buildSchemeLayout byPath", () => {
   test("carries stacks and decks as glide/edge targets alongside nodes", () => {
     const root = entry({ path: "/root", activity: "live" });
-    const quiet = entry({ path: "/root/quiet", parent: "/root", kind: "субагент" });
+    const quiet = entry({ path: "/root/quiet", parent: "/root", kind: "subagent" });
     const group: BranchGroup = {
       key: "/root",
       columns: [{ file: root, tasks: [] }],

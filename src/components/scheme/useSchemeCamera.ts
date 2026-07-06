@@ -38,7 +38,7 @@ interface CameraOptions {
   /** Task-card rects keyed `task::<id>`: focus glides and map taps resolve
       through them exactly like layout.byPath entries. */
   taskRects?: ReadonlyMap<string, SchemeRect>;
-  /** One-shot «задача» tool sink: the next canvas click lands here in world
+  /** One-shot «task» tool sink: the next canvas click lands here in world
       coordinates, then the tool reverts to select. Absent in map mode. */
   onPlaceTask?: (wx: number, wy: number) => void;
 }
@@ -51,7 +51,7 @@ export interface SchemeCamera {
   setMode: (next: Mode) => void;
   /** Hand-like: map mode, hand tool, or Space held — panes go click-through. */
   handLike: boolean;
-  /** One-shot «задача» tool: armed until the placing click or Esc. */
+  /** One-shot «task» tool: armed until the placing click or Esc. */
   taskTool: boolean;
   setTaskTool: (next: boolean) => void;
   /** Glide a world rect into view (task panel rows, far-zoom inline edit). */
@@ -377,7 +377,7 @@ export function useSchemeCamera({
       if (event.key === "h" || event.key === "H") setMode("hand");
       else if (event.key === "v" || event.key === "V") setMode("select");
       else if (event.key === "t" || event.key === "T") {
-        /* T arms the one-shot «задача» tool; N belongs to the global
+        /* T arms the one-shot «task» tool; N belongs to the global
            attention-queue cycle in Viewer. */
         if (placeTaskRef.current) setTaskTool(true);
       } else if (event.key === "Escape") {
@@ -445,7 +445,7 @@ export function useSchemeCamera({
       return;
     }
     if (event.button !== 0) return;
-    /* Armed «задача» tool: this click places the card and the tool reverts
+    /* Armed «task» tool: this click places the card and the tool reverts
        to select — no pan, no selection change. preventDefault suppresses the
        compatibility mousedown: its focus fixup would land on the background
        and blur the draft's just-focused textarea, whose empty-blur handler

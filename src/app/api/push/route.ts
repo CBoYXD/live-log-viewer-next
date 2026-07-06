@@ -16,10 +16,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true } 
   if (rejection) return rejection;
   try {
     const body = (await req.json()) as PushSubscriptionRecord;
-    if (!body.endpoint) return NextResponse.json({ error: "немає endpoint" }, { status: 400 });
+    if (!body.endpoint) return NextResponse.json({ error: "missing endpoint" }, { status: 400 });
     await saveSubscription(body);
     return NextResponse.json({ ok: true });
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 }

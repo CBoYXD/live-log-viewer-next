@@ -41,14 +41,14 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const paths = pathsFromBody(body);
-  if (!paths) return NextResponse.json({ error: "потрібен paths із розмовами" }, { status: 400 });
+  if (!paths) return NextResponse.json({ error: "paths with conversations are required" }, { status: 400 });
 
   const { id } = await ctx.params;
   const task = loadTasks().find((item) => item.id === id);
-  if (!task) return NextResponse.json({ error: "задачу не знайдено" }, { status: 404 });
+  if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
   const files = await listFiles();
   const byPath = new Map(files.map((file) => [file.path, file]));

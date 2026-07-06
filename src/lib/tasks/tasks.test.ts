@@ -155,7 +155,7 @@ describe("task command helpers", () => {
 
   test("first line title uses a fallback for blank text", () => {
     expect(firstLineTitle("  Title  \nbody")).toBe("Title");
-    expect(firstLineTitle("\nbody")).toBe("Без назви");
+    expect(firstLineTitle("\nbody")).toBe("Untitled");
   });
 });
 
@@ -196,7 +196,7 @@ describe("task reconciliation", () => {
       panePidAlive: () => false,
     });
     expect(result.dirty).toBe(true);
-    expect(result.tasks[0]?.assignments[0]).toEqual({ path: null, panePid: 42, state: "failed", error: "агент не запустився", at: "new" });
+    expect(result.tasks[0]?.assignments[0]).toEqual({ path: null, panePid: 42, state: "failed", error: "agent did not start", at: "new" });
 
     const again = reconcileTasks([], result.tasks, { panePidAlive: () => false });
     expect(again.dirty).toBe(false);
@@ -205,18 +205,18 @@ describe("task reconciliation", () => {
 
 describe("task delivery assembly", () => {
   test("builds per-target results and assignment patches", () => {
-    const outcomes: DeliveryOutcome[] = [{ ok: true, target: "%1" }, { error: "немає пейна", status: 409 }];
+    const outcomes: DeliveryOutcome[] = [{ ok: true, target: "%1" }, { error: "no pane", status: 409 }];
     const assembled = assembleSendResults(task({ id: "12345678-aaaa", text: "Do it" }), ["/one", "/two"], outcomes, "now");
-    expect(assembled.message).toBe("Задача #12345678: Do it");
+    expect(assembled.message).toBe("Task #12345678: Do it");
     expect(assembled.delivered).toBe(1);
     expect(assembled.failed).toBe(1);
     expect(assembled.results).toEqual([
       { path: "/one", ok: true, target: "%1", error: null },
-      { path: "/two", ok: false, target: null, error: "немає пейна" },
+      { path: "/two", ok: false, target: null, error: "no pane" },
     ]);
     expect(assembled.patches).toEqual([
       { path: "/one", panePid: null, state: "delivered", error: null, at: "now" },
-      { path: "/two", panePid: null, state: "failed", error: "немає пейна", at: "now" },
+      { path: "/two", panePid: null, state: "failed", error: "no pane", at: "now" },
     ]);
   });
 

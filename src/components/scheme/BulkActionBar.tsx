@@ -86,7 +86,7 @@ export const BulkActionBar = memo(function BulkActionBar({
 }) {
   const { t } = useLocale();
   const [running, setRunning] = useState<ActionId | null>(null);
-  /* «Створити задачу» (default on): the text becomes a tracked task card
+  /* «Create task» (default on): the text becomes a tracked task card
      near the selection centroid, delivered as assignments; off is the plain
      broadcast with no persisted trace. */
   const [asTask, setAsTask] = useState(true);

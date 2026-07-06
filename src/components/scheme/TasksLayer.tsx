@@ -61,7 +61,7 @@ export const TasksLayer = memo(function TasksLayer({
   lite: boolean;
   camRef: React.RefObject<Camera>;
   handlers: TaskCardHandlers;
-  /** World point where the «задача» tool dropped a not-yet-saved card. */
+  /** World point where the «task» tool dropped a not-yet-saved card. */
   pending: { x: number; y: number } | null;
   onCreate: (text: string) => void;
   onCreateCancel: () => void;

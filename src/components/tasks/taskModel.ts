@@ -23,7 +23,7 @@ export function nextTaskStatus(status: TaskStatus): TaskStatus {
 
 /** First line of the task text — the title everywhere a compact label fits.
     Returns "" for an effectively empty text; callers substitute the
-    localized «без назви». */
+    localized «untitled». */
 export function taskTitle(text: string): string {
   return text.split(/\r?\n/, 1)[0]?.trim() ?? "";
 }

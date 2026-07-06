@@ -38,10 +38,10 @@ export async function POST(req: NextRequest): Promise<NextResponse<TargetBatchRe
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const reqs = parseReqs(body);
-  if (reqs === null) return NextResponse.json({ error: "некоректний список запитів" }, { status: 400 });
+  if (reqs === null) return NextResponse.json({ error: "invalid request list" }, { status: 400 });
 
   const pairs = await Promise.all(
     reqs.map(async ({ id, pid, path }) => [id, pid === null && !path ? null : await resolveRequestedTmuxTarget(pid, path)] as const),

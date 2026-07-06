@@ -27,7 +27,7 @@ export function reasoningFromBody(
 ): { effort: string | null; fast: boolean | null; error?: string } {
   const rawEffort = typeof body.effort === "string" ? body.effort.trim() : "";
   if (rawEffort && !isEngineEffort(engine, rawEffort)) {
-    return { effort: null, fast: null, error: `effort для ${engine} має бути одним із: ${ENGINE_EFFORTS[engine].join(", ")}` };
+    return { effort: null, fast: null, error: `effort for ${engine} must be one of: ${ENGINE_EFFORTS[engine].join(", ")}` };
   }
   const fast = engine === "codex" && typeof body.fast === "boolean" ? body.fast : null;
   return { effort: rawEffort || null, fast };

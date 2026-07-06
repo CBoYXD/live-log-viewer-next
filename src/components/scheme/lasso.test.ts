@@ -13,7 +13,7 @@ function entry(path: string): FileEntry {
     project: "demo",
     title: path,
     engine: "claude",
-    kind: "сесія",
+    kind: "session",
     fmt: "claude",
     parent: null,
     mtime: 1_000,

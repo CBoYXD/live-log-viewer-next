@@ -287,7 +287,7 @@ export function ProjectDashboard({
   const newDraftId = () =>
     typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 
-  /* The «+ Агент» flow: a draft conversation lands on the scheme as a full
+  /* The «+ Agent» flow: a draft conversation lands on the scheme as a full
      pane and the camera glides to it — engine, directory and the first prompt
      are picked right inside that pane. */
   const addDraft = () => {
@@ -296,7 +296,7 @@ export function ProjectDashboard({
     pendingFocusRef.current = "draft::" + id;
   };
 
-  /* The «+ Воркфлоу» sibling (W6): the same draft-card pattern, its pane
+  /* The «+ Workflow» sibling (W6): the same draft-card pattern, its pane
      carries the template picker, the repo directory and the task brief. */
   const addWorkflowDraft = () => {
     const id = "wf-" + newDraftId();

@@ -11,7 +11,7 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
     project: "demo",
     title: overrides.path,
     engine: "claude",
-    kind: "сесія",
+    kind: "session",
     fmt: "claude",
     parent: null,
     mtime: 1_000,
@@ -28,9 +28,9 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
 
 const TREE: FileEntry[] = [
   entry({ path: "/root", activity: "live" }),
-  entry({ path: "/root/a", parent: "/root", kind: "субагент" }),
-  entry({ path: "/root/a/x", parent: "/root/a", kind: "субагент" }),
-  entry({ path: "/root/b", parent: "/root", kind: "субагент" }),
+  entry({ path: "/root/a", parent: "/root", kind: "subagent" }),
+  entry({ path: "/root/a/x", parent: "/root/a", kind: "subagent" }),
+  entry({ path: "/root/b", parent: "/root", kind: "subagent" }),
   entry({ path: "/other" }),
 ];
 

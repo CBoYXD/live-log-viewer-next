@@ -118,13 +118,13 @@ export async function DELETE(req: NextRequest): Promise<NextResponse<{ ok: true 
   }
   const entry = (await listFiles()).find((item) => item.path === target);
   if (entry?.proc === "running") {
-    return NextResponse.json({ error: "агент ще працює — спочатку зупини процес" }, { status: 409 });
+    return NextResponse.json({ error: "agent is still running — stop the process first" }, { status: 409 });
   }
   try {
     await fs.unlink(target);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      return NextResponse.json({ error: "не вдалося видалити файл" }, { status: 500 });
+      return NextResponse.json({ error: "could not delete file" }, { status: 500 });
     }
   }
   const dir = companionDir(target);

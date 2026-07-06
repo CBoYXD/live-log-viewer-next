@@ -24,13 +24,13 @@ export function activityBand(file: FileEntry): ActivityBand {
 export function isConversation(file: FileEntry): boolean {
   // A claude session with a parent is a compaction-chain predecessor: it
   // belongs to its successor's tree, so it no longer counts as a root.
-  if (file.root === "claude-projects") return file.kind === "сесія" && !file.parent;
+  if (file.root === "claude-projects") return file.kind === "session" && !file.parent;
   if (file.root === "codex-sessions") return !file.parent;
   return false;
 }
 
 export function isSubagent(file: FileEntry): boolean {
-  return file.root === "claude-projects" && file.kind === "субагент";
+  return file.root === "claude-projects" && file.kind === "subagent";
 }
 
 /**
@@ -52,7 +52,7 @@ export function isAuxTask(file: FileEntry): boolean {
 }
 
 export function projectKey(file: FileEntry): string {
-  return file.project || "інше";
+  return file.project || "other";
 }
 
 export interface ProjectSummary {
@@ -194,7 +194,7 @@ function ownerSessionAlive(file: FileEntry, byPath: Map<string, FileEntry>): boo
     const parent = byPath.get(cur.parent);
     if (!parent) return false;
     seen.add(parent.path);
-    if (parent.kind === "сесія") return parent.activity === "live" || parent.activity === "recent";
+    if (parent.kind === "session") return parent.activity === "live" || parent.activity === "recent";
     cur = parent;
   }
   return false;

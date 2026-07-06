@@ -13,7 +13,7 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
     project: "demo",
     title: overrides.path,
     engine: "claude",
-    kind: "сесія",
+    kind: "session",
     fmt: "claude",
     parent: null,
     mtime: NOW - 60,
@@ -88,9 +88,9 @@ describe("attentionId", () => {
   });
 
   test("a returned subagent never counts as stalled attention", () => {
-    const returned = entry({ path: "/sub", activity: "stalled", kind: "субагент", proc: "done" });
+    const returned = entry({ path: "/sub", activity: "stalled", kind: "subagent", proc: "done" });
     expect(attentionId(returned, NOW)).toBeNull();
-    const running = entry({ path: "/sub2", activity: "stalled", kind: "субагент", proc: "running" });
+    const running = entry({ path: "/sub2", activity: "stalled", kind: "subagent", proc: "running" });
     expect(attentionId(running, NOW)).toBe(`/sub2:stalled:${running.mtime}`);
   });
 });

@@ -234,7 +234,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
   if (cached?.[0] === st.size) return cached[1];
   const rel = path.relative(root, pathname);
   const fn = path.basename(pathname);
-  let project = "інше";
+  let project = "other";
   let worktree: string | undefined;
   let title: string | null = null;
   let engine: Engine = "claude";
@@ -246,7 +246,7 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     const suffix = parts.at(-1) ?? "";
     project = parts.length >= 2 && suffix.length >= 12 ? parts.slice(0, -1).join("-") : slug;
     engine = "codex";
-    kind = "джоба";
+    kind = "job";
     const job = readJson(pathname.replace(/\.log$/, ".json"));
     if (job) {
       const bits = [stringValue(job.kindLabel) ?? "", stringValue(job.title) ?? ""].filter(Boolean);
@@ -277,9 +277,9 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     }
     if (!project) project = "codex";
     engine = "codex";
-    kind = "сесія";
+    kind = "session";
     fmt = "codex";
-    title = scanJsonlTitle(pathname, st.size, true) ?? "Сесія Codex";
+    title = scanJsonlTitle(pathname, st.size, true) ?? "Codex session";
   } else if (rootName === "claude-projects") {
     const slug = rel.split(path.sep)[0] ?? "";
     const worktreeInfo = worktreeFromSlug(slug);
@@ -296,22 +296,22 @@ export function describe(rootName: RootKey, root: string, pathname: string, st: 
     }
     fmt = "claude";
     if (fn.startsWith("agent-")) {
-      kind = "субагент";
+      kind = "subagent";
       const meta = readJson(pathname.slice(0, -".jsonl".length) + ".meta.json") ?? {};
       title =
         stringValue(meta.description) ??
         stringValue(meta.name) ??
-        "Субагент " + fn.slice("agent-".length).split(".")[0];
+        "Subagent " + fn.slice("agent-".length).split(".")[0];
     } else {
-      kind = "сесія";
-      title = scanJsonlTitle(pathname, st.size, false) ?? "Сесія Claude";
+      kind = "session";
+      title = scanJsonlTitle(pathname, st.size, false) ?? "Claude session";
     }
   } else if (rootName === "claude-tasks") {
     const slug = rel.split(path.sep)[0] ?? "";
     project = projectFromSlug(slug);
     engine = "shell";
-    kind = "фон";
-    title = "Фонова задача " + fn.split(".")[0];
+    kind = "background";
+    title = "Background task " + fn.split(".")[0];
   }
   const meta = {
     project,

@@ -27,18 +27,18 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeRes
   try {
     form = await req.formData();
   } catch {
-    return NextResponse.json({ error: "очікується multipart/form-data з полем file" }, { status: 400 });
+    return NextResponse.json({ error: "expected multipart/form-data with a file field" }, { status: 400 });
   }
   const file = form.get("file");
   if (!(file instanceof File)) {
-    return NextResponse.json({ error: "нема аудіофайла в полі file" }, { status: 400 });
+    return NextResponse.json({ error: "missing audio file in the file field" }, { status: 400 });
   }
   if (file.size > MAX_AUDIO_BYTES) {
-    return NextResponse.json({ error: "аудіо завелике (ліміт 16 МБ)" }, { status: 413 });
+    return NextResponse.json({ error: "audio is too large (16 MB limit)" }, { status: 413 });
   }
   const mime = file.type && file.type.startsWith("audio/") ? file.type.split(";")[0] : "audio/webm";
   if (file.type && !file.type.startsWith("audio/")) {
-    return NextResponse.json({ error: "очікується аудіо" }, { status: 415 });
+    return NextResponse.json({ error: "expected audio" }, { status: 415 });
   }
   const rawLanguage = form.get("language");
   const language = typeof rawLanguage === "string" && LANGUAGE_RE.test(rawLanguage) ? rawLanguage : "";
@@ -48,7 +48,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeRes
     const apiKey = readElevenLabsApiKey();
     if (!apiKey) {
       return NextResponse.json(
-        { error: "нема ключа ElevenLabs (~/.config/agent-log-viewer/elevenlabs-api-key або ELEVENLABS_API_KEY)" },
+        { error: "missing ElevenLabs key (~/.config/agent-log-viewer/elevenlabs-api-key or ELEVENLABS_API_KEY)" },
         { status: 503 },
       );
     }
@@ -74,21 +74,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeRes
     const auth = readCodexAuth();
     if (!auth) {
       return NextResponse.json(
-        { error: "нема ChatGPT-токена Codex (~/.codex/auth.json) — залогінься в Codex" },
+        { error: "missing Codex ChatGPT token (~/.codex/auth.json) — sign in to Codex" },
         { status: 503 },
       );
     }
     const upstream = await callTranscribe(auth, tmpPath, mime, language);
     if (upstream.status === 401) {
-      return NextResponse.json({ error: "ChatGPT-токен протух — відкрий Codex, щоб він оновив токен" }, { status: 502 });
+      return NextResponse.json({ error: "ChatGPT token expired — open Codex so it can refresh the token" }, { status: 502 });
     }
     if (upstream.status !== 200) {
-      return NextResponse.json({ error: `бекенд транскрипції: HTTP ${upstream.status || "0 (мережа)"}` }, { status: 502 });
+      return NextResponse.json({ error: `transcription backend: HTTP ${upstream.status || "0 (network)"}` }, { status: 502 });
     }
     const json = JSON.parse(upstream.body) as { text?: unknown };
     return NextResponse.json({ text: typeof json.text === "string" ? json.text : "" });
   } catch (error) {
-    const label = backend === "local" ? "локальний STT" : "бекенд транскрипції";
+    const label = backend === "local" ? "local STT" : "transcription backend";
     return NextResponse.json(
       { error: `${label}: ${error instanceof Error ? error.message : String(error)}` },
       { status: 502 },

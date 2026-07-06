@@ -17,7 +17,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; t
   try {
     body = (await req.json()) as CreateTaskInput;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   const result = mutateTasks((tasks) => {

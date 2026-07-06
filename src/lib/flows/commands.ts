@@ -53,7 +53,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
   const baseMode = req.baseMode === "merge-base" ? "merge-base" : "head";
   const cwd = headCwd(entry.path);
-  if (!cwd) return { error: "не вдалося визначити робочу директорію сесії", status: 409 };
+  if (!cwd) return { error: "could not determine the session working directory", status: 409 };
   const base =
     typeof req.baseRef === "string" && req.baseRef.trim()
       ? { ok: true as const, sha: req.baseRef.trim() }

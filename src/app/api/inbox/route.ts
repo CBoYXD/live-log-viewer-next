@@ -18,12 +18,12 @@ interface DeleteResponse {
 /** Serves the bytes of a composer-saved inbox image (`?name=img-….png`). */
 export async function GET(req: NextRequest): Promise<NextResponse<ApiError> | NextResponse> {
   const ref = inboxImageRef(req.nextUrl.searchParams.get("name") ?? "");
-  if (!ref) return NextResponse.json({ error: "недопустиме ім'я файлу" }, { status: 400 });
+  if (!ref) return NextResponse.json({ error: "invalid file name" }, { status: 400 });
   let data: Buffer;
   try {
     data = await fs.readFile(ref.path);
   } catch {
-    return NextResponse.json({ error: "файл не знайдено" }, { status: 404 });
+    return NextResponse.json({ error: "file not found" }, { status: 404 });
   }
   /* no-store: a deleted image must not resurrect from the browser cache. */
   return new NextResponse(new Uint8Array(data), {
@@ -36,14 +36,14 @@ export async function DELETE(req: NextRequest): Promise<NextResponse<DeleteRespo
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
   const ref = inboxImageRef(req.nextUrl.searchParams.get("name") ?? "");
-  if (!ref) return NextResponse.json({ error: "недопустиме ім'я файлу" }, { status: 400 });
+  if (!ref) return NextResponse.json({ error: "invalid file name" }, { status: 400 });
   try {
     await fs.unlink(ref.path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return NextResponse.json({ ok: true, missing: true });
     }
-    return NextResponse.json({ error: "не вдалося видалити файл" }, { status: 500 });
+    return NextResponse.json({ error: "could not delete file" }, { status: 500 });
   }
   return NextResponse.json({ ok: true });
 }

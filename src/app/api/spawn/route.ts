@@ -87,26 +87,26 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   try {
     body = (await req.json()) as typeof body;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   const engine = body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
-  if (!engine) return NextResponse.json({ error: "engine має бути claude або codex" }, { status: 400 });
+  if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
 
   const reasoning = reasoningFromBody(engine, body);
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
 
   const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
-  if (!rawCwd) return NextResponse.json({ error: "потрібна робоча директорія" }, { status: 400 });
+  if (!rawCwd) return NextResponse.json({ error: "working directory is required" }, { status: 400 });
   const cwd = path.resolve(rawCwd === "~" || rawCwd.startsWith("~/") ? path.join(os.homedir(), rawCwd.slice(1)) : rawCwd);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(cwd);
   } catch {
-    return NextResponse.json({ error: `директорії не існує: ${cwd}` }, { status: 400 });
+    return NextResponse.json({ error: `directory does not exist: ${cwd}` }, { status: 400 });
   }
   if (!stat.isDirectory()) {
-    return NextResponse.json({ error: `не директорія: ${cwd}` }, { status: 400 });
+    return NextResponse.json({ error: `not a directory: ${cwd}` }, { status: 400 });
   }
 
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";

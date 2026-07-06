@@ -38,7 +38,7 @@ export function localTranscribe(audioPath: string, language: string): Promise<Tr
       { maxBuffer: 4 * 1024 * 1024, timeout: WHISPER_TIMEOUT_MS },
       (error, stdout) => {
         if (error && !stdout) {
-          const hint = (error as NodeJS.ErrnoException).code === "ENOENT" ? " (запусти scripts/setup-whisper.sh)" : "";
+          const hint = (error as NodeJS.ErrnoException).code === "ENOENT" ? " (run scripts/setup-whisper.sh)" : "";
           reject(new Error(error.message + hint));
           return;
         }
@@ -50,7 +50,7 @@ export function localTranscribe(audioPath: string, language: string): Promise<Tr
           }
           resolve({ text: typeof parsed.text === "string" ? parsed.text : "" });
         } catch {
-          reject(new Error("локальний STT повернув некоректний вивід"));
+          reject(new Error("local STT returned invalid output"));
         }
       },
     );

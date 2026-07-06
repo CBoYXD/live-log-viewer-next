@@ -27,7 +27,7 @@ function normalizeQuestion(obj: Record<string, unknown>): PendingQuestionItem | 
   options.sort((a, b) => Number(b.recommended) - Number(a.recommended));
   return {
     question,
-    header: stringValue(obj.header)?.trim() ?? "Питання",
+    header: stringValue(obj.header)?.trim() ?? "Question",
     multiSelect: obj.multiSelect === true,
     options,
   };
@@ -78,7 +78,7 @@ function assistantToolUse(obj: Record<string, unknown>): { id: string; name: str
 export function recordedToolResult(pathname: string, size: number, toolUseId: string): string | null {
   for (const obj of tailRecords(pathname, size).reverse()) {
     const text = toolResultText(obj, toolUseId);
-    if (text !== null) return text.trim() || "відповідь записана в транскрипті";
+    if (text !== null) return text.trim() || "answer is recorded in the transcript";
   }
   return null;
 }

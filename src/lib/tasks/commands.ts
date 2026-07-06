@@ -49,7 +49,7 @@ function normalizeStatus(value: unknown): TaskStatus | null {
 }
 
 function textLimitError(): TaskCommandResult {
-  return { ok: false, error: `Текст задачі має бути не довший за ${TASK_TEXT_LIMIT} символів`, status: 400 };
+  return { ok: false, error: `Task text must be no longer than ${TASK_TEXT_LIMIT} characters`, status: 400 };
 }
 
 export function createTask(
@@ -58,15 +58,15 @@ export function createTask(
   deps: { now?: () => string; id?: () => string } = {},
 ): TaskCommandResult {
   const project = normalizeProject(input.project);
-  if (!project) return { ok: false, error: "потрібен project", status: 400 };
+  if (!project) return { ok: false, error: "project is required", status: 400 };
   const text = normalizeText(input.text);
-  if (!text) return { ok: false, error: "потрібен текст задачі", status: 400 };
+  if (!text) return { ok: false, error: "task text is required", status: 400 };
   if (text.length > TASK_TEXT_LIMIT) return textLimitError();
   const pos = normalizePos(input.pos);
-  if (!pos) return { ok: false, error: "потрібна позиція задачі", status: 400 };
+  if (!pos) return { ok: false, error: "task position is required", status: 400 };
   const count = existing.filter((task) => task.project === project).length;
   if (count >= TASKS_PER_PROJECT_LIMIT) {
-    return { ok: false, error: `У проєкті вже є ${TASKS_PER_PROJECT_LIMIT} задач. Закрийте або видаліть зайві задачі.`, status: 409 };
+    return { ok: false, error: `The project already has ${TASKS_PER_PROJECT_LIMIT} tasks. Close or delete extra tasks.`, status: 409 };
   }
 
   const now = deps.now?.() ?? isoNow();
@@ -85,24 +85,24 @@ export function createTask(
 
 export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInput, now = isoNow()): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
-  if (index < 0) return { ok: false, error: "задачу не знайдено", status: 404 };
+  if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const task = existing[index]!;
   const patch: Partial<BoardTask> = {};
 
   if (Object.hasOwn(input, "text")) {
     const text = normalizeText(input.text);
-    if (!text) return { ok: false, error: "потрібен текст задачі", status: 400 };
+    if (!text) return { ok: false, error: "task text is required", status: 400 };
     if (text.length > TASK_TEXT_LIMIT) return textLimitError();
     patch.text = text;
   }
   if (Object.hasOwn(input, "status")) {
     const status = normalizeStatus(input.status);
-    if (!status) return { ok: false, error: "некоректний статус задачі", status: 400 };
+    if (!status) return { ok: false, error: "invalid task status", status: 400 };
     patch.status = status;
   }
   if (Object.hasOwn(input, "pos")) {
     const pos = normalizePos(input.pos);
-    if (!pos) return { ok: false, error: "некоректна позиція задачі", status: 400 };
+    if (!pos) return { ok: false, error: "invalid task position", status: 400 };
     patch.pos = pos;
   }
 
@@ -114,7 +114,7 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
 
 export function deleteTask(existing: BoardTask[], id: string): { ok: true; tasks: BoardTask[] } | { ok: false; error: string; status: number } {
   const tasks = existing.filter((task) => task.id !== id);
-  if (tasks.length === existing.length) return { ok: false, error: "задачу не знайдено", status: 404 };
+  if (tasks.length === existing.length) return { ok: false, error: "task not found", status: 404 };
   return { ok: true, tasks };
 }
 
@@ -156,7 +156,7 @@ export function applyAssignmentPatches(
   now = isoNow(),
 ): TaskCommandResult {
   const index = existing.findIndex((task) => task.id === id);
-  if (index < 0) return { ok: false, error: "задачу не знайдено", status: 404 };
+  if (index < 0) return { ok: false, error: "task not found", status: 404 };
   const task = existing[index]!;
   const hasSuccess = patches.some((patch) => patch.state === "delivered" || patch.state === "spawning");
   const updated: BoardTask = {

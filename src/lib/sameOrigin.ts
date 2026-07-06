@@ -59,5 +59,5 @@ export function rejectCrossOrigin(req: NextRequest): NextResponse<ApiError> | nu
 }
 
 function forbidden(): NextResponse<ApiError> {
-  return NextResponse.json({ error: "заборонено: запит з іншого origin" }, { status: 403 });
+  return NextResponse.json({ error: "forbidden: cross-origin request" }, { status: 403 });
 }

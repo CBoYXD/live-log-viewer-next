@@ -145,11 +145,11 @@ describe("buildTaskEdges", () => {
 
   test("failed assignment marks its edge with the error", () => {
     const edges = buildTaskEdges(
-      [task({ id: "t2", assignments: [assignment({ path: "/quiet", state: "failed", error: "немає пейна" })] })],
+      [task({ id: "t2", assignments: [assignment({ path: "/quiet", state: "failed", error: "no pane" })] })],
       index,
     );
     expect(edges[0]!.failed).toBe(true);
-    expect(edges[0]!.error).toBe("немає пейна");
+    expect(edges[0]!.error).toBe("no pane");
   });
 
   test("status rides on the edge for coloring", () => {

@@ -26,14 +26,14 @@ export async function POST(req: NextRequest): Promise<NextResponse<TranscribeBac
   try {
     body = (await req.json()) as typeof body;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   if (!isTranscribeBackend(body.backend)) {
-    return NextResponse.json({ error: "backend має бути local, chatgpt або elevenlabs" }, { status: 400 });
+    return NextResponse.json({ error: "backend must be local, chatgpt, or elevenlabs" }, { status: 400 });
   }
   const info = transcribeBackendInfo();
   if (info.lockedByEnv) {
-    return NextResponse.json({ error: "вибір заблоковано змінною LLV_TRANSCRIBE_BACKEND" }, { status: 409 });
+    return NextResponse.json({ error: "selection is locked by LLV_TRANSCRIBE_BACKEND" }, { status: 409 });
   }
   try {
     writeTranscribeBackend(body.backend);

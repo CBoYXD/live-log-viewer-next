@@ -16,16 +16,16 @@ import { QuestionCard } from "./feed/QuestionCard";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
 
-/** Items rendered initially and added per «показати раніше» step. */
+/** Items rendered initially and added per «show earlier» step. */
 const RENDER_STEP = 1500;
 /** Compact scheme panes keep the DOM small — five agents on the canvas must
-    not mount thousands of message nodes each; «показати раніше» still walks
+    not mount thousands of message nodes each; «show earlier» still walks
     the full history in steps. */
 const COMPACT_INITIAL = 300;
 const COMPACT_STEP = 500;
 /** Live-tail window while the magnet holds the bottom. Touch devices run on
     a far smaller tab memory budget (iOS kills the renderer past it), so the
-    window shrinks there; «показати раніше» still walks the full history. */
+    window shrinks there; «show earlier» still walks the full history. */
 const TAIL_CAP = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches ? 500 : 2500;
 /** Focused (non-compact) panes read with more context but must not grow the
     window forever while the magnet holds — a live agent left open overnight

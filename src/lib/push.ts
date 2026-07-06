@@ -175,7 +175,7 @@ function payloadFor(entry: FileEntry): PushPayload {
         entry.waitingInput?.menu?.question.slice(0, 120) ||
         (entry.waitingInput ? "waiting for an answer" : "question");
   return {
-    title: `${entry.title || "Агент"} · ${entry.engine}`,
+    title: `${entry.title || "Agent"} · ${entry.engine}`,
     body: header,
     url: `/#f=${encodeURIComponent(entry.path)}#question`,
   };

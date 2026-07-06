@@ -24,7 +24,7 @@ export async function PATCH(
   try {
     body = (await req.json()) as PatchTaskInput;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   const { id } = await ctx.params;

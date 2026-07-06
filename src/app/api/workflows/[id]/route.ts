@@ -23,16 +23,16 @@ export async function PATCH(
   try {
     body = (await req.json()) as PatchWorkflowRequest;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const actions = new Set(["pause", "resume", "advance", "retry-stage", "close"]);
   if (!actions.has(body.action)) {
-    return NextResponse.json({ error: "невідома дія" }, { status: 400 });
+    return NextResponse.json({ error: "unknown action" }, { status: 400 });
   }
   const { id } = await ctx.params;
   const result = await patchWorkflow(id, body);
   if (!result.workflow) {
-    return NextResponse.json({ error: result.error ?? "не вдалося змінити воркфлоу" }, { status: result.status ?? 400 });
+    return NextResponse.json({ error: result.error ?? "could not update workflow" }, { status: result.status ?? 400 });
   }
   return NextResponse.json({ ok: true, workflow: result.workflow });
 }

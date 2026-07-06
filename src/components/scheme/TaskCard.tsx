@@ -42,7 +42,7 @@ export interface TaskCardHandlers {
   send: (task: BoardTask, paths: string[]) => void;
   spawn: (task: BoardTask, input: SpawnAgentInput) => Promise<string | null>;
   center: (rect: SchemeRect) => void;
-  /** Currently selected conversation paths — «надіслати» targets them directly. */
+  /** Currently selected conversation paths — «send» targets them directly. */
   selectionPaths: () => string[];
 }
 
@@ -110,7 +110,7 @@ function AssignmentChip({
   );
 }
 
-/** Checkbox picker over the project's conversations + «⤷ всім дітям». */
+/** Checkbox picker over the project's conversations + «⤷ all children». */
 function SendPicker({
   task,
   files,
@@ -428,9 +428,9 @@ export const TaskCard = memo(function TaskCard({
   const byPath = new Map(files.map((file) => [file.path, file]));
   const lifted = editing || drag !== null || pop !== null;
 
-  /* The handoff gesture, task-flavored: pull the arrow off the «надіслати»
+  /* The handoff gesture, task-flavored: pull the arrow off the «send»
      pill onto a pane to deliver the task there; a drop on empty canvas means
-     «нікого підходящого» — it opens the spawn popover for a fresh agent. */
+     «no suitable target» — it opens the spawn popover for a fresh agent. */
   const link = useLinkDrag({
     onDrop: (hit) => {
       if (deliveryBlocked()) return null;
@@ -567,7 +567,7 @@ export const TaskCard = memo(function TaskCard({
 });
 
 /**
- * The not-yet-persisted card the «задача» tool drops: a focused textarea at
+ * The not-yet-persisted card the «task» tool drops: a focused textarea at
  * the clicked world point. Blur/Esc with text creates the task; empty text
  * discards the card.
  */

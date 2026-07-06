@@ -71,11 +71,11 @@ export async function livePaneTarget(filePath: string): Promise<string | null> {
 
 export async function interruptConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "для переривання потрібен path розмови", status: 400 };
+    return { error: "the conversation path is required to interrupt", status: 400 };
   }
   const target = await livePaneTarget(filePath);
   if (target === null) {
-    return { error: "немає активного пейна агента для переривання", status: 409 };
+    return { error: "no active agent pane to interrupt", status: 409 };
   }
   try {
     await sendInterrupt(target);
@@ -91,11 +91,11 @@ export async function interruptConversation(filePath: string): Promise<DeliveryO
    sense against a pane that already exists — never boots a window. */
 export async function compactConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "для стискання потрібен path розмови", status: 400 };
+    return { error: "the conversation path is required to compact", status: 400 };
   }
   const target = await livePaneTarget(filePath);
   if (target === null) {
-    return { error: "немає активного пейна агента для стискання", status: 409 };
+    return { error: "no active agent pane to compact", status: 409 };
   }
   try {
     await sendText(target, "/compact");
@@ -139,14 +139,14 @@ export function dialogKeyStale(screen: string, key: string, label: unknown, ques
    The pane is re-read right before sending — see dialogKeyStale. */
 export async function answerDialogKey(filePath: string, key: string, label: unknown, question: unknown): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "для відповіді потрібен path розмови", status: 400 };
+    return { error: "the conversation path is required to answer", status: 400 };
   }
   if (!/^([1-9]|Tab|Enter|Escape)$/.test(key)) {
-    return { error: "некоректна клавіша", status: 400 };
+    return { error: "invalid key", status: 400 };
   }
   const target = await livePaneTarget(filePath);
   if (target === null) {
-    return { error: "немає активного пейна агента", status: 409 };
+    return { error: "no active agent pane", status: 409 };
   }
   try {
     const stale = await withPaneLock(target, async () => {
@@ -154,9 +154,9 @@ export async function answerDialogKey(filePath: string, key: string, label: unkn
       if (verdict === null) await sendKeys(target, [key]);
       return verdict;
     });
-    if (stale === "blocked") return { error: "пейн чекає на підтвердження, яке потребує ручного рішення", status: 409 };
-    if (stale === "closed") return { error: "пейн уже не чекає на відповідь", status: 409 };
-    if (stale === "changed") return { error: "меню на екрані вже змінилось", status: 409 };
+    if (stale === "blocked") return { error: "pane is waiting for a confirmation that requires a manual decision", status: 409 };
+    if (stale === "closed") return { error: "pane is no longer waiting for a response", status: 409 };
+    if (stale === "changed") return { error: "the on-screen menu has changed", status: 409 };
     return { ok: true, target };
   } catch (error) {
     return failure(error);
@@ -165,12 +165,12 @@ export async function answerDialogKey(filePath: string, key: string, label: unkn
 
 export async function resumeConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "для відкриття потрібен path розмови", status: 400 };
+    return { error: "the conversation path is required to open", status: 400 };
   }
   const entry = (await listFiles()).find((item) => item.path === filePath);
-  if (!entry) return { error: "файл невідомий переглядачу", status: 403 };
+  if (!entry) return { error: "file is unknown to the viewer", status: 403 };
   const spec = resumeSpecFor(entry.root, entry.path);
-  if (!spec) return { error: "цю розмову неможливо відновити", status: 409 };
+  if (!spec) return { error: "this conversation cannot be resumed", status: 409 };
   try {
     const sent = await sendToResumedAgent(entry.path, spec, "");
     return { ok: true, target: sent.target, spawned: sent.spawned };
@@ -184,7 +184,7 @@ export async function resumeConversation(filePath: string): Promise<DeliveryOutc
    then a pure UI removal and still succeeds. */
 export async function killConversation(filePath: string): Promise<DeliveryOutcome> {
   if (!filePath || !pathAllowed(filePath)) {
-    return { error: "для закриття потрібен path розмови", status: 400 };
+    return { error: "the conversation path is required to close", status: 400 };
   }
   const entry = (await listFiles()).find((item) => item.path === filePath);
   /* A branch column shares the root conversation's pane: killing it from a
@@ -228,7 +228,7 @@ export async function deliverConversationMessage(message: ConversationMessage): 
   if (pid !== null) {
     const resolved = await targetForKnownPid(pid);
     if (resolved === "unknown" && !filePath) {
-      return { error: "процес невідомий переглядачу", status: 403 };
+      return { error: "process is unknown to the viewer", status: 403 };
     }
     target = resolved === "unknown" ? null : resolved;
   }
@@ -250,12 +250,12 @@ export async function deliverConversationMessage(message: ConversationMessage): 
     /* No live pane: reopen the conversation as a fresh agent window in the
        user's current tmux session and type the prompt there. */
     if (!filePath || !pathAllowed(filePath)) {
-      return { error: "процес не у tmux-сесії", status: 409 };
+      return { error: "process is not in a tmux session", status: 409 };
     }
     const all = await listFiles();
     const entry = all.find((item) => item.path === filePath);
     if (!entry) {
-      return { error: "файл невідомий переглядачу", status: 403 };
+      return { error: "file is unknown to the viewer", status: 403 };
     }
     const spec = resumeSpecFor(entry.root, entry.path);
     if (spec) {
@@ -273,18 +273,18 @@ export async function deliverConversationMessage(message: ConversationMessage): 
       root = byPath.get(root.parent)!;
     }
     if (root.path === entry.path) {
-      return { error: "цю розмову неможливо відновити", status: 409 };
+      return { error: "this conversation cannot be resumed", status: 409 };
     }
     /* Resolved before saving anything: the root's live pane or resume spec
        must exist, or the request is rejected without ever writing an image. */
     const rootTarget = root.pid !== null ? await resolveTarget(root.pid) : null;
     const rootSpec = rootTarget === null ? resumeSpecFor(root.root, root.path) : null;
     if (rootTarget === null && !rootSpec) {
-      return { error: "коренева сесія недоступна для повідомлення", status: 409 };
+      return { error: "root session is unavailable for messaging", status: 409 };
     }
     const bundle = buildImagePayload(text, images);
     imagePaths = bundle.imagePaths;
-    const relayText = `Повідомлення від користувача для твоєї гілки «${entry.title.slice(0, 100)}» — передай або обробʼи сам:\n${bundle.payload}`;
+    const relayText = `User message for your branch «${entry.title.slice(0, 100)}» — forward it or handle it yourself:\n${bundle.payload}`;
     const imageField = imagePaths.length ? { imagePaths } : {};
     if (rootTarget !== null) {
       await sendText(rootTarget, relayText);

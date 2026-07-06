@@ -40,7 +40,7 @@ function readSent(path: string): SentEntry[] {
 /** Conversations that accept a message without a live pane: root sessions
     reopen through resume; subagents relay through their root conversation. */
 function canMessageWithoutPane(file: FileEntry): boolean {
-  if (file.root === "claude-projects") return file.kind === "сесія" || file.kind === "субагент";
+  if (file.root === "claude-projects") return file.kind === "session" || file.kind === "subagent";
   return file.root === "codex-sessions";
 }
 
@@ -151,7 +151,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
   const spawnMode = target === null;
-  const relayMode = spawnMode && file.root === "claude-projects" && file.kind === "субагент";
+  const relayMode = spawnMode && file.root === "claude-projects" && file.kind === "subagent";
 
   const persistSent = (next: SentEntry[]) => {
     setSent(next);

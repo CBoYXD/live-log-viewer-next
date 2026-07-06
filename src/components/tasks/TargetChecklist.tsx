@@ -16,7 +16,7 @@ export function sendableConversations(files: FileEntry[], project: string): File
 }
 
 /**
- * Checkbox list over the project's conversations, with the «⤷ всім дітям»
+ * Checkbox list over the project's conversations, with the «⤷ all children»
  * shortcut on rows that have conversation descendants. Selection state lives
  * in the caller (card popover, mobile sheet).
  */

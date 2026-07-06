@@ -444,7 +444,7 @@ export async function linkEntries(entries: FileEntry[]): Promise<void> {
         const base = info.description || info.command;
         if (base) entry.title = base.split(/\s+/).join(" ").slice(0, 120);
       } else {
-        entry.title = "Фонова задача " + tid;
+        entry.title = "Background task " + tid;
         entry.cmd = "";
         entry.cmdDesc = "";
       }

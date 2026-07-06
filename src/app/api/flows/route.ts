@@ -22,15 +22,15 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; f
   try {
     body = (await req.json()) as CreateFlowRequest;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   if (typeof body.implementerPath !== "string" || !body.implementerPath) {
-    return NextResponse.json({ error: "потрібен implementerPath" }, { status: 400 });
+    return NextResponse.json({ error: "implementerPath is required" }, { status: 400 });
   }
 
   try {
     const result = await createFlowFromRequest(body, await listFiles());
-    if (!result.flow) return NextResponse.json({ error: result.error ?? "не вдалося створити флоу" }, { status: result.status ?? 400 });
+    if (!result.flow) return NextResponse.json({ error: result.error ?? "could not create flow" }, { status: result.status ?? 400 });
     return NextResponse.json({ ok: true, flow: result.flow });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });

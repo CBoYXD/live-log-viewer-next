@@ -5,7 +5,7 @@ import type { FileEntry } from "@/lib/types";
 import type { BoardTask, TaskAssignment } from "./types";
 
 const ANCESTRY_MAX_DEPTH = 15;
-const DEAD_SPAWN_ERROR = "агент не запустився";
+const DEAD_SPAWN_ERROR = "agent did not start";
 
 export interface ReconcileEnv {
   successorForPath?: (pathname: string, files: FileEntry[]) => string | null;

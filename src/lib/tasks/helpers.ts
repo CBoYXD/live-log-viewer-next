@@ -8,9 +8,9 @@ export function shortTaskId(id: string): string {
 
 export function firstLineTitle(text: string): string {
   const first = text.split(/\r?\n/, 1)[0]?.trim() ?? "";
-  return first || "Без назви";
+  return first || "Untitled";
 }
 
 export function taskDeliveryText(id: string, text: string): string {
-  return `Задача #${shortTaskId(id)}: ${text}`;
+  return `Task #${shortTaskId(id)}: ${text}`;
 }

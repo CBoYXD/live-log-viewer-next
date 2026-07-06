@@ -26,7 +26,7 @@ export function pushTaskToast(kind: TaskToast["kind"], text: string): void {
   for (const listener of listeners) listener(toast);
 }
 
-/** «Доставлено 2 з 3; ✗ „title“: помилка» — the partial-delivery breakdown. */
+/** «Delivered 2 of 3; ✗ "title": error» — the partial-delivery breakdown. */
 export function sendSummary(result: TaskSendResult, files: readonly FileEntry[]): { kind: TaskToast["kind"]; text: string } {
   const locale = getLocale();
   const total = result.results.length;

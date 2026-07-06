@@ -55,20 +55,20 @@ export async function POST(req: NextRequest): Promise<NextResponse<KillResponse 
   try {
     body = (await req.json()) as { path?: unknown; force?: unknown };
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   const pathname = typeof body.path === "string" ? body.path : "";
   if (!pathname || !pathAllowed(pathname)) {
-    return NextResponse.json({ error: "шлях поза дозволеними коренями" }, { status: 400 });
+    return NextResponse.json({ error: "path is outside allowed roots" }, { status: 400 });
   }
 
   const pid = await derivePid(pathname);
   if (pid === "invalid") {
-    return NextResponse.json({ error: "не процесний запис" }, { status: 400 });
+    return NextResponse.json({ error: "not a process entry" }, { status: 400 });
   }
   if (pid === null || pid === "stale" || !pidAlive(pid)) {
-    return NextResponse.json({ error: "процес вже не працює" }, { status: 409 });
+    return NextResponse.json({ error: "process is no longer running" }, { status: 409 });
   }
 
   try {

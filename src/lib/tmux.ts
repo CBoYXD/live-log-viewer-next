@@ -61,13 +61,13 @@ export function collectImagePayloads(body: { image?: unknown; images?: unknown }
     const base64 = entry && typeof entry === "object" ? (entry as { base64?: unknown }).base64 : undefined;
     const mime = entry && typeof entry === "object" ? (entry as { mime?: unknown }).mime : undefined;
     if (typeof base64 !== "string" || !base64) {
-      return { images: [], error: { error: "некоректне зображення", status: 400 } };
+      return { images: [], error: { error: "invalid image", status: 400 } };
     }
     if (inboxImageExt(typeof mime === "string" ? mime : "") === null) {
-      return { images: [], error: { error: "непідтримуваний тип зображення", status: 415 } };
+      return { images: [], error: { error: "unsupported image type", status: 415 } };
     }
     if (base64DecodedLength(base64) > MAX_INBOX_IMAGE_BYTES) {
-      return { images: [], error: { error: "зображення завелике (ліміт 10 МБ)", status: 413 } };
+      return { images: [], error: { error: "image is too large (10 MB limit)", status: 413 } };
     }
     images.push({ base64, mime: mime as string });
   }
@@ -236,25 +236,25 @@ export async function withPaneLock<T>(target: string, fn: () => Promise<T>): Pro
  */
 async function ensureDeliverable(target: TmuxTarget): Promise<void> {
   const command = await paneCommand(target);
-  if (command === null) throw new Error("tmux-пейн недоступний");
+  if (command === null) throw new Error("tmux pane is unavailable");
   if (isShellCommand(command)) {
     logEvent("gate", { target, result: "error", reason: "shell_prompt" });
-    throw new Error("у пейні немає агента (звичайний shell) — повідомлення не надіслано");
+    throw new Error("pane has no agent (plain shell) — message was not sent");
   }
   for (let round = 0; round < 3; round += 1) {
     const screen = await paneScreen(target);
     const menu = parseScreenMenu(screen);
     if (menu !== null) {
       logEvent("gate", { target, result: "error", reason: "select_dialog" });
-      throw new Error("агент чекає на вибір у пейні — дай відповідь перед новим повідомленням");
+      throw new Error("agent is waiting for a choice in the pane — answer before sending a new message");
     }
     const blocking = detectBlockingGate(screen);
     if (blocking !== null) {
       logEvent("gate", { target, result: "error", reason: blocking });
       throw new Error(
         blocking === "rate_limit"
-          ? "агент уперся в rate limit — повідомлення не надіслано"
-          : "агент чекає на підтвердження в пейні — дай відповідь перед новим повідомленням",
+          ? "agent hit a rate limit — message was not sent"
+          : "agent is waiting for confirmation in the pane — answer before sending a new message",
       );
     }
     const startup = detectStartupGate(screen);
@@ -299,14 +299,14 @@ export async function sendText(target: TmuxTarget, text: string): Promise<void> 
 async function sendTextUnlocked(target: TmuxTarget, text: string): Promise<void> {
   const bufferName = `viewer-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const load = await runTmux(["load-buffer", "-b", bufferName, "-"], Buffer.from(text, "utf8"));
-  if (load.code !== 0) throw new Error(load.stderr.trim() || "не вдалося завантажити буфер tmux");
+  if (load.code !== 0) throw new Error(load.stderr.trim() || "could not load tmux buffer");
 
   const paste = await runTmux(["paste-buffer", "-d", "-p", "-b", bufferName, "-t", target]);
-  if (paste.code !== 0) throw new Error(paste.stderr.trim() || "не вдалося вставити текст у пейн");
+  if (paste.code !== 0) throw new Error(paste.stderr.trim() || "could not paste text into pane");
 
   await sleep(PASTE_SETTLE_MS);
   const enter = await runTmux(["send-keys", "-t", target, "Enter"]);
-  if (enter.code !== 0) throw new Error(enter.stderr.trim() || "не вдалося натиснути Enter");
+  if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not press Enter");
 
   const head = text.split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 32) ?? "";
   for (let round = 0; round < SUBMIT_VERIFY_TRIES; round += 1) {
@@ -325,7 +325,7 @@ async function sendTextUnlocked(target: TmuxTarget, text: string): Promise<void>
 export async function sendInterrupt(target: TmuxTarget): Promise<void> {
   const res = await runTmux(["send-keys", "-t", target, "Escape"]);
   logEvent("interrupt", { target, result: res.code === 0 ? "ok" : "error", reason: res.stderr.trim() || undefined });
-  if (res.code !== 0) throw new Error(res.stderr.trim() || "не вдалося надіслати Escape");
+  if (res.code !== 0) throw new Error(res.stderr.trim() || "could not send Escape");
 }
 
 /**
@@ -347,7 +347,7 @@ export async function panePidOf(target: TmuxTarget): Promise<number | null> {
 export async function killPane(target: TmuxTarget): Promise<void> {
   const res = await runTmux(["kill-pane", "-t", target]);
   logEvent("kill", { target, result: res.code === 0 ? "ok" : "error", reason: res.stderr.trim() || undefined });
-  if (res.code !== 0) throw new Error(res.stderr.trim() || "не вдалося закрити tmux-пейн");
+  if (res.code !== 0) throw new Error(res.stderr.trim() || "could not close tmux pane");
 }
 
 /**
@@ -382,7 +382,7 @@ export async function activeTmuxSession(): Promise<string> {
      keeps captures and screen-scrape detection stable until a client attaches. */
   const created = await runTmux(["new-session", "-d", "-x", "220", "-y", "50", "-s", "agents"]);
   if (created.code !== 0 && !/duplicate session/.test(created.stderr)) {
-    throw new Error(created.stderr.trim() || "не вдалося створити tmux-сесію");
+    throw new Error(created.stderr.trim() || "could not create tmux session");
   }
   return "agents";
 }
@@ -547,7 +547,7 @@ export async function paneScreen(target: TmuxTarget): Promise<string> {
 export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void> {
   if (!keys.length) return;
   const res = await runTmux(["send-keys", "-t", target, ...keys]);
-  if (res.code !== 0) throw new Error(res.stderr.trim() || "не вдалося надіслати клавіші");
+  if (res.code !== 0) throw new Error(res.stderr.trim() || "could not send keys");
 }
 
 /**
@@ -579,18 +579,18 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
     "-c",
     spec.cwd,
   ]);
-  if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "не вдалося відкрити tmux-вікно");
+  if (spawned.code !== 0) throw new Error(spawned.stderr.trim() || "could not open tmux window");
   /* The %N pane id addresses the pane even after window indexes shift; the
      display form only labels UI messages. */
   const [target = "", display = "", pidRaw = ""] = spawned.stdout.trim().split("\t");
-  if (!target) throw new Error("tmux не повернув адресу вікна");
+  if (!target) throw new Error("tmux did not return a window address");
   const panePid = Number(pidRaw);
 
   /* Type the boot command literally into the fresh shell, then run it. */
   const typed = await runTmux(["send-keys", "-t", target, "-l", spec.command]);
-  if (typed.code !== 0) throw new Error(typed.stderr.trim() || "не вдалося ввести команду в пейн");
+  if (typed.code !== 0) throw new Error(typed.stderr.trim() || "could not type command into pane");
   const enter = await runTmux(["send-keys", "-t", target, "Enter"]);
-  if (enter.code !== 0) throw new Error(enter.stderr.trim() || "не вдалося запустити агента");
+  if (enter.code !== 0) throw new Error(enter.stderr.trim() || "could not start agent");
 
   const deadline = Date.now() + SPAWN_READY_TIMEOUT_MS;
   let agentSeen = false;
@@ -600,10 +600,10 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
   while (Date.now() < deadline) {
     await sleep(SPAWN_POLL_MS);
     const command = await paneCommand(target);
-    if (command === null) throw new Error("вікно агента закрилося одразу після запуску");
+    if (command === null) throw new Error("agent window closed immediately after launch");
     if (isShellCommand(command)) {
       if (agentSeen) {
-        throw new Error(`агент завершився одразу після запуску: ${screenTail(await paneScreen(target))}`);
+        throw new Error(`agent exited immediately after launch: ${screenTail(await paneScreen(target))}`);
       }
       continue;
     }
@@ -636,7 +636,7 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
   const finalCommand = await paneCommand(target);
   if (finalCommand === null || isShellCommand(finalCommand)) {
     logEvent("spawn", { target, cwd: spec.cwd, result: "error", reason: "agent_exited_on_boot" });
-    throw new Error(`агент не запустився у вікні: ${screenTail(await paneScreen(target))}`);
+    throw new Error(`agent did not start in the window: ${screenTail(await paneScreen(target))}`);
   }
   logEvent("spawn", {
     target,
@@ -660,10 +660,10 @@ export interface SavedImage {
 /** Stores a pasted clipboard image under the viewer inbox and returns its path. */
 export function saveInboxImage(base64: string, mime: string): SavedImage {
   const ext = inboxImageExt(mime);
-  if (ext === null) throw new Error("непідтримуваний тип зображення");
+  if (ext === null) throw new Error("unsupported image type");
   const data = Buffer.from(base64, "base64");
-  if (data.length === 0) throw new Error("некоректні дані зображення");
-  if (data.length > MAX_INBOX_IMAGE_BYTES) throw new Error("зображення завелике");
+  if (data.length === 0) throw new Error("invalid image data");
+  if (data.length > MAX_INBOX_IMAGE_BYTES) throw new Error("image is too large");
   fs.mkdirSync(INBOX_DIR, { recursive: true });
   /* Date.now() alone collides when both API routes save several images in a
      tight synchronous loop within the same millisecond. */

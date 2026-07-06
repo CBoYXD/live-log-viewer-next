@@ -22,7 +22,7 @@ function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
     project: "demo",
     title: overrides.path,
     engine: "claude",
-    kind: "сесія",
+    kind: "session",
     fmt: "claude",
     parent: null,
     mtime: 1_000,
@@ -153,7 +153,7 @@ describe("withPresenceGuard", () => {
     const delivered: string[] = [];
     const guarded = withPresenceGuard(
       () => present,
-      "вузол зник",
+      "node disappeared",
       async (path) => {
         delivered.push(path);
         return { ok: true };
@@ -168,7 +168,7 @@ describe("withPresenceGuard", () => {
     expect(delivered).toEqual(["/a"]);
     expect(results).toEqual([
       { path: "/a", ok: true },
-      { path: "/b", ok: false, error: "вузол зник" },
+      { path: "/b", ok: false, error: "node disappeared" },
     ]);
   });
 });

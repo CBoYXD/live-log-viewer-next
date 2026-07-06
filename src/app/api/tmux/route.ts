@@ -40,7 +40,7 @@ export async function GET(req: NextRequest): Promise<NextResponse<TargetResponse
   const pid = Number(pidRaw);
   const hasPid = Number.isInteger(pid) && pid > 0;
   if (!hasPid && !filePath) {
-    return NextResponse.json({ error: "потрібен pid або path" }, { status: 400 });
+    return NextResponse.json({ error: "pid or path is required" }, { status: 400 });
   }
   return NextResponse.json({ target: await resolveRequestedTmuxTarget(hasPid ? pid : null, filePath) });
 }
@@ -64,7 +64,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
       target?: unknown;
     };
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   /* Resource-panel cleanup: kills an agent session's pane. Only targets from
@@ -80,11 +80,11 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     const target = typeof body.target === "string" ? body.target : "";
     const ref = allowedKillTarget(target);
     if (ref === null) {
-      return NextResponse.json({ error: "невідома ціль — онови список ресурсів" }, { status: 400 });
+      return NextResponse.json({ error: "unknown target — refresh the resource list" }, { status: 400 });
     }
     if ((await panePidOf(ref.paneId)) !== ref.panePid) {
       consumeKillTarget(target);
-      return NextResponse.json({ error: "пейн уже змінився — онови список ресурсів" }, { status: 409 });
+      return NextResponse.json({ error: "pane has changed — refresh the resource list" }, { status: 409 });
     }
     try {
       await killPane(ref.paneId);
@@ -99,7 +99,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   const hasPid = Number.isInteger(pid) && pid > 0;
   const filePath = typeof body.path === "string" ? body.path : "";
   if (!hasPid && !filePath) {
-    return NextResponse.json({ error: "потрібен pid або path" }, { status: 400 });
+    return NextResponse.json({ error: "pid or path is required" }, { status: 400 });
   }
 
   if (body.action === "interrupt") return respond(await interruptConversation(filePath));
@@ -117,7 +117,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
     return NextResponse.json({ error: imageError.error }, { status: imageError.status });
   }
   if (!text.trim() && !images.length) {
-    return NextResponse.json({ error: "порожнє повідомлення" }, { status: 400 });
+    return NextResponse.json({ error: "empty message" }, { status: 400 });
   }
 
   return respond(await deliverConversationMessage({ pid: hasPid ? pid : null, path: filePath, text, images }));

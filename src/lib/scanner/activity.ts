@@ -82,7 +82,7 @@ export function turnStateFromRecords(records: Record<string, unknown>[], codex: 
       /* Turn lifecycle events are the authoritative signal. Codex narrates
          with interim agent_message records mid-turn (dozens per long turn),
          so a message alone must never be read as «turn over» — that misread
-         showed working agents as «закінчив хід — чекає відповіді». */
+         showed working agents as «finished turn — waiting for response». */
       if (pt === "task_complete" || pt === "turn_complete" || pt === "turn_aborted") return "done";
       if (pt === "task_started" || pt === "turn_started" || pt === "user_message") return "busy";
       if (pt === "agent_message" || (pt === "message" && payload.role === "assistant")) {
@@ -100,7 +100,7 @@ export function turnStateFromRecords(records: Record<string, unknown>[], codex: 
       /* Only stop_reason ends a Claude turn. Mid-turn narration lands as a
          text-only record with stop_reason null moments before its tool_use
          record — reading that window as «done» stamped working subagents
-         with «повернувся з результатом» while they were still writing files. */
+         with «returned with a result» while they were still writing files. */
       const stop = stringValue((recordValue(obj.message) ?? {}).stop_reason);
       return stop === "end_turn" || stop === "stop_sequence" ? "done" : "busy";
     }

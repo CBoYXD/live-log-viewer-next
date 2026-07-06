@@ -32,10 +32,10 @@ const PANE_TONES: Record<PaneState, { section: string; header: string; glow?: st
 
 /** Maps the internal (Cyrillic) file.kind discriminant to a localized label. */
 export function kindLabel(t: TFunction, kind: string): string {
-  if (kind === "сесія") return t("kind.session");
-  if (kind === "субагент") return t("kind.subagent");
-  if (kind === "джоба") return t("kind.job");
-  if (kind === "фон") return t("kind.background");
+  if (kind === "session") return t("kind.session");
+  if (kind === "subagent") return t("kind.subagent");
+  if (kind === "job") return t("kind.job");
+  if (kind === "background") return t("kind.background");
   return kind;
 }
 
@@ -77,7 +77,7 @@ interface Props {
   dragHandle?: React.HTMLAttributes<HTMLElement>;
   /** Hides the tmux composer: headless runs and finished review rounds take no input. */
   noComposer?: boolean;
-  /** Slim context bar pinned under the header (e.g. «Раунд 2 · ✖ REQUEST_CHANGES»). */
+  /** Slim context bar pinned under the header (e.g. «Round 2 · ✖ REQUEST_CHANGES»). */
   banner?: React.ReactNode;
   /** Header control that opens this conversation full-window; the same control
       collapses it back when the pane already is the overlay (`expanded`). */

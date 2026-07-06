@@ -31,15 +31,15 @@ interface SpawnResponse {
 
 function cwdFromBody(value: unknown): { cwd?: string; error?: string; status?: number } {
   const raw = typeof value === "string" ? value.trim() : "";
-  if (!raw) return { error: "потрібна робоча директорія", status: 400 };
+  if (!raw) return { error: "working directory is required", status: 400 };
   const cwd = path.resolve(raw === "~" || raw.startsWith("~/") ? path.join(os.homedir(), raw.slice(1)) : raw);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(cwd);
   } catch {
-    return { error: `директорії не існує: ${cwd}`, status: 400 };
+    return { error: `directory does not exist: ${cwd}`, status: 400 };
   }
-  if (!stat.isDirectory()) return { error: `не директорія: ${cwd}`, status: 400 };
+  if (!stat.isDirectory()) return { error: `not a directory: ${cwd}`, status: 400 };
   return { cwd };
 }
 
@@ -51,20 +51,20 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   try {
     body = (await req.json()) as typeof body;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   const engine = body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
-  if (!engine) return NextResponse.json({ error: "engine має бути claude або codex" }, { status: 400 });
+  if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
 
   const reasoning = reasoningFromBody(engine, body);
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
   const cwdResult = cwdFromBody(body.cwd);
-  if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "некоректна робоча директорія" }, { status: cwdResult.status ?? 400 });
+  if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "invalid working directory" }, { status: cwdResult.status ?? 400 });
 
   const { id } = await ctx.params;
   const task = loadTasks().find((item) => item.id === id);
-  if (!task) return NextResponse.json({ error: "задачу не знайдено" }, { status: 404 });
+  if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
   try {
     const spec = freshSpecFor(engine, cwdResult.cwd, { effort: reasoning.effort, fast: reasoning.fast });
@@ -76,7 +76,7 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
     } else if (pane.panePid) {
       patch = { path: null, panePid: pane.panePid, state: "spawning", error: null, at };
     } else {
-      patch = { path: null, panePid: null, state: "failed", error: "tmux не повернув pid пейна", at };
+      patch = { path: null, panePid: null, state: "failed", error: "tmux did not return the pane pid", at };
     }
     const result = mutateTasks((tasks) => {
       const outcome = applyAssignmentPatches(tasks, id, [patch], at);

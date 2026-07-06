@@ -5,7 +5,7 @@ import { md } from "./markdown";
 
 describe("feed markdown links", () => {
   test("renders local markdown links as viewer deep links", () => {
-    const nodes = Children.toArray(md("дивись [markdown.tsx](/home/latand/app/src/components/feed/markdown.tsx:57)"));
+    const nodes = Children.toArray(md("see [markdown.tsx](/home/latand/app/src/components/feed/markdown.tsx:57)"));
     const link = nodes.find((node) => isValidElement(node) && node.props.href);
 
     expect(isValidElement(link)).toBe(true);

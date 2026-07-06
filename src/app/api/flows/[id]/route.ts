@@ -23,11 +23,11 @@ export async function PATCH(
   try {
     body = (await req.json()) as PatchFlowRequest;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const { id } = await ctx.params;
   const result =
     body.action === "cancel-round" ? await cancelRound(id) : body.action === "close" ? await closeFlow(id) : patchFlow(id, body);
-  if (!result.flow) return NextResponse.json({ error: result.error ?? "не вдалося змінити флоу" }, { status: result.status ?? 400 });
+  if (!result.flow) return NextResponse.json({ error: result.error ?? "could not update flow" }, { status: result.status ?? 400 });
   return NextResponse.json({ ok: true, flow: result.flow });
 }

@@ -24,24 +24,24 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; w
   try {
     body = (await req.json()) as CreateWorkflowRequest;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
   const rawDir = typeof body.repoDir === "string" ? body.repoDir.trim() : "";
-  if (!rawDir) return NextResponse.json({ error: "потрібна директорія репозиторію" }, { status: 400 });
+  if (!rawDir) return NextResponse.json({ error: "repository directory is required" }, { status: 400 });
   const repoDir = path.resolve(rawDir === "~" || rawDir.startsWith("~/") ? path.join(os.homedir(), rawDir.slice(1)) : rawDir);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(repoDir);
   } catch {
-    return NextResponse.json({ error: `директорії не існує: ${repoDir}` }, { status: 400 });
+    return NextResponse.json({ error: `directory does not exist: ${repoDir}` }, { status: 400 });
   }
-  if (!stat.isDirectory()) return NextResponse.json({ error: `не директорія: ${repoDir}` }, { status: 400 });
+  if (!stat.isDirectory()) return NextResponse.json({ error: `not a directory: ${repoDir}` }, { status: 400 });
 
   try {
     const result = createWorkflowFromRequest({ ...body, repoDir });
     if (!result.workflow) {
-      return NextResponse.json({ error: result.error ?? "не вдалося створити воркфлоу" }, { status: result.status ?? 400 });
+      return NextResponse.json({ error: result.error ?? "could not create workflow" }, { status: result.status ?? 400 });
     }
     return NextResponse.json({ ok: true, workflow: result.workflow });
   } catch (error) {

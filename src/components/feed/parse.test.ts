@@ -81,11 +81,11 @@ const claudeSend = (id: string, to: string, message: string) =>
 describe("feed session parity with one-shot parse", () => {
   test("claude transcript: tools, results, grouping, tmsg delivery, compaction", () => {
     const lines = [
-      claudeUser("зроби перший крок"),
-      claudeThink("мізкую про перший крок і план дій"),
+      claudeUser("take the first step"),
+      claudeThink("thinking through the first step and action plan"),
       claudeTool("c1", "Bash", "ls -la"),
       claudeResult("c1", "total 8"),
-      claudeProse("Готово, ось результат."),
+      claudeProse("Done, here is the result."),
       // A run of five commands: folds into one cmd-group once a prose lands after.
       claudeTool("g1", "Bash", "echo 1"),
       claudeResult("g1", "1"),
@@ -97,13 +97,13 @@ describe("feed session parity with one-shot parse", () => {
       claudeResult("g4", "4"),
       claudeTool("g5", "Bash", "echo 5"),
       claudeResult("g5", "5"),
-      claudeProse("Серія завершена."),
-      claudeSend("m1", "worker-1", "перевір гілку"),
+      claudeProse("Series complete."),
+      claudeSend("m1", "worker-1", "check the branch"),
       claudeResult("m1", '{"success": true, "msg_id": "abc123"}'),
       JSON.stringify({ type: "system", subtype: "compact_boundary", timestamp: "t", compactMetadata: { trigger: "auto", preTokens: 9000 } }),
-      JSON.stringify({ type: "user", isCompactSummary: true, message: { content: "Підсумок розмови." } }),
-      claudeUser("продовжуй"),
-      claudeProse("Продовжую."),
+      JSON.stringify({ type: "user", isCompactSummary: true, message: { content: "Conversation summary." } }),
+      claudeUser("continue"),
+      claudeProse("Continuing."),
     ];
     assertParity(claudeFile, lines);
     assertParity(claudeFile, lines, { cap: 7, chunks: [2, 1, 3] });
@@ -114,14 +114,14 @@ describe("feed session parity with one-shot parse", () => {
   test("codex rollout: echo dedup, shell calls, compaction pair, service rows", () => {
     const lines = [
       JSON.stringify({ type: "session_meta", timestamp: "t0", payload: { model: "gpt-5.2", cwd: "/tmp" } }),
-      JSON.stringify({ type: "response_item", timestamp: "t1", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "запусти тести" }] } }),
-      JSON.stringify({ type: "event_msg", timestamp: "t1", payload: { type: "user_message", message: "запусти тести" } }),
+      JSON.stringify({ type: "response_item", timestamp: "t1", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "run tests" }] } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t1", payload: { type: "user_message", message: "run tests" } }),
       JSON.stringify({ type: "event_msg", timestamp: "t2", payload: { type: "task_started" } }),
       JSON.stringify({ type: "response_item", timestamp: "t3", payload: { type: "function_call", name: "shell", call_id: "s1", arguments: JSON.stringify({ command: "bun test" }) } }),
       JSON.stringify({ type: "response_item", timestamp: "t4", payload: { type: "function_call_output", call_id: "s1", output: "42 pass" } }),
       JSON.stringify({ type: "response_item", timestamp: "t5", payload: { type: "reasoning" } }),
-      JSON.stringify({ type: "response_item", timestamp: "t6", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Тести зелені." }] } }),
-      JSON.stringify({ type: "event_msg", timestamp: "t6", payload: { type: "agent_message", message: "Тести зелені." } }),
+      JSON.stringify({ type: "response_item", timestamp: "t6", payload: { type: "message", role: "assistant", content: [{ type: "text", text: "Tests are green." }] } }),
+      JSON.stringify({ type: "event_msg", timestamp: "t6", payload: { type: "agent_message", message: "Tests are green." } }),
       JSON.stringify({ type: "compacted", timestamp: "t7" }),
       JSON.stringify({ type: "event_msg", timestamp: "t7", payload: { type: "context_compacted" } }),
       JSON.stringify({ type: "event_msg", timestamp: "t8", payload: { type: "task_complete" } }),
@@ -141,7 +141,7 @@ describe("feed session parity with one-shot parse", () => {
     const lines = [
       "[10:00] Running command: /usr/bin/zsh -lc bun run build",
       "[10:01] Command completed",
-      "[10:01] Проміжна відповідь агента",
+      "[10:01] Intermediate agent response",
       "[10:02] Running command: bun test",
       "[10:03] Command failed: exited with code 1",
       "plain raw line without brackets",
@@ -153,9 +153,9 @@ describe("feed session parity with one-shot parse", () => {
   test("window slide past a tool_use: its result degrades to the svc fallback", () => {
     const lines = [
       claudeTool("c1", "Bash", "sleep 100"),
-      claudeUser("а"),
-      claudeUser("б"),
-      claudeUser("в"),
+      claudeUser("a"),
+      claudeUser("b"),
+      claudeUser("c"),
       claudeResult("c1", "done late"),
     ];
     // cap 3 evicts the tool_use before its result arrives on both sides.
@@ -166,9 +166,9 @@ describe("feed session parity with one-shot parse", () => {
 describe("feed session identity stability", () => {
   test("appending prose keeps every existing item identity", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
-    const lines = [claudeUser("раз"), claudeProse("один"), claudeUser("два")];
+    const lines = [claudeUser("one"), claudeProse("first"), claudeUser("two")];
     const before = session.feed(lines, 0, true);
-    const after = session.feed([...lines, claudeProse("другий")], 0, true);
+    const after = session.feed([...lines, claudeProse("second")], 0, true);
     expect(after.items.length).toBe(before.items.length + 1);
     for (let i = 0; i < before.items.length; i += 1) {
       expect(after.items[i].item).toBe(before.items[i].item);
@@ -178,7 +178,7 @@ describe("feed session identity stability", () => {
 
   test("a tool_result changes only its own cmd item", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
-    const lines = [claudeUser("го"), claudeTool("c1", "Bash", "ls"), claudeTool("c2", "Bash", "pwd")];
+    const lines = [claudeUser("go"), claudeTool("c1", "Bash", "ls"), claudeTool("c2", "Bash", "pwd")];
     const before = session.feed(lines, 0, true);
     const after = session.feed([...lines, claudeResult("c1", "ok done")], 0, true);
     // user bubble and the untouched second call keep their identity
@@ -194,7 +194,7 @@ describe("feed session identity stability", () => {
 
   test("idempotent re-feed of an unchanged window returns the cached snapshot", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
-    const lines = [claudeUser("раз"), claudeProse("один")];
+    const lines = [claudeUser("one"), claudeProse("first")];
     const first = session.feed(lines, 0, false);
     const second = session.feed(lines, 0, false);
     expect(second).toBe(first);
@@ -206,18 +206,18 @@ describe("feed session identity stability", () => {
     for (let i = 1; i <= 4; i += 1) {
       lines.push(claudeTool("g" + i, "Bash", "echo " + i), claudeResult("g" + i, String(i)));
     }
-    lines.push(claudeProse("після серії"));
+    lines.push(claudeProse("after the series"));
     const before = session.feed(lines, 0, false);
     const group = before.items[0].item;
     expect(group.kind).toBe("cmd-group");
-    const after = session.feed([...lines, claudeProse("ще одна відповідь")], 0, false);
+    const after = session.feed([...lines, claudeProse("one more response")], 0, false);
     expect(after.items[0].item).toBe(group);
   });
 
   test("prepended history resets the session and reparses the wider window", () => {
     const session = createFeedSession({ engine: "claude", fmt: "claude", showSvc: false, lineFilter: "" });
-    const older = [claudeUser("стара репліка")];
-    const recent = [claudeUser("нова"), claudeProse("відповідь")];
+    const older = [claudeUser("old message")];
+    const recent = [claudeUser("new"), claudeProse("answer")];
     session.feed(recent, 0, false);
     const widened = session.feed(older.concat(recent), -1, false);
     expect(normalize(widened.items.map((entry) => entry.item))).toEqual(

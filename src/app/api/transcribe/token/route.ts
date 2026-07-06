@@ -18,12 +18,12 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ token: stri
   if (rejection) return rejection;
 
   if (resolveTranscribeBackend() !== "elevenlabs") {
-    return NextResponse.json({ error: "live-транскрипція доступна лише з бекендом elevenlabs" }, { status: 409 });
+    return NextResponse.json({ error: "live transcription is only available with the elevenlabs backend" }, { status: 409 });
   }
   const apiKey = readElevenLabsApiKey();
   if (!apiKey) {
     return NextResponse.json(
-      { error: "нема ключа ElevenLabs (~/.config/agent-log-viewer/elevenlabs-api-key або ELEVENLABS_API_KEY)" },
+      { error: "missing ElevenLabs key (~/.config/agent-log-viewer/elevenlabs-api-key or ELEVENLABS_API_KEY)" },
       { status: 503 },
     );
   }
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ token: stri
     }
     const json = (await res.json()) as { token?: unknown };
     if (typeof json.token !== "string" || !json.token) {
-      return NextResponse.json({ error: "ElevenLabs token: відповідь без token" }, { status: 502 });
+      return NextResponse.json({ error: "ElevenLabs token: response had no token" }, { status: 502 });
     }
     return NextResponse.json({ token: json.token });
   } catch (error) {

@@ -114,9 +114,12 @@ export function optionMatches(option: OptionLine, expected: string): boolean {
 /** The plan-dialog option to pick for an approve/reject decision, when visible. */
 export function planOption(screen: string, approve: boolean): OptionLine | null {
   const options = parseOptions(screen);
+  // These match the agent's on-screen option labels, so they must cover the
+  // Ukrainian plan-dialog wording too — keep the Cyrillic tokens alongside the
+  // English ones (same reason the uk i18n locale stays).
   const plainAccept = /\b(yes|approve|accept|proceed)\b|затверд|схвал/i;
   const autoAccept = /\bauto[- ]?accept\b/i;
-  const reject = /\b(no|reject|keep planning|continue planning)\b|відхил|назад/i;
+  const reject = /\b(no|reject|keep planning|continue planning|back)\b|відхил|назад/i;
   const hit = approve
     ? options.find((option) => plainAccept.test(option.label) && !autoAccept.test(option.label)) ?? options.find((option) => plainAccept.test(option.label))
     : options.find((option) => reject.test(option.label));

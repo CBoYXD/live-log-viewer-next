@@ -32,7 +32,7 @@ export function assembleSendResults(
   const patches: AssignmentPatch[] = [];
   for (let index = 0; index < paths.length; index += 1) {
     const targetPath = paths[index]!;
-    const outcome = outcomes[index] ?? { error: "немає результату доставки", status: 500 };
+    const outcome = outcomes[index] ?? { error: "no delivery result", status: 500 };
     if (isDeliverySuccess(outcome)) {
       results.push({ path: targetPath, ok: true, target: outcome.target, error: null });
       patches.push({ path: targetPath, panePid: null, state: "delivered", error: null, at });

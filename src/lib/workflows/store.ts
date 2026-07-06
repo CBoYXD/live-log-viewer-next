@@ -195,7 +195,7 @@ export function saveTemplates(templates: WorkflowTemplate[]): void {
 function slugify(text: string): string {
   const slug = text
     .toLowerCase()
-    .replace(/[^a-z0-9Ѐ-ӿ]+/gi, "-")
+    .replace(/[^a-z0-9]+/gi, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 40)
     .replace(/-+$/, "");

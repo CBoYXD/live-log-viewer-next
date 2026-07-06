@@ -162,7 +162,7 @@ export function buildSchemeLayout(
   let cursor = PAD;
 
   /* Handoff drafts hang under their source pane like a child; drafts whose
-     source is not on the scheme (or plain «+ Агент» ones) trail the row. */
+     source is not on the scheme (or plain «+ Agent» ones) trail the row. */
   const drafts: DraftNode[] = [];
   const draftsBySrc = new Map<string, string[]>();
   for (const id of draftIds) {

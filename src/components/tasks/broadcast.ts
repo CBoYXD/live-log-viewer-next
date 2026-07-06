@@ -25,7 +25,7 @@ export async function tmuxSend(file: FileEntry, text: string, images: BroadcastI
   }
 }
 
-/** «Доставлено 2 з 3; ✗ „title“: помилка» over a client-side tmux loop. */
+/** «Delivered 2 of 3; ✗ "title": error» over a client-side tmux loop. */
 export function broadcastSummary(targets: FileEntry[], errors: (string | null)[]): { kind: "ok" | "err"; text: string } {
   const locale = getLocale();
   const delivered = errors.filter((error) => error === null).length;

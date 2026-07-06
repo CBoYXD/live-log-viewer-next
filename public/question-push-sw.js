@@ -1,7 +1,7 @@
 self.addEventListener("push", (event) => {
   let payload = {
-    title: "Агент чекає відповіді",
-    body: "Відкрий переглядач логів, щоб відповісти.",
+    title: "Agent is waiting for a response",
+    body: "Open the log viewer to respond.",
     url: "/",
   };
   try {

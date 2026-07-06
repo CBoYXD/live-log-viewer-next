@@ -81,11 +81,11 @@ function redirectWithCookie(request: NextRequest, token: string): NextResponse {
 
 function forbidden(request: NextRequest): NextResponse {
   if (request.nextUrl.pathname.startsWith("/api/")) {
-    return NextResponse.json({ error: "доступ заборонено: потрібен ключ" }, { status: 403 });
+    return NextResponse.json({ error: "access denied: key required" }, { status: 403 });
   }
 
   return new NextResponse(
-    "Доступ заборонено. Відкрийте посилання з ключем із термінала, де запущено viewer (bunx agent-log-viewer --tailscale).",
+    "Access denied. Open the link with the key from the terminal where the viewer is running (bunx agent-log-viewer --tailscale).",
     {
       status: 403,
       headers: { "content-type": "text/html; charset=utf-8" },

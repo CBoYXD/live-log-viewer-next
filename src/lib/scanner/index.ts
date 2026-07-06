@@ -122,7 +122,7 @@ export async function listFiles(): Promise<FileEntry[]> {
     entry.waitingInput = probe.waiting;
     /* A stalled transcript whose pane sits at a plain composer was interrupted
        mid-turn (Esc leaves the turn open in the jsonl): the agent is idle, not
-       blocked, so it must not wear the «перервано або чекає дозволу» state. */
+       blocked, so it must not wear the «interrupted or waiting for permission» state. */
     if (probe.atComposer && entry.activity === "stalled") {
       entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle";
       entry.activityReason = "pane_at_composer";

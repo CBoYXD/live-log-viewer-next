@@ -108,7 +108,7 @@ export function detectBlockingGate(screen: string): BlockingGate | null {
 /* Prompt shapes of the waiting-input scrape fallback: a numbered option menu
    under a highlight cursor is how both CLIs draw questions the viewer has no
    structured record for. Anchored to the line start — menu options always
-   open their row, while prose in a response ("…віддає 200. Онови…") puts
+   open their row, while prose in a response ("…returns 200. Update…") puts
    digit-dot mid-line and must not read as a menu. */
 export const NUMBERED_MENU = /^\s*❯?\s*\d+\.\s+\S/m;
 

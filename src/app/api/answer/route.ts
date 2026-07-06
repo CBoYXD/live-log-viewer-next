@@ -83,26 +83,26 @@ async function confirmAnswered(entry: FileEntry, toolUseId: string): Promise<str
 async function deliver(body: AnswerBody): Promise<NextResponse<RouteResponse>> {
   const transcriptPath = typeof body.transcriptPath === "string" ? body.transcriptPath : "";
   const toolUseId = typeof body.toolUseId === "string" ? body.toolUseId : "";
-  if (!transcriptPath || !toolUseId) return NextResponse.json({ error: "потрібен transcriptPath і toolUseId" }, { status: 400 });
+  if (!transcriptPath || !toolUseId) return NextResponse.json({ error: "transcriptPath and toolUseId are required" }, { status: 400 });
 
   const state = await knownState(transcriptPath, toolUseId);
-  if (!state) return NextResponse.json({ error: "транскрипт невідомий або агент не працює" }, { status: 403 });
+  if (!state) return NextResponse.json({ error: "transcript is unknown or the agent is not running" }, { status: 403 });
   if (state.result) {
     return NextResponse.json(
-      { error: "питання вже має відповідь", answer: state.result, superseded: true },
+      { error: "question already has an answer", answer: state.result, superseded: true },
       { status: 409 },
     );
   }
-  if (state.pending === null) return NextResponse.json({ error: "питання вже не активне" }, { status: 409 });
+  if (state.pending === null) return NextResponse.json({ error: "question is no longer active" }, { status: 409 });
   const pending = state.pending;
   const target = await resolveTarget(state.entry.pid!);
-  if (target === null) return NextResponse.json({ error: "немає активного tmux-пейна для відповіді", noPane: true }, { status: 409 });
+  if (target === null) return NextResponse.json({ error: "no active tmux pane for answering", noPane: true }, { status: 409 });
 
   try {
     const label = await deliverAnswer(paneIo, target, pending, body);
     const recorded = await confirmAnswered(state.entry, toolUseId);
     if (recorded) return NextResponse.json({ ok: true, answer: recorded || label });
-    return NextResponse.json({ error: `відповідь надіслано, але транскрипт не підтвердив її: ${screenTail(await paneScreen(target))}` }, { status: 502 });
+    return NextResponse.json({ error: `answer was sent, but the transcript did not confirm it: ${screenTail(await paneScreen(target))}` }, { status: 502 });
   } catch (error) {
     if (error instanceof DeliveryError) return NextResponse.json({ error: error.message }, { status: error.status });
     throw error;
@@ -116,7 +116,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<RouteResponse
   try {
     body = (await req.json()) as AnswerBody;
   } catch {
-    return NextResponse.json({ error: "некоректний JSON" }, { status: 400 });
+    return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const transcriptPath = typeof body.transcriptPath === "string" ? body.transcriptPath : "";
   const key = transcriptPath || "unknown";
