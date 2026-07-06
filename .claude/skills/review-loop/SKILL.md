@@ -38,11 +38,16 @@ implementer).
 From an agent:
 
 1. Spawn or pick the implementer conversation. To spawn fresh:
-   `POST /api/spawn` `{"engine":"claude"|"codex","cwd":"<abs dir>","prompt":"<kickoff>"}`
+   `POST /api/spawn`
+   `{"engine":"claude"|"codex","cwd":"<abs dir>","prompt":"<kickoff>","src":"<your transcript path>"}`
    — returns the transcript `path` for claude; for codex, find the newest
-   `~/.codex/sessions/**/rollout-*.jsonl` whose `cwd` matches. To set codex
-   reasoning effort, boot the pane yourself with
-   `codex -c model_reasoning_effort=high` (the spawn API uses engine defaults).
+   `~/.codex/sessions/**/rollout-*.jsonl` whose `cwd` matches. **Always pass
+   `src`** with the absolute path of your own conversation transcript: the
+   viewer records the spawn as a handoff and draws the link from your
+   conversation to the implementer on the scheme; without it the new agent
+   stands as an unrelated root. Optional `effort` (claude: low…max, codex:
+   low…xhigh) and codex-only `fast: true|false` set the reasoning level and
+   speed tier per spawn.
 2. Create the flow:
 
    ```
