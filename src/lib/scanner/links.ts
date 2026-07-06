@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { readdir } from "node:fs/promises";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
@@ -22,6 +23,22 @@ const bgcmdCache = globalCache<{ command: string; description: string; source: s
 const chainCache = globalCache<[number, string | null]>("chain-uuid");
 
 const CHAIN_HEAD_BYTES = 512 * 1024;
+type Limit = <T>(work: () => Promise<T>) => Promise<T>;
+
+function createLimiter(max: number): Limit {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function limit<T>(work: () => Promise<T>): Promise<T> {
+    if (active >= max) await new Promise<void>((resolve) => queue.push(resolve));
+    active += 1;
+    try {
+      return await work();
+    } finally {
+      active -= 1;
+      queue.shift()?.();
+    }
+  };
+}
 
 /**
  * A transcript created by compaction opens with a system record
@@ -104,33 +121,34 @@ function chainCompactedSessions(entries: FileEntry[]): void {
   }
 }
 
-function globWalk(dir: string, pred: (pathname: string) => boolean, out: string[] = []): string[] {
+async function globWalk(dir: string, pred: (pathname: string) => boolean, limit: Limit): Promise<string[]> {
   let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    entries = await limit(() => readdir(dir, { withFileTypes: true }));
   } catch {
-    return out;
+    return [];
   }
-  for (const entry of entries) {
+  const chunks = await Promise.all(entries.map(async (entry): Promise<string[]> => {
     const pathname = path.join(dir, entry.name);
-    if (entry.isDirectory()) globWalk(pathname, pred, out);
-    else if (entry.isFile() && pred(pathname)) out.push(pathname);
-  }
-  return out;
+    if (entry.isDirectory()) return globWalk(pathname, pred, limit);
+    if (entry.isFile() && pred(pathname)) return [pathname];
+    return [];
+  }));
+  return chunks.flat();
 }
 
-function sessionTranscripts(sid: string, slug?: string | null): [string | null, string[]] {
+async function sessionTranscripts(sid: string, limit: Limit, slug?: string | null): Promise<[string | null, string[]]> {
   const base = ROOTS["claude-projects"];
   let realSlug = slug ?? sidSlugCache.get(sid) ?? null;
   if (!realSlug) {
-    const hit = globWalk(base, (p) => path.basename(p) === sid + ".jsonl")[0];
+    const hit = (await globWalk(base, (p) => path.basename(p) === sid + ".jsonl", limit))[0];
     if (!hit) return [null, []];
     realSlug = path.basename(path.dirname(hit));
     sidSlugCache.set(sid, realSlug);
   }
   const main = path.join(base, realSlug, sid + ".jsonl");
   const subDir = path.join(base, realSlug, sid, "subagents");
-  const subs = globWalk(subDir, (p) => path.basename(p).startsWith("agent-") && p.endsWith(".jsonl")).sort();
+  const subs = (await globWalk(subDir, (p) => path.basename(p).startsWith("agent-") && p.endsWith(".jsonl"), limit)).sort();
   return [fs.existsSync(main) ? main : null, subs];
 }
 
@@ -364,13 +382,15 @@ function attachHandoffParents(entries: FileEntry[]): void {
   persistHandoffLineage();
 }
 
-export function linkEntries(entries: FileEntry[]): void {
+export async function linkEntries(entries: FileEntry[]): Promise<void> {
+  const limit = createLimiter(48);
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   const threadMap = new Map<string, string>();
   if (fs.existsSync(ROOTS["codex-jobs"])) {
-    for (const jsonPath of globWalk(
+    for (const jsonPath of await globWalk(
       ROOTS["codex-jobs"],
       (p) => path.basename(p).startsWith("task-") && p.endsWith(".json"),
+      limit,
     )) {
       const job = readJson(jsonPath);
       const threadId = stringValue(job?.threadId);
@@ -383,7 +403,7 @@ export function linkEntries(entries: FileEntry[]): void {
       if (parts.length >= 3 && parts.at(-2) === "subagents") {
         const slug = parts[0] ?? "";
         const sid = parts.at(-3) ?? "";
-        const [main, subs] = sessionTranscripts(sid, slug);
+        const [main, subs] = await sessionTranscripts(sid, limit, slug);
         entry.parent = main;
         const meta = readJson(entry.path.slice(0, -".jsonl".length) + ".meta.json") ?? {};
         const toolUse = stringValue(meta.toolUseId);
@@ -402,8 +422,8 @@ export function linkEntries(entries: FileEntry[]): void {
       if (sid) {
         const ws = stringValue(job.workspaceRoot) ?? "";
         const slug = ws ? ws.replace(/[^A-Za-z0-9-]/g, "-") : null;
-        let [main, subs] = sessionTranscripts(sid, slug);
-        if (!main && slug) [main, subs] = sessionTranscripts(sid, null);
+        let [main, subs] = await sessionTranscripts(sid, limit, slug);
+        if (!main && slug) [main, subs] = await sessionTranscripts(sid, limit, null);
         const jobId = path.basename(entry.path).slice(0, -".log".length);
         const found = findNeedle(jobId, subs);
         entry.parent = found ?? main;
@@ -415,7 +435,7 @@ export function linkEntries(entries: FileEntry[]): void {
       const parts = taskParts(ROOTS["claude-tasks"], entry.path);
       if (!parts) continue;
       const [slug, sid, tid] = parts;
-      const [main, subs] = sessionTranscripts(sid, slug);
+      const [main, subs] = await sessionTranscripts(sid, limit, slug);
       const info = bgCommand(tid, (main ? [main] : []).concat(subs), slugMainTranscripts(slug, sid));
       if (info) {
         entry.parent = info.source;
