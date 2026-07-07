@@ -580,6 +580,14 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export function cdCommandForCwd(cwd: string): string {
+  return `cd -- ${shellSingleQuote(cwd)}`;
+}
+
 async function paneCommand(target: TmuxTarget): Promise<string | null> {
   const res = await runTmux(["display-message", "-p", "-t", target, "#{pane_current_command}"]).catch(() => null);
   return res && res.code === 0 ? res.stdout.trim() : null;
@@ -631,6 +639,11 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
   const [target = "", display = "", pidRaw = ""] = spawned.stdout.trim().split("\t");
   if (!target) throw new Error("tmux did not return a window address");
   const panePid = Number(pidRaw);
+
+  const cwdTyped = await runTmux(["send-keys", "-t", target, "-l", cdCommandForCwd(spec.cwd)]);
+  if (cwdTyped.code !== 0) throw new Error(cwdTyped.stderr.trim() || "could not type cwd into pane");
+  const cwdEnter = await runTmux(["send-keys", "-t", target, "Enter"]);
+  if (cwdEnter.code !== 0) throw new Error(cwdEnter.stderr.trim() || "could not enter cwd");
 
   /* Type the boot command literally into the fresh shell, then run it. */
   const typed = await runTmux(["send-keys", "-t", target, "-l", spec.command]);
