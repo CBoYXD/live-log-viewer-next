@@ -182,10 +182,14 @@ export function ProjectDashboard({
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
   const expandedFlowConversations = useMemo(() => {
-    const paths = claimedReviewerDescendantPaths(files, flows);
-    for (const flow of flows) {
-      if (isActiveFlow(flow)) paths.add(flow.implementerPath);
-    }
+    /* Only ACTIVE flows expand their subtree into scheme nodes. A closed flow's
+       reviewer is still claimed (folded off the board) via the full flows list,
+       but promoting its idle reviewer descendants would re-open the whole
+       implementer→reviewer→subtask tree as an active group — a closed flow must
+       stay quiet history. So gate expansion on active ownership. */
+    const activeFlows = flows.filter(isActiveFlow);
+    const paths = claimedReviewerDescendantPaths(files, activeFlows);
+    for (const flow of activeFlows) paths.add(flow.implementerPath);
     return paths;
   }, [files, flows]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);

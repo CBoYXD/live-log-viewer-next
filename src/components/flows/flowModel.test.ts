@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { claimedReviewerDescendantPaths, foldClaimedReviewers } from "./flowModel";
+import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flowModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -81,5 +81,24 @@ describe("reviewer folding", () => {
       ["/subtask", "/implementer"],
       ["/sidecar", "/subtask"],
     ]);
+  });
+
+  test("a closed flow stays folded but never expands its reviewer subtree into active nodes", () => {
+    /* Regression: expandedFlowConversations must gate on active flows. A closed
+       flow's reviewer is still claimed/folded off the board, but promoting its
+       idle descendants would re-open the whole tree as an active group. */
+    const implementer = entry({ path: "/implementer", activity: "idle" });
+    const reviewer = entry({ path: "/reviewer", parent: "/implementer", activity: "idle" });
+    const subtask = entry({ path: "/subtask", parent: "/reviewer", activity: "idle" });
+    const files = [implementer, reviewer, subtask];
+    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+
+    // The scheme builds its expand set from ACTIVE flows only — a closed flow
+    // contributes nothing to expansion.
+    const active = [closed].filter(isActiveFlow);
+    expect(active).toHaveLength(0);
+    expect(claimedReviewerDescendantPaths(files, active).size).toBe(0);
+    // …but folding still consumes the full list, so the reviewer is re-homed.
+    expect(foldClaimedReviewers(files, [closed]).map((file) => file.path)).toEqual(["/implementer", "/subtask"]);
   });
 });
