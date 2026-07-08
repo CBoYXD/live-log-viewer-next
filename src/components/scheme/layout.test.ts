@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import type { BranchGroup } from "@/components/projectModel";
+import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 
 import { buildSchemeLayout } from "./layout";
 
@@ -123,5 +123,25 @@ describe("buildSchemeLayout byPath", () => {
     expect(layout.edges.some((edge) => edge.to === "/review-subtask" && !edge.dashed)).toBe(true);
     expect(layout.stacks).toHaveLength(0);
     expect(implementerNode.under.map((file) => file.path)).toEqual([]);
+  });
+
+  test("a plain subagent of a live session renders as a connected node below it, not a mini-stack", () => {
+    /* End-to-end for the "Verify MVP" case: a live claude session with an idle
+       Task-tool subagent and no flow. buildBranchGroups must promote the
+       subagent to a column and buildSchemeLayout must place it below the parent
+       wired by a solid edge — never a detached right-side mini-stack. */
+    const session = entry({ path: "/session", activity: "live" });
+    const subagent = entry({ path: "/session/verify-mvp", parent: "/session", kind: "subagent", activity: "idle" });
+    const files = [session, subagent];
+
+    const groups = buildBranchGroups(files, "demo");
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/session", "/session/verify-mvp"]);
+
+    const layout = buildSchemeLayout(groups, [], files, [], []);
+    const parentNode = layout.nodes.find((node) => node.file.path === "/session")!;
+    const childNode = layout.nodes.find((node) => node.file.path === "/session/verify-mvp")!;
+    expect(childNode.y).toBeGreaterThan(parentNode.y + parentNode.h);
+    expect(layout.edges.some((edge) => edge.to === "/session/verify-mvp" && !edge.dashed)).toBe(true);
+    expect(layout.stacks).toHaveLength(0);
   });
 });

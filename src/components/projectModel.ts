@@ -191,35 +191,22 @@ function activeWork(file: FileEntry): boolean {
   return columnWorthy(file) || (isAuxTask(file) && (file.activity === "live" || file.proc === "running"));
 }
 
-/**
- * A quiet child conversation is returnable while the session it would be
- * resumed from stays alive. The walk stops at the nearest ancestor session
- * record, so subagents of a compaction-chain predecessor count as finished:
- * that session's context is gone even though its successor lives on.
- */
-function ownerSessionAlive(file: FileEntry, byPath: Map<string, FileEntry>): boolean {
-  const seen = new Set<string>([file.path]);
-  let cur = file;
-  while (cur.parent && !seen.has(cur.parent)) {
-    const parent = byPath.get(cur.parent);
-    if (!parent) return false;
-    seen.add(parent.path);
-    if (parent.kind === "session") return parent.activity === "live" || parent.activity === "recent";
-    cur = parent;
-  }
-  return false;
-}
-
 function assembleGroup(
   root: FileEntry,
   kids: Map<string, FileEntry[]>,
-  byPath: Map<string, FileEntry>,
   expandedConversationPaths?: ReadonlySet<string>,
 ): BranchGroup {
   const descendants = subtree(root, kids);
   const liveRank = (file: FileEntry) => (file.activity === "live" ? 0 : 1);
+  /* Every child conversation in an active group renders as a connected node
+     below its parent — a claude subagent, a codex child session, a reviewer
+     subtask is real tree structure, not a detached right-side chip. Live and
+     running non-conversation work keeps a column too. This mirrors the
+     structural rule buildArchiveBranchGroups already uses; the "opens an active
+     group" decision stays activity-based in buildBranchGroups, but once a group
+     is open its child conversations are always wired in as nodes. */
   const branches = descendants
-    .filter((file) => columnWorthy(file, expandedConversationPaths))
+    .filter((file) => isChildConversation(file) || columnWorthy(file, expandedConversationPaths))
     .sort((a, b) => liveRank(a) - liveRank(b) || tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const liveTasks = descendants
     .filter((file) => isAuxTask(file) && file.activity === "live")
@@ -231,12 +218,11 @@ function assembleGroup(
     owner.tasks.push(task);
   }
   const taken = new Set([...columnByPath.keys(), ...liveTasks.map((task) => task.path)]);
-  const leftovers = descendants.filter((file) => !taken.has(file.path)).sort((a, b) => b.mtime - a.mtime);
-  const returnable = leftovers.filter(
-    (file) => isChildConversation(file) && ownerSessionAlive(file, byPath),
-  );
-  const returnablePaths = new Set(returnable.map((file) => file.path));
-  const finished = leftovers.filter((file) => !returnablePaths.has(file.path));
+  /* Child conversations are all columns now; the leftovers are technical items
+     (bash tasks, codex job logs, compaction-chain predecessor sessions) that
+     stay as quiet chips in the group's under-deck. */
+  const finished = descendants.filter((file) => !taken.has(file.path)).sort((a, b) => b.mtime - a.mtime);
+  const returnable: FileEntry[] = [];
   const smt = Math.max(...columns.map((column) => column.file.mtime), ...liveTasks.map((task) => task.mtime));
   return { key: root.path, columns, returnable, finished, smt, orphanTask: false };
 }
@@ -281,7 +267,7 @@ export function buildBranchGroups(files: FileEntry[], project: string, options: 
     }
     if (file.activity === "recent" && isConversation(file)) roots.set(file.path, file);
   }
-  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, byPath, expandedConversationPaths));
+  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, expandedConversationPaths));
   for (const task of orphanTasks.values()) {
     groups.push({
       key: task.path,

@@ -76,15 +76,16 @@ describe("tree primitives", () => {
 });
 
 describe("buildBranchGroups", () => {
-  test("a live root opens a group with its subtree accounted for", () => {
+  test("a live root promotes its live-owned subagents to connected columns", () => {
     const groups = buildBranchGroups(TREE, "demo");
     expect(groups).toHaveLength(1);
     const group = groups[0]!;
     expect(group.key).toBe("/root");
     expect(group.columns[0]!.file.path).toBe("/root");
-    /* Quiet subagents of a live claude session stay returnable chips. */
-    const chipPaths = [...group.returnable, ...group.finished].map((file) => file.path).sort();
-    expect(chipPaths).toEqual(["/root/a", "/root/a/x", "/root/b"]);
+    /* Subagents of a live claude session are live-relevant work: each renders
+       as a connected column below the root, not a detached chip. */
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/root", "/root/a", "/root/a/x", "/root/b"]);
+    expect([...group.returnable, ...group.finished]).toHaveLength(0);
   });
 
   test("a compaction-chain predecessor is no conversation root", () => {
@@ -111,7 +112,7 @@ describe("buildBranchGroups", () => {
     expect(residualItems(files, "demo", activeRoots).map((file) => file.path)).not.toContain("/idle-root");
   });
 
-  test("expanded conversation paths promote quiet codex children to columns", () => {
+  test("a quiet child conversation of a live owner promotes to a column by default", () => {
     const root = entry({ path: "/implementer", activity: "live" });
     const reviewSubtask = entry({
       path: "/review-subtask",
@@ -122,15 +123,12 @@ describe("buildBranchGroups", () => {
       activity: "idle",
     });
 
-    const defaultGroup = buildBranchGroups([root, reviewSubtask], "demo")[0]!;
-    expect(defaultGroup.columns.map((column) => column.file.path)).toEqual(["/implementer"]);
-    expect(defaultGroup.returnable.map((file) => file.path)).toEqual(["/review-subtask"]);
-
-    const expandedGroup = buildBranchGroups([root, reviewSubtask], "demo", {
-      expandedConversationPaths: new Set(["/review-subtask"]),
-    })[0]!;
-    expect(expandedGroup.columns.map((column) => column.file.path)).toEqual(["/implementer", "/review-subtask"]);
-    expect(expandedGroup.returnable).toHaveLength(0);
+    /* The owner session (/implementer) is live, so its quiet child is live-
+       relevant work and renders as a connected column below it — no explicit
+       expansion required. */
+    const group = buildBranchGroups([root, reviewSubtask], "demo")[0]!;
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/implementer", "/review-subtask"]);
+    expect(group.returnable).toHaveLength(0);
   });
 
   test("expanded flow conversations keep implementer and reviewer children as separate levels", () => {
