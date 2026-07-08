@@ -6,6 +6,22 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-07-08
+
+### Added
+- Task curator API: `/api/tasks/curator` surfaces recent real user inputs with
+  transcript context and accepts short curated proposals that become board
+  tasks with source fingerprints.
+- Resource cleanup now has a guarded "kill all agents" control for a deliberate
+  clean slate across tracked agent panes.
+
+### Changed
+- Automatic task inbox capture is opt-in through `LLV_ENABLE_AUTO_TASK_INBOX=1`.
+
+### Fixed
+- Finished Codex worktree sessions under `~/.codex/worktrees/<id>/<repo>` keep
+  grouping under the parent repo after the ephemeral checkout disappears.
+
 ## [0.11.1] — 2026-07-08
 
 ### Added
@@ -205,7 +221,9 @@ Initial public release, packaged as `agent-log-viewer` with a `bunx` CLI.
 - Implement→review flows with fresh headless reviewer rounds.
 - Remote access over Tailscale behind a token gate.
 
-[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/Latand/live-log-viewer-next/compare/v0.11.1...v0.11.2
+[0.11.1]: https://github.com/Latand/live-log-viewer-next/compare/v0.10.0...v0.11.1
 [0.10.0]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.1...v0.9.3
 [0.9.1]: https://github.com/Latand/live-log-viewer-next/compare/v0.9.0...v0.9.1

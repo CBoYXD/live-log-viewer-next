@@ -30,6 +30,10 @@ export interface TaskCandidate {
 
 let lastTickMs = 0;
 
+export function taskInboxEnabled(): boolean {
+  return process.env.LLV_ENABLE_AUTO_TASK_INBOX === "1";
+}
+
 function readScanState(filePath = SCAN_STATE_FILE): { lastRunAt: string | null; seen: string[] } {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as ScanState;
@@ -172,6 +176,7 @@ export function collectTaskCandidates(files: FileEntry[], sinceMs: number, seen:
 }
 
 export function tickTaskInbox(files: FileEntry[], deps: { now?: () => Date; stateFile?: string } = {}): void {
+  if (!taskInboxEnabled()) return;
   const now = deps.now?.() ?? new Date();
   if (now.getTime() - lastTickMs < HOUR_MS) return;
   lastTickMs = now.getTime();

@@ -525,6 +525,10 @@ export const uk: Record<keyof typeof en, Message> = {
   "resources.bulkKill": "Убити неактивні",
   "resources.bulkNone": "немає сесій, неактивних так довго",
   "resources.hoursN": "{n} год",
+  "resources.killAll": "Убити всіх агентів",
+  "resources.killAllConfirm": "Підтвердити — убити {n}?",
+  "resources.killAllHint": "примусово закрити кожен пейн агента, разом із активними — чистий старт, щоб наступний spawn/повідомлення пішли правильно. Твої шели і в'ювер не чіпає.",
+  "resources.killAllNone": "немає сесій агентів для закриття",
   "resources.close": "Закрити",
 
   "status.awaitingPlan": "чекає затвердження плану",

@@ -72,6 +72,35 @@ function worktreeFromPath(cwd: string): { repo: string; worktree: string } | nul
   return { repo: cwd.slice(0, index), worktree };
 }
 
+function existingRepoPath(repoName: string): string {
+  const roots = [path.join(os.homedir(), "Projects"), path.join(os.homedir(), ".agents", "tools")];
+  for (const root of roots) {
+    const candidate = path.join(root, repoName);
+    try {
+      if (fs.statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return path.join(os.homedir(), "Projects", repoName);
+}
+
+/** Codex creates ephemeral worktrees at `~/.codex/worktrees/<hash>/<RepoName>`
+    and deletes them once the task ends. While one lives, `worktreeFromGitFile`
+    resolves it to the main repo via its `.git` pointer; once deleted that read
+    fails and the session can fragment into its own `-codex-worktrees-<hash>-…`
+    project. Recover the repo from known local repo roots so a finished
+    worktree's session keeps the same project key as a live checkout. */
+function worktreeFromCodexPath(cwd: string): { repo: string; worktree: string } | null {
+  const marker = path.sep + ".codex" + path.sep + "worktrees" + path.sep;
+  const index = cwd.indexOf(marker);
+  if (index < 0) return null;
+  const rest = cwd.slice(index + marker.length).split(path.sep).filter(Boolean);
+  const [worktree, repoName] = rest;
+  if (!worktree || !repoName) return null;
+  return { repo: existingRepoPath(repoName), worktree };
+}
+
 /** Main-repo root + worktree name from a linked checkout's `.git` file
     content (`gitdir: <main>/.git/worktrees/<name>`). Pure for testability. */
 export function parseWorktreeGitdir(cwd: string, gitFileText: string): { repo: string; worktree: string } | null {
@@ -201,7 +230,7 @@ function persistedProjects(): {
     means a codex session, a claude session, and any worktree of the same repo
     all land in the SAME sidebar group instead of lookalike neighbors. */
 function projectInfoFromCwd(cwd: string): { project: string; worktree?: string } | null {
-  const worktree = worktreeFromPath(cwd) ?? worktreeFromGitFile(cwd);
+  const worktree = worktreeFromPath(cwd) ?? worktreeFromGitFile(cwd) ?? worktreeFromCodexPath(cwd);
   if (!worktree && !hasGitMarker(cwd)) {
     const persisted = persistedProjects().byCwd.get(cwd);
     if (persisted) return persisted;

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { afterAll, expect, test } from "bun:test";
 
-import { describe, parseWorktreeGitdir, projectFromSlug } from "./describe";
+import { describe, parseWorktreeGitdir, projectForCwd, projectFromSlug } from "./describe";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-describe-test-"));
 const REAL_STATE = process.env.LLV_STATE_DIR;
@@ -36,6 +36,23 @@ test("parseWorktreeGitdir rejects gitdirs that are not linked worktrees", () => 
   expect(parseWorktreeGitdir("/home/u/sub", "not a git file")).toBeNull();
   /* "worktrees" segment without a .git parent is another repo layout, not a linked checkout */
   expect(parseWorktreeGitdir("/home/u/sub", "gitdir: /home/u/worktrees/x")).toBeNull();
+});
+
+test("a deleted codex worktree still groups under its parent repo project", () => {
+  /* Codex removes `~/.codex/worktrees/<hash>/<Repo>` after the task, so the
+     on-disk `.git` pointer is gone — a path with no filesystem presence must
+     still resolve to the repo name a live checkout of the same repo produces. */
+  const dead = path.join(os.homedir(), ".codex", "worktrees", "2d25", "CelestiaCompose");
+  const liveRepo = path.join(os.homedir(), "Projects", "CelestiaCompose");
+  expect(projectForCwd(dead)).toBe("CelestiaCompose");
+  expect(projectForCwd(dead)).toBe(projectForCwd(liveRepo));
+});
+
+test("a deleted codex worktree keeps the .agents tools repo project key", () => {
+  const dead = path.join(os.homedir(), ".codex", "worktrees", "2d25", "live-log-viewer-next");
+  const liveRepo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  expect(projectForCwd(dead)).toBe("-agents-tools-live-log-viewer-next");
+  expect(projectForCwd(dead)).toBe(projectForCwd(liveRepo));
 });
 
 test("a worktree's main repo slugifies to the same project name its own sessions use", () => {

@@ -6,7 +6,8 @@ import path from "node:path";
 import type { FileEntry } from "@/lib/types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-inbox-test-"));
-const { collectTaskCandidates, taskTextFromPrompt } = await import("./inboxScanner");
+delete process.env.LLV_ENABLE_AUTO_TASK_INBOX;
+const { collectTaskCandidates, taskInboxEnabled, taskTextFromPrompt } = await import("./inboxScanner");
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-inbox-files-"));
 
@@ -45,6 +46,13 @@ function writeJsonl(name: string, rows: unknown[]): string {
 }
 
 describe("task inbox scanner", () => {
+  test("is disabled unless explicitly enabled", () => {
+    expect(taskInboxEnabled()).toBe(false);
+    process.env.LLV_ENABLE_AUTO_TASK_INBOX = "1";
+    expect(taskInboxEnabled()).toBe(true);
+    delete process.env.LLV_ENABLE_AUTO_TASK_INBOX;
+  });
+
   test("extracts task text from a spoken prompt after injected context", () => {
     const text = taskTextFromPrompt(
       "# AGENTS.md instructions\nnoise\n</INSTRUCTIONS><environment_context>x</environment_context>\n\nЯ бы хотел, чтобы ты э-э-э создал автоматизацию для Agent Log Viewer.",

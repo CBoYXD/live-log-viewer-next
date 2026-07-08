@@ -554,6 +554,10 @@ export const en = {
   "resources.bulkKill": "Kill idle",
   "resources.bulkNone": "nothing has been idle that long",
   "resources.hoursN": "{n} h",
+  "resources.killAll": "Kill all agents",
+  "resources.killAllConfirm": "Confirm — kill {n}?",
+  "resources.killAllHint": "force-kill every agent pane, live ones included — a clean slate so the next spawn/message routes cleanly. Your shells and the viewer are left alone.",
+  "resources.killAllNone": "no agent sessions to kill",
   "resources.close": "Close",
 
   // useSwitchboardData / status lines

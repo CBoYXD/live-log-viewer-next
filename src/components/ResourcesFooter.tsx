@@ -206,6 +206,10 @@ function CleanupPanel({
   const [error, setError] = useState<string | null>(null);
   const [bulkHours, setBulkHours] = useState<(typeof BULK_HOURS)[number]>(2);
   const [bulkBusy, setBulkBusy] = useState(false);
+  /* The nuke: a two-step arm before it force-kills every agent pane, live ones
+     included. Any other kill action disarms it, so a stray tap can't fire it. */
+  const [killAllArmed, setKillAllArmed] = useState(false);
+  const [killAllBusy, setKillAllBusy] = useState(false);
 
   const markBusy = (target: string, on: boolean) =>
     setBusy((prev) => {
@@ -217,6 +221,7 @@ function CleanupPanel({
 
   const killOne = async (session: ResourceSession) => {
     setError(null);
+    setKillAllArmed(false);
     markBusy(session.target, true);
     try {
       const failure = await killSession(session);
@@ -241,6 +246,7 @@ function CleanupPanel({
     const targets = bulkTargets(bulkHours);
     if (targets.length === 0 || bulkBusy) return;
     setError(null);
+    setKillAllArmed(false);
     setBulkBusy(true);
     try {
       for (const session of targets) {
@@ -252,6 +258,29 @@ function CleanupPanel({
     } finally {
       setBusy(new Set());
       setBulkBusy(false);
+    }
+  };
+
+  /* Force-kills every tracked agent session, live included — the clean-slate
+     nuke. Sequential, like killBulk, so window renumbering between kills never
+     misaddresses a pane (each kill re-verifies the recorded pane pid server-
+     side). Only the viewer's own claude/codex panes are in this list, so work
+     shells and the viewer processes are never touched. */
+  const killAll = async () => {
+    if (sessions.length === 0 || killAllBusy) return;
+    setError(null);
+    setKillAllBusy(true);
+    try {
+      for (const session of sessions) {
+        markBusy(session.target, true);
+        const failure = await killSession(session);
+        if (failure) setError(failure);
+      }
+      await onRefresh();
+    } finally {
+      setBusy(new Set());
+      setKillAllBusy(false);
+      setKillAllArmed(false);
     }
   };
 
@@ -314,6 +343,28 @@ function CleanupPanel({
           {bulkCount ? ` (${bulkCount})` : ""}
         </button>
       </footer>
+      <div className="flex items-center gap-2 border-t border-line px-3 py-2">
+        <span className="text-[13px] leading-none text-err" aria-hidden>
+          ⚠
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[10.5px] text-dim" title={t("resources.killAllHint")}>
+          {t("resources.killAllHint")}
+        </span>
+        <button
+          type="button"
+          disabled={killAllBusy || sessions.length === 0}
+          title={sessions.length === 0 ? t("resources.killAllNone") : t("resources.killAllHint")}
+          onClick={() => (killAllArmed ? void killAll() : setKillAllArmed(true))}
+          className={[
+            "shrink-0 rounded-[8px] border px-2.5 py-1 text-[11px] font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/40 disabled:cursor-not-allowed disabled:opacity-45",
+            killAllArmed ? "border-err bg-err text-white" : "border-err/40 text-err hover:bg-err/10",
+          ].join(" ")}
+        >
+          {killAllArmed
+            ? t("resources.killAllConfirm", { n: sessions.length })
+            : t("resources.killAll") + (sessions.length ? ` (${sessions.length})` : "")}
+        </button>
+      </div>
       {error ? <div className="border-t border-line px-3 py-1.5 text-[11px] font-semibold text-err">{error}</div> : null}
     </div>
   );
