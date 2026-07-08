@@ -1,0 +1,5 @@
+[test]
+# Pin an isolated LLV_STATE_DIR before any module bakes statePath() at load —
+# guarantees the suite never writes the user's real viewer state. See
+# test-preload.ts.
+preload = ["./test-preload.ts"]

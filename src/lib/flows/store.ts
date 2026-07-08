@@ -6,9 +6,14 @@ import { statePath } from "@/lib/configDir";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
-const FLOWS_FILE = statePath("flows.json");
-const PRESETS_FILE = statePath("review-loop-presets.json");
-const FLOW_ARTIFACT_DIR = statePath("flows");
+/* Resolve on every call, never bake at module load: a test that pins
+   LLV_STATE_DIR after this module is first imported (import order across a
+   suite is not guaranteed) must still redirect writes to its sandbox. Baking
+   the path here once let a mis-ordered test clobber the user's real
+   flows.json. */
+const flowsFile = () => statePath("flows.json");
+const presetsFile = () => statePath("review-loop-presets.json");
+const flowArtifactDir = () => statePath("flows");
 
 const SEEDED_PRESETS: FlowPreset[] = [
   {
@@ -78,7 +83,7 @@ function isPreset(value: unknown): value is FlowPreset {
 }
 
 export function loadFlows(): Flow[] {
-  const raw = readJson(FLOWS_FILE) as FlowFile | null;
+  const raw = readJson(flowsFile()) as FlowFile | null;
   const flows = Array.isArray(raw?.flows) ? raw.flows.filter(isFlow) : [];
   return flows.map((flow) => ({
     ...flow,
@@ -95,11 +100,11 @@ export function loadFlows(): Flow[] {
 }
 
 export function saveFlows(flows: Flow[]): void {
-  atomicWriteJson(FLOWS_FILE, { flows });
+  atomicWriteJson(flowsFile(), { flows });
 }
 
 export function loadPresets(): FlowPreset[] {
-  const raw = readJson(PRESETS_FILE) as PresetFile | null;
+  const raw = readJson(presetsFile()) as PresetFile | null;
   const presets = Array.isArray(raw?.presets) ? raw.presets.filter(isPreset) : [];
   if (presets.length > 0) return presets;
   savePresets(SEEDED_PRESETS);
@@ -107,11 +112,11 @@ export function loadPresets(): FlowPreset[] {
 }
 
 export function savePresets(presets: FlowPreset[]): void {
-  atomicWriteJson(PRESETS_FILE, { presets });
+  atomicWriteJson(presetsFile(), { presets });
 }
 
 export function flowArtifactsDir(flowId: string): string {
-  return path.join(FLOW_ARTIFACT_DIR, flowId);
+  return path.join(flowArtifactDir(), flowId);
 }
 
 export function findingsPathFor(flowId: string, round: number): string {
