@@ -85,4 +85,43 @@ describe("buildSchemeLayout byPath", () => {
     expect(layout.decks).toHaveLength(1);
     expect(layout.byPath.get(layout.decks[0]!.key)).toBe(layout.decks[0]!);
   });
+
+  test("expanded reviewer children render as connected nodes below the implementer", () => {
+    const root = entry({ path: "/implementer", activity: "live" });
+    const reviewSubtask = entry({
+      path: "/review-subtask",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/implementer",
+      activity: "idle",
+    });
+    const group: BranchGroup = {
+      key: "/implementer",
+      columns: [
+        { file: root, tasks: [] },
+        { file: reviewSubtask, tasks: [] },
+      ],
+      returnable: [],
+      finished: [],
+      smt: root.mtime,
+      orphanTask: false,
+    };
+
+    const layout = buildSchemeLayout(
+      [group],
+      [],
+      [root, reviewSubtask],
+      [flow({ id: "f1", implementerPath: "/implementer" })],
+      [],
+    );
+    const implementerNode = layout.nodes.find((node) => node.file.path === "/implementer")!;
+    const subtaskNode = layout.nodes.find((node) => node.file.path === "/review-subtask")!;
+
+    expect(subtaskNode.y).toBeGreaterThan(implementerNode.y + implementerNode.h);
+    expect(subtaskNode.x).toBeGreaterThan(implementerNode.x);
+    expect(layout.edges.some((edge) => edge.to === "/review-subtask" && !edge.dashed)).toBe(true);
+    expect(layout.stacks).toHaveLength(0);
+    expect(implementerNode.under.map((file) => file.path)).toEqual([]);
+  });
 });

@@ -12,7 +12,7 @@ import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
 import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
-import { foldClaimedReviewers } from "./flows/flowModel";
+import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
@@ -181,9 +181,19 @@ export function ProjectDashboard({
 
   /* Reviewer transcripts of active flows live inside their round decks:
      they never build their own groups, quiet trees or residual chips. */
+  const expandedFlowConversations = useMemo(() => {
+    const paths = claimedReviewerDescendantPaths(files, flows);
+    for (const flow of flows) {
+      if (isActiveFlow(flow)) paths.add(flow.implementerPath);
+    }
+    return paths;
+  }, [files, flows]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
-  const groups = useMemo(() => buildBranchGroups(groupFiles, project), [groupFiles, project]);
+  const groups = useMemo(
+    () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedFlowConversations }),
+    [groupFiles, project, expandedFlowConversations],
+  );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
   const cards = useMemo(() => collapsedTrees(groupFiles, project, activeRoots), [groupFiles, project, activeRoots]);
   const quietActiveRoots = useMemo(

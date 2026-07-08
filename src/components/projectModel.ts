@@ -177,8 +177,14 @@ export function descendantCounts(files: FileEntry[]): Map<string, number> {
 }
 
 /** Descendants that deserve a full transcript column next to the root. */
-function columnWorthy(file: FileEntry): boolean {
-  return !isAuxTask(file) && (file.activity === "live" || file.proc === "running" || (file.activity === "recent" && isChildConversation(file)));
+function columnWorthy(file: FileEntry, expandedConversationPaths?: ReadonlySet<string>): boolean {
+  return (
+    !isAuxTask(file) &&
+    (file.activity === "live" ||
+      file.proc === "running" ||
+      (file.activity === "recent" && isChildConversation(file)) ||
+      (isChildConversation(file) && expandedConversationPaths?.has(file.path) === true))
+  );
 }
 
 function activeWork(file: FileEntry): boolean {
@@ -204,11 +210,16 @@ function ownerSessionAlive(file: FileEntry, byPath: Map<string, FileEntry>): boo
   return false;
 }
 
-function assembleGroup(root: FileEntry, kids: Map<string, FileEntry[]>, byPath: Map<string, FileEntry>): BranchGroup {
+function assembleGroup(
+  root: FileEntry,
+  kids: Map<string, FileEntry[]>,
+  byPath: Map<string, FileEntry>,
+  expandedConversationPaths?: ReadonlySet<string>,
+): BranchGroup {
   const descendants = subtree(root, kids);
   const liveRank = (file: FileEntry) => (file.activity === "live" ? 0 : 1);
   const branches = descendants
-    .filter(columnWorthy)
+    .filter((file) => columnWorthy(file, expandedConversationPaths))
     .sort((a, b) => liveRank(a) - liveRank(b) || tick5(b.mtime) - tick5(a.mtime) || a.path.localeCompare(b.path));
   const liveTasks = descendants
     .filter((file) => isAuxTask(file) && file.activity === "live")
@@ -243,14 +254,26 @@ function assembleGroup(root: FileEntry, kids: Map<string, FileEntry[]>, byPath: 
  * job sessions) keep full columns too, because "done between user messages"
  * must not hide active work.
  */
-export function buildBranchGroups(files: FileEntry[], project: string): BranchGroup[] {
+export interface BranchGroupOptions {
+  /** Quiet conversations promoted into full scheme nodes. */
+  expandedConversationPaths?: ReadonlySet<string>;
+}
+
+export function buildBranchGroups(files: FileEntry[], project: string, options: BranchGroupOptions = {}): BranchGroup[] {
   const byPath = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
   const roots = new Map<string, FileEntry>();
   const orphanTasks = new Map<string, FileEntry>();
+  const { expandedConversationPaths } = options;
   for (const file of files) {
     if (projectKey(file) !== project) continue;
-    if (file.activity === "live" || file.proc === "running" || (file.activity === "recent" && isChildConversation(file))) {
+    const expanded = expandedConversationPaths?.has(file.path) === true;
+    if (
+      file.activity === "live" ||
+      file.proc === "running" ||
+      (file.activity === "recent" && isChildConversation(file)) ||
+      (expanded && (isConversation(file) || isChildConversation(file)))
+    ) {
       const root = rootOf(file, byPath);
       if (isAuxTask(root)) orphanTasks.set(root.path, root);
       else roots.set(root.path, root);
@@ -258,7 +281,7 @@ export function buildBranchGroups(files: FileEntry[], project: string): BranchGr
     }
     if (file.activity === "recent" && isConversation(file)) roots.set(file.path, file);
   }
-  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, byPath));
+  const groups = [...roots.values()].map((root) => assembleGroup(root, kids, byPath, expandedConversationPaths));
   for (const task of orphanTasks.values()) {
     groups.push({
       key: task.path,

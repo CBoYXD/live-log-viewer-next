@@ -110,6 +110,57 @@ describe("buildBranchGroups", () => {
     expect(residualItems(files, "demo", activeRoots, quietActiveRoots).map((file) => file.path)).toContain("/idle-root");
     expect(residualItems(files, "demo", activeRoots).map((file) => file.path)).not.toContain("/idle-root");
   });
+
+  test("expanded conversation paths promote quiet codex children to columns", () => {
+    const root = entry({ path: "/implementer", activity: "live" });
+    const reviewSubtask = entry({
+      path: "/review-subtask",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/implementer",
+      activity: "idle",
+    });
+
+    const defaultGroup = buildBranchGroups([root, reviewSubtask], "demo")[0]!;
+    expect(defaultGroup.columns.map((column) => column.file.path)).toEqual(["/implementer"]);
+    expect(defaultGroup.returnable.map((file) => file.path)).toEqual(["/review-subtask"]);
+
+    const expandedGroup = buildBranchGroups([root, reviewSubtask], "demo", {
+      expandedConversationPaths: new Set(["/review-subtask"]),
+    })[0]!;
+    expect(expandedGroup.columns.map((column) => column.file.path)).toEqual(["/implementer", "/review-subtask"]);
+    expect(expandedGroup.returnable).toHaveLength(0);
+  });
+
+  test("expanded flow conversations keep implementer and reviewer children as separate levels", () => {
+    const root = entry({ path: "/conversation", activity: "idle" });
+    const implementer = entry({
+      path: "/implementer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/conversation",
+      activity: "idle",
+    });
+    const reviewSubtask = entry({
+      path: "/review-subtask",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: "/implementer",
+      activity: "idle",
+    });
+
+    const group = buildBranchGroups([root, implementer, reviewSubtask], "demo", {
+      expandedConversationPaths: new Set(["/implementer", "/review-subtask"]),
+    })[0]!;
+
+    expect(group.key).toBe("/conversation");
+    expect(group.columns.map((column) => column.file.path)).toEqual(["/conversation", "/implementer", "/review-subtask"]);
+    expect(group.returnable).toHaveLength(0);
+    expect(group.finished).toHaveLength(0);
+  });
 });
 
 describe("buildArchiveBranchGroups", () => {

@@ -89,6 +89,35 @@ export function claimedReviewerPaths(flows: Flow[]): Set<string> {
 }
 
 /**
+ * Descendants spawned by folded reviewer sessions should remain expanded on
+ * the scheme. The reviewer card itself lives in the round deck; its children
+ * still carry real conversation structure below the implementer.
+ */
+export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]): Set<string> {
+  const claimed = claimedReviewerPaths(flows);
+  const children = new Map<string, FileEntry[]>();
+  for (const file of files) {
+    if (!file.parent) continue;
+    const list = children.get(file.parent);
+    if (list) list.push(file);
+    else children.set(file.parent, [file]);
+  }
+  const out = new Set<string>();
+  const stack = [...claimed];
+  const seen = new Set(stack);
+  while (stack.length) {
+    const parent = stack.pop()!;
+    for (const child of children.get(parent) ?? []) {
+      if (seen.has(child.path)) continue;
+      seen.add(child.path);
+      out.add(child.path);
+      stack.push(child.path);
+    }
+  }
+  return out;
+}
+
+/**
  * Reviewer sessions are folded into the flow strip (see claimedReviewerPaths),
  * so they are dropped from the board. But a reviewer often spawns its own
  * subtasks; with the reviewer gone from the file set those children lose their
