@@ -64,7 +64,8 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
 
 export function Viewer() {
   const { t } = useLocale();
-  const { files, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles();
+  const [project, setProject] = useState<string>(OVERVIEW);
+  const { files, projectCatalog, flows: polledFlows, workflows, tasks, loaded } = useFiles(project === OVERVIEW ? null : project);
   /* This tab's optimistic flow closes apply before anything renders: the X
      on a flow strip clears the reviewer side of the scheme instantly. */
   const flows = useEffectiveFlows(polledFlows);
@@ -73,7 +74,6 @@ export function Viewer() {
   const catalogProjects = useMemo(() => new Set(projectCatalog.map((entry) => entry.project)), [projectCatalog]);
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [project, setProject] = useState<string>(OVERVIEW);
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [toastPath, setToastPath] = useState<string | null>(null);
   const seenQuestionsRef = useRef<Set<string> | null>(null);

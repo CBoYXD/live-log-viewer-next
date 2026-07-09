@@ -158,6 +158,48 @@ test("discoverFilesWithProjectCatalog keeps projects outside the recent cap", as
   }
 });
 
+test("discoverFilesWithProjectCatalog hydrates a selected project outside the recent cap", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-selected-project-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  try {
+    process.env.LLV_STATE_DIR = path.join(base, "state");
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+
+    const startedAt = 1_700_025_000;
+    const projectSlug = "-" + path.join(os.homedir(), "Projects", "stikon-dispatcher").split(path.sep).filter(Boolean).join("-");
+    const quietPath = path.join(roots["claude-projects"], projectSlug, "quiet-session.jsonl");
+    await writeFixture(quietPath, JSON.stringify({ type: "user", message: { content: "Quiet project" } }) + "\n", startedAt - 10);
+    for (let index = 0; index < FILE_CAP; index += 1) {
+      const pathname = path.join(roots["codex-sessions"], `fresh-${String(index).padStart(3, "0")}.jsonl`);
+      await writeFixture(
+        pathname,
+        JSON.stringify({ type: "session_meta", payload: { cwd: "/home/latand/Projects/fresh-project" } }) + "\n",
+        startedAt + index,
+      );
+    }
+
+    const overviewScan = await discoverFilesWithProjectCatalog(roots);
+    const selectedScan = await discoverFilesWithProjectCatalog(roots, "stikon-dispatcher");
+
+    expect(overviewScan.files.some((entry) => entry.path === quietPath)).toBe(false);
+    expect(selectedScan.projectCatalog.find((entry) => entry.project === "stikon-dispatcher")).toEqual({
+      project: "stikon-dispatcher",
+      conversations: 1,
+      smt: startedAt - 10,
+    });
+    expect(selectedScan.files.some((entry) => entry.path === quietPath && entry.project === "stikon-dispatcher")).toBe(true);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
 test("discoverFilesWithProjectCatalog refreshes cached projects when flow state changes", async () => {
   const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-state-"));
   const previousStateDir = process.env.LLV_STATE_DIR;

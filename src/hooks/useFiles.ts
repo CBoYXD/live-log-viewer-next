@@ -23,16 +23,21 @@ export interface FilesData {
 
 const EMPTY: FilesData = { files: [], projectCatalog: [], flows: [], workflows: [], tasks: [], loaded: false };
 
+export function filesApiUrl(project?: string | null): string {
+  return project ? "/api/files?project=" + encodeURIComponent(project) : "/api/files";
+}
+
 /** Polls /api/files. Keeps the last good list on transient fetch errors. */
-export function useFiles(): FilesData {
+export function useFiles(project?: string | null): FilesData {
   const [data, setData] = useState<FilesData>(EMPTY);
   useEffect(() => {
     let alive = true;
     let lastBody = "";
     let lastEtag = "";
+    const url = filesApiUrl(project);
     const load = async () => {
       try {
-        const res = await fetch("/api/files", lastEtag ? { headers: { "If-None-Match": lastEtag } } : undefined);
+        const res = await fetch(url, lastEtag ? { headers: { "If-None-Match": lastEtag } } : undefined);
         /* 304: the server confirms the payload is byte-identical to the last
            one, so there is nothing to read or re-parse. */
         if (res.status === 304) return;
@@ -77,6 +82,6 @@ export function useFiles(): FilesData {
       window.removeEventListener(WORKFLOWS_CHANGED_EVENT, onChanged);
       window.removeEventListener(TASKS_CHANGED_EVENT, onChanged);
     };
-  }, []);
+  }, [project]);
   return data;
 }

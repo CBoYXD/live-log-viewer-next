@@ -5,7 +5,7 @@ import path from "node:path";
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
-import { projectCatalogFromRaw } from "./projectCatalog";
+import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { EXTS, FILE_CAP, ROOTS } from "./roots";
 
 export function taskParts(root: string, pathname: string): [string, string, string] | null {
@@ -96,7 +96,7 @@ async function discoverRaw(roots: Roots, limit: Limit): Promise<RawEntry[]> {
   }))).flat();
 }
 
-function entriesFromRaw(raw: RawEntry[]): FileEntry[] {
+function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>): FileEntry[] {
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -106,6 +106,15 @@ function entriesFromRaw(raw: RawEntry[]): FileEntry[] {
   }
   const selected = raw.slice(0, FILE_CAP);
   const selectedPaths = new Set(selected.map((entry) => entry.path));
+  if (selectedProject) {
+    for (const entry of raw) {
+      if (selectedPaths.has(entry.path)) continue;
+      const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st).project || "other");
+      if (project !== selectedProject) continue;
+      selectedPaths.add(entry.path);
+      selected.push(entry);
+    }
+  }
   for (let index = 0; index < selected.length; index += 1) {
     const entry = selected[index]!;
     if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) continue;
@@ -141,14 +150,17 @@ function entriesFromRaw(raw: RawEntry[]): FileEntry[] {
   });
 }
 
-export async function discoverFilesWithProjectCatalog(roots: Roots = ROOTS): Promise<{
+export async function discoverFilesWithProjectCatalog(
+  roots: Roots = ROOTS,
+  selectedProject?: string,
+): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
 }> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const projectCatalog = projectCatalogFromRaw(raw);
-  return { files: entriesFromRaw(raw), projectCatalog };
+  const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw);
+  return { files: entriesFromRaw(raw, selectedProject, projectByPath), projectCatalog };
 }
 
 export async function discoverFiles(roots: Roots = ROOTS): Promise<FileEntry[]> {

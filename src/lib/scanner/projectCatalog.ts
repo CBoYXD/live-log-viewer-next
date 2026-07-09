@@ -113,11 +113,15 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   return file;
 }
 
-export function projectCatalogFromRaw(raw: RawEntry[]): ProjectCatalogEntry[] {
+export function projectCatalogSnapshotFromRaw(raw: RawEntry[]): {
+  projectCatalog: ProjectCatalogEntry[];
+  projectByPath: Map<string, string>;
+} {
   const state = readState();
   const stateKey = projectResolutionStateKey();
   const nextFiles: Record<string, CachedProjectFile> = {};
   const groups = new Map<string, ProjectCatalogEntry>();
+  const projectByPath = new Map<string, string>();
   for (const entry of raw) {
     const file = cachedFile(entry, state, stateKey);
     nextFiles[file.path] = {
@@ -130,6 +134,7 @@ export function projectCatalogFromRaw(raw: RawEntry[]): ProjectCatalogEntry[] {
       session: file.session,
     };
     const project = file.project || "other";
+    projectByPath.set(file.path, project);
     let group = groups.get(project);
     if (!group) {
       group = { project, smt: 0, conversations: 0 };
@@ -139,5 +144,12 @@ export function projectCatalogFromRaw(raw: RawEntry[]): ProjectCatalogEntry[] {
     if (file.session) group.conversations += 1;
   }
   writeState({ version: 1, files: nextFiles });
-  return [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project));
+  return {
+    projectCatalog: [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
+    projectByPath,
+  };
+}
+
+export function projectCatalogFromRaw(raw: RawEntry[]): ProjectCatalogEntry[] {
+  return projectCatalogSnapshotFromRaw(raw).projectCatalog;
 }

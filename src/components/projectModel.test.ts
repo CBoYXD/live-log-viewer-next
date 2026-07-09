@@ -162,6 +162,14 @@ describe("buildBranchGroups", () => {
 });
 
 describe("buildArchiveBranchGroups", () => {
+  test("a hydrated quiet project root renders as an archive group", () => {
+    const quietRoot = entry({ path: "/stikon-old", project: "stikon-dispatcher", mtime: 50 });
+    const groups = buildArchiveBranchGroups([quietRoot], "stikon-dispatcher", 100);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.columns.map((column) => column.file.path)).toEqual(["/stikon-old"]);
+  });
+
   test("keeps ancestors for a fresh child so the scheme can draw the edge", () => {
     const oldRoot = entry({ path: "/old-root", mtime: 10 });
     const freshChild = entry({ path: "/old-root/fresh", parent: "/old-root", kind: "subagent", mtime: 200 });

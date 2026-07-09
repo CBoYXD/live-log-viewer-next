@@ -74,12 +74,17 @@ export async function listFiles(): Promise<FileEntry[]> {
   return (await listFilesInternal(false)).files;
 }
 
-export async function listFilesWithProjectCatalog(): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
-  return listFilesInternal(true);
+export async function listFilesWithProjectCatalog(selectedProject?: string): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  return listFilesInternal(true, selectedProject);
 }
 
-async function listFilesInternal(includeProjectCatalog: boolean): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
-  const scan = includeProjectCatalog ? await discoverFilesWithProjectCatalog() : { files: await discoverFiles(), projectCatalog: [] };
+async function listFilesInternal(
+  includeProjectCatalog: boolean,
+  selectedProject?: string,
+): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
+  const scan = includeProjectCatalog
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject)
+    : { files: await discoverFiles(), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;

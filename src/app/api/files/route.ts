@@ -15,7 +15,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<NextResponse> {
-  const { files, projectCatalog } = await listFilesWithProjectCatalog();
+  const url = new URL(request.url);
+  const selectedProject = url.searchParams.get("project")?.trim() || undefined;
+  const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject);
   /* Reconciliation runs inside the serialized read-modify-write: the file
      scan above is the slow part, so a task edit landing during it is picked
      up by this fresh load instead of being overwritten by a stale snapshot. */
