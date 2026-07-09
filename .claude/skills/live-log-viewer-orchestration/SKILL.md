@@ -21,27 +21,25 @@ should own it.
 
 | Template (engine) | Use it for | Avoid |
 |---|---|---|
-| **GPT-5.6** (Codex) | Architecture + planning — the **default**; plans essentially every issue. Also implements when fast-speed access is available. | — |
-| **GPT-5.5 xhigh** (Codex) | **Bug-finding & diagnosis**, hard logic, adversarial checking — beats Opus at finding bugs. | — |
-| **GPT-5.5 low** (Codex) | Fast, accurate **implementation** of well-scoped tasks. | Open-ended design/architecture |
+| **GPT-5.6-Sol** (Codex, `gpt-5.6-sol`) | Architecture + planning, **bug-finding & diagnosis**, hard logic, adversarial review — the default for critique and decisions. | Mechanical implementation |
+| **GPT-5.6-Terra** (Codex, `gpt-5.6-terra`) | Fast, accurate **implementation** and review-fixing of well-scoped tasks. | Open-ended design/architecture |
 | **Opus 4.8** (Claude) | **Frontend**: styling, UI, icons, visual polish — it has taste. | Bug-finding, deep logic |
 | **Fable 5** (Claude) | **Top tier**: planning/architecture, **UX/UI design**, **reviewing results + adversarial review**; orchestrator/advisor. | — |
 | **Sonnet 5** (Claude) | Fast **web/docs research**, lightweight tasks. (Haiku 4.5 for cheaper/faster throughput.) | Deep design/review |
 
-**Issue assignment rule.** Default every issue to **GPT-5.6** — it plans
+**Issue assignment rule.** Default every issue to **GPT-5.6-Sol** — it plans
 everything. Downgrade only when the task clearly doesn't need a top architect:
 - UX/UI **design** → **Fable 5**
 - Frontend **implementation** / icons / styling → **Opus 4.8**
-- **Bug-finding** / diagnosis → **GPT-5.5 xhigh**
-- Simple mechanical **implementation** → **GPT-5.5 low**
+- **Bug-finding** / diagnosis → **GPT-5.6-Sol xhigh**
+- General and mechanical **implementation** → **GPT-5.6-Terra low/high**
 - Web/docs **research** → **Sonnet 5**
 
-A *visual/layout* bug is frontend (**Opus**), not bug-finding. Implementing a
-known-correct behavior is implementation, not diagnosis — keep it on the planner
-or a Codex implementer, not the xhigh bug-finder.
+A *visual/layout* bug belongs to frontend (**Opus**). Known-correct behavior
+belongs to the planner or a Codex implementer. Reserve Sol xhigh for diagnosis.
 
 **Review.** Reviews and adversarial passes go to **Fable 5** or **Codex
-(GPT-5.5 xhigh)** — never have Opus or Sonnet review Codex's work. See
+(GPT-5.6-Sol xhigh)** — never have Opus or Sonnet review Codex's work. See
 [[codex-is-the-reviewer]] and the review-loop flow below.
 
 Spawn every one of these **through the viewer** (tmux pane + `8898` API), never a
@@ -60,7 +58,7 @@ Any interactive `claude`/`codex` process in tmux is auto-matched to its transcri
 
 ## Spawning a new agent
 
-**Preferred — viewer running:** `POST http://127.0.0.1:8898/api/spawn` with JSON `{"engine":"claude"|"codex","cwd":"<abs dir>","prompt":"<first message>","src":"<your own transcript path>"}`. Same-origin only (call from localhost, no Origin header). **Always pass `src`** when spawning on behalf of a conversation (e.g. your own session): it records lineage in `~/.claude/viewer-state/handoff-lineage.json`, and the board draws the child under the parent with an arrow. Without it the new agent shows up as an unrelated root — the user treats that as a bug.
+**Preferred — viewer running:** `POST http://127.0.0.1:8898/api/spawn` with JSON `{"engine":"codex","model":"gpt-5.6-terra","cwd":"<abs dir>","prompt":"<first message>","src":"<your own transcript path>"}`. Use `gpt-5.6-sol` for architecture, diagnosis, and review. Same-origin only (call from localhost, no Origin header). **Always pass `src`** when spawning on behalf of a conversation (e.g. your own session): it records lineage in `~/.config/agent-log-viewer/state/handoff-lineage.json`, and the board draws the child under the parent with an arrow. Without it the new agent shows up as an unrelated root — the user treats that as a bug.
 
 **Fallback — viewer not running:** replicate its spawn path (`spawnAgentWithPrompt` in `src/lib/tmux.ts`) with tmux directly:
 
@@ -72,7 +70,7 @@ Any interactive `claude`/`codex` process in tmux is auto-matched to its transcri
 4. Deliver the prompt as a bracketed paste, never raw send-keys for multi-line text:
    `tmux load-buffer -b <buf> <file>` → `tmux paste-buffer -d -p -b <buf> -t $PANE` → sleep ~0.5s → `tmux send-keys -t $PANE Enter`.
 5. Verify submission: if the composer line (last line starting with `❯` or `›`) still shows the prompt head or `[Pasted text`, press Enter again (an extra Enter on an empty composer is a no-op).
-6. **Record lineage** so the board links the new agent under its parent: while the viewer is still down, add an entry to the `children` map in `~/.claude/viewer-state/handoff-lineage.json` — `{"<child transcript path>": "<parent transcript path>"}` (for codex, find the rollout by grepping `~/.codex/sessions/YYYY/MM/DD/*.jsonl` for a prompt fragment). Edit this file ONLY while the viewer is stopped: the running server caches it in memory and overwrites external edits. If the viewer came back up in the meantime, restart it after the edit.
+6. **Record lineage** so the board links the new agent under its parent: while the viewer is still down, add an entry to the `children` map in `~/.config/agent-log-viewer/state/handoff-lineage.json` — `{"<child transcript path>": "<parent transcript path>"}` (for codex, find the rollout by grepping `~/.codex/sessions/YYYY/MM/DD/*.jsonl` for a prompt fragment). Edit this file ONLY while the viewer is stopped: the running server caches it in memory and overwrites external edits. If the viewer came back up in the meantime, restart it after the edit.
 
 ## Messaging an existing agent
 
@@ -82,7 +80,7 @@ Any interactive `claude`/`codex` process in tmux is auto-matched to its transcri
 
 ## Review-loop flows (implement→review)
 
-The viewer orchestrates implement→review cycles itself (spec: `docs/review-loop-ui.md` in the repo): long-lived implementer in tmux + fresh headless reviewer per round with approval-free command access and a prompt-level read-only contract, `REVIEW_READY:` marker protocol, verdict files under `~/.claude/viewer-state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Prefer starting a flow over hand-rolling your own loop when the task is implement→review.
+The viewer orchestrates implement→review cycles itself (spec: `docs/review-loop-ui.md` in the repo): long-lived implementer in tmux + fresh headless reviewer per round with approval-free command access and a prompt-level read-only contract, `REVIEW_READY:` marker protocol, verdict files under `~/.config/agent-log-viewer/state/flows/`. API: `GET/POST /api/flows`, `PATCH /api/flows/<id>` (`pause|resume|advance|retry-round|extend|another-round|close`). Prefer starting a flow over hand-rolling your own loop when the task is implement→review.
 
 ## Conventions
 

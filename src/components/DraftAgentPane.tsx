@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Play, X } from "@/components/icons";
 import { useComposer } from "@/hooks/useComposer";
 import { isEngineEffort } from "@/lib/agent/efforts";
+import { defaultModelFor } from "@/lib/agent/models";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -46,7 +47,7 @@ function writeField(id: string, name: string, value: string) {
 
 /** Everything a draft keeps in sessionStorage; called when the draft leaves the scheme. */
 export function clearDraftStorage(id: string) {
-  for (const name of ["engine", "cwd", "text", "boot", "src", "effort", "speed"]) sessionStorage.removeItem(field(id, name));
+  for (const name of ["engine", "model", "cwd", "text", "boot", "src", "effort", "speed"]) sessionStorage.removeItem(field(id, name));
 }
 
 /** Source transcript a handoff draft continues; empty for a plain draft. */
@@ -105,6 +106,7 @@ export function DraftAgentPane({
     return srcFile?.engine === "codex" ? "codex" : "claude";
   });
   const [cwd, setCwdState] = useState(() => readField(draftId, "cwd"));
+  const [model, setModelState] = useState(() => readField(draftId, "model") || defaultModelFor(engine));
   const [effort, setEffortState] = useState(() => readField(draftId, "effort"));
   const [speed, setSpeedState] = useState<SpeedChoice>(() => {
     const stored = readField(draftId, "speed");
@@ -118,6 +120,10 @@ export function DraftAgentPane({
      a reload the mtime cutoff alone carries the match. */
   const knownRef = useRef<Set<string> | null>(null);
 
+  const setModel = (value: string) => {
+    setModelState(value);
+    writeField(draftId, "model", value);
+  };
   const setEffort = (value: string) => {
     setEffortState(value);
     writeField(draftId, "effort", value);
@@ -129,6 +135,7 @@ export function DraftAgentPane({
   const setEngine = (value: Engine) => {
     setEngineState(value);
     writeField(draftId, "engine", value);
+    setModel(defaultModelFor(value));
     /* Tier lists differ per engine (claude has "max", codex does not) — a
        carried-over invalid tier falls back to the CLI default. */
     if (effort && !isEngineEffort(value, effort)) setEffort("");
@@ -223,6 +230,7 @@ export function DraftAgentPane({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           engine,
+          ...(model ? { model } : {}),
           cwd: cwd.trim(),
           ...(effort ? { effort } : {}),
           ...(engine === "codex" && speed ? { fast: speed === "fast" } : {}),
@@ -319,7 +327,16 @@ export function DraftAgentPane({
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line bg-[#fbfbfd] px-2.5 py-1.5">
         <span className="shrink-0 text-[10px] font-semibold text-dim">{t("draft.reasoning")}</span>
-        <ReasoningControls engine={engine} effort={effort} speed={speed} disabled={fieldsDisabled} onEffort={setEffort} onSpeed={setSpeed} />
+        <ReasoningControls
+          engine={engine}
+          model={model}
+          effort={effort}
+          speed={speed}
+          disabled={fieldsDisabled}
+          onModel={setModel}
+          onEffort={setEffort}
+          onSpeed={setSpeed}
+        />
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4">

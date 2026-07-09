@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { reasoningFromBody } from "@/lib/agent/efforts";
+import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { applyAssignmentPatches, type AssignmentPatch } from "@/lib/tasks/commands";
@@ -48,7 +49,7 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; cwd?: unknown; effort?: unknown; fast?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; effort?: unknown; fast?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -60,6 +61,8 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
 
   const reasoning = reasoningFromBody(engine, body);
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
+  const selectedModel = modelFromBody(body);
+  if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
   const cwdResult = cwdFromBody(body.cwd);
   if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "invalid working directory" }, { status: cwdResult.status ?? 400 });
 
@@ -68,7 +71,7 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
   try {
-    const spec = freshSpecFor(engine, cwdResult.cwd, { effort: reasoning.effort, fast: reasoning.fast });
+    const spec = freshSpecFor(engine, cwdResult.cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, task.text);
     const transcript = await resolveSpawnedTranscriptPath({

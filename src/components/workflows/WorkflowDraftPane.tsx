@@ -213,7 +213,7 @@ export function WorkflowDraftPane({
                 ) : null}
                 <span className="inline-flex h-6 max-w-[200px] items-center truncate rounded-full bg-chip px-2 text-[10.5px] font-bold text-[#555]">
                   {stage.kind === "review-loop"
-                    ? `${t("wfStrip.reviewStage")} · ${stage.reviewer.engine}${stage.reviewer.effort ? " " + stage.reviewer.effort : ""}`
+                    ? `${t("wfStrip.reviewStage")} · ${stage.reviewer.engine}${stage.reviewer.model ? " " + stage.reviewer.model : ""}${stage.reviewer.effort ? " " + stage.reviewer.effort : ""}`
                     : `${stage.scope.split(/[.:\n]/)[0]} · ${stage.agent.engine}${stage.agent.model ? " " + stage.agent.model : ""}${stage.agent.effort ? " " + stage.agent.effort : ""}`}
                 </span>
               </span>

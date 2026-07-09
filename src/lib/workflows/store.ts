@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 import type { RoleConfig } from "@/lib/flows/types";
 import { atomicWriteText } from "@/lib/flows/store";
 
@@ -11,12 +12,12 @@ const WORKFLOWS_FILE = statePath("workflows.json");
 const TEMPLATES_FILE = statePath("workflow-templates.json");
 const ARTIFACT_DIR = statePath("workflows");
 
-/** The hard fixer default (W5): cheap fast hands for applying findings. */
-export const DEFAULT_FIXER: RoleConfig = { engine: "codex", model: null, effort: "low" };
+/** The hard fixer default (W5): Terra supplies fast hands for applying findings. */
+export const DEFAULT_FIXER: RoleConfig = { engine: "codex", model: CODEX_TERRA_MODEL, effort: "low" };
 
 /* The user's canonical template (design doc example), seeded on first load
    the way flow presets are. */
-const SEEDED_TEMPLATES: WorkflowTemplate[] = [
+const LEGACY_SEEDED_TEMPLATES: WorkflowTemplate[] = [
   {
     name: "fullstack",
     setup: "bun install",
@@ -36,6 +37,53 @@ const SEEDED_TEMPLATES: WorkflowTemplate[] = [
       {
         kind: "review-loop",
         reviewer: { engine: "codex", model: null, effort: "xhigh" },
+        fixer: { engine: "codex", model: null, effort: "low" },
+        roundLimit: 5,
+        reviewerMode: "headless",
+      },
+    ],
+  },
+];
+
+export const SEEDED_TEMPLATES: WorkflowTemplate[] = [
+  {
+    name: "fullstack",
+    setup: "bun install",
+    verify: "bun test && bun run build",
+    finish: "pr",
+    stages: [
+      {
+        kind: "implement",
+        agent: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+        scope: "Backend/API: server logic, data layer, API routes. Leave UI components alone.",
+      },
+      {
+        kind: "implement",
+        agent: { engine: "claude", model: "fable", effort: null },
+        scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage.",
+      },
+      {
+        kind: "review-loop",
+        reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+        fixer: { ...DEFAULT_FIXER },
+        roundLimit: 5,
+        reviewerMode: "headless",
+      },
+    ],
+  },
+  {
+    name: "Terra → Sol review",
+    verify: "bun test && bun run build",
+    finish: "pr",
+    stages: [
+      {
+        kind: "implement",
+        agent: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+        scope: "Implement the requested change end to end, including focused tests and documentation updates.",
+      },
+      {
+        kind: "review-loop",
+        reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
         fixer: { ...DEFAULT_FIXER },
         roundLimit: 5,
         reviewerMode: "headless",
@@ -183,13 +231,22 @@ export function loadTemplates(): WorkflowTemplate[] {
   const templates = Array.isArray(raw?.templates)
     ? raw.templates.map(normalizeTemplate).filter((template): template is WorkflowTemplate => template !== null)
     : [];
-  if (templates.length > 0) return templates;
-  saveTemplates(SEEDED_TEMPLATES);
-  return SEEDED_TEMPLATES;
+  const merged = mergeSeededTemplates(templates);
+  if (JSON.stringify(merged) !== JSON.stringify(templates)) saveTemplates(merged);
+  return merged;
 }
 
 export function saveTemplates(templates: WorkflowTemplate[]): void {
   atomicWriteJson(TEMPLATES_FILE, { templates });
+}
+
+/** Upgrade untouched built-in templates and keep user-authored definitions. */
+export function mergeSeededTemplates(templates: WorkflowTemplate[]): WorkflowTemplate[] {
+  const legacy = new Set(LEGACY_SEEDED_TEMPLATES.map((template) => JSON.stringify(normalizeTemplate(template))));
+  const custom = templates.filter((template) => !legacy.has(JSON.stringify(template)));
+  const names = new Set(custom.map((template) => template.name));
+  const missingSeeds = SEEDED_TEMPLATES.filter((template) => !names.has(template.name));
+  return [...missingSeeds, ...custom];
 }
 
 function slugify(text: string): string {

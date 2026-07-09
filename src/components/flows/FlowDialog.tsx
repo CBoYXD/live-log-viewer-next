@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
+import { ENGINE_MODELS } from "@/lib/agent/models";
 import type { FlowPreset, FlowsResponse, RoleConfig } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
@@ -22,6 +23,7 @@ function RoleEditor({
   onChange: (next: RoleConfig) => void;
 }) {
   const { t } = useLocale();
+  const modelListId = useId();
   return (
     <div className="flex items-center gap-1.5">
       <span className="w-[86px] shrink-0 text-[10.5px] font-semibold text-dim">{label}</span>
@@ -36,11 +38,17 @@ function RoleEditor({
       </select>
       <input
         value={role.model ?? ""}
+        list={modelListId}
         placeholder={t("flowDialog.modelPlaceholder")}
         aria-label={t("flowDialog.model", { label })}
         className="h-7 w-0 min-w-0 flex-1 rounded-[8px] border border-line bg-bg px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
         onChange={(event) => onChange({ ...role, model: event.target.value.trim() || null })}
       />
+      <datalist id={modelListId}>
+        {ENGINE_MODELS[role.engine].map((option) => (
+          <option key={option.id} value={option.id}>{option.label}</option>
+        ))}
+      </datalist>
       <select
         value={role.effort ?? ""}
         aria-label={`Reasoning effort: ${label}`}

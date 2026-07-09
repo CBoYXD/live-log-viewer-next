@@ -6,6 +6,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { reasoningFromBody } from "@/lib/agent/efforts";
+import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
@@ -128,7 +129,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; prompt?: unknown; images?: unknown; src?: unknown; parent?: unknown; effort?: unknown; fast?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -140,6 +141,8 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
 
   const reasoning = reasoningFromBody(engine, body);
   if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
+  const selectedModel = modelFromBody(body);
+  if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
 
   const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
   if (!rawCwd) return NextResponse.json({ error: "working directory is required" }, { status: 400 });
@@ -168,7 +171,7 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
        appended to its first prompt — the same contract the pane composer uses. */
     const bundle = buildImagePayload(prompt, images);
     imagePaths = bundle.imagePaths;
-    const spec = freshSpecFor(engine, cwd, { effort: reasoning.effort, fast: reasoning.fast });
+    const spec = freshSpecFor(engine, cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, bundle.payload);
     const childPath = await resolveSpawnedTranscriptPath({

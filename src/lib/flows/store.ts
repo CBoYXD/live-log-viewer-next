@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
 import type { Flow, FlowPreset, ReviewVerdict } from "./types";
 
@@ -15,7 +16,7 @@ const flowsFile = () => statePath("flows.json");
 const presetsFile = () => statePath("review-loop-presets.json");
 const flowArtifactDir = () => statePath("flows");
 
-const SEEDED_PRESETS: FlowPreset[] = [
+const LEGACY_SEEDED_PRESETS: FlowPreset[] = [
   {
     name: "Codex high → Fable",
     implementer: { engine: "codex", model: null, effort: "high" },
@@ -35,6 +36,34 @@ const SEEDED_PRESETS: FlowPreset[] = [
     name: "Codex high → Codex xhigh",
     implementer: { engine: "codex", model: null, effort: "high" },
     reviewer: { engine: "codex", model: null, effort: "xhigh" },
+  },
+];
+
+export const SEEDED_PRESETS: FlowPreset[] = [
+  {
+    name: "Terra high → Sol xhigh",
+    implementer: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+    reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+  },
+  {
+    name: "Terra low → Sol xhigh",
+    implementer: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "low" },
+    reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+  },
+  {
+    name: "Terra high → Fable",
+    implementer: { engine: "codex", model: CODEX_TERRA_MODEL, effort: "high" },
+    reviewer: { engine: "claude", model: "fable", effort: null },
+  },
+  {
+    name: "Fable → Sol xhigh",
+    implementer: { engine: "claude", model: "fable", effort: null },
+    reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
+  },
+  {
+    name: "Sonnet → Sol xhigh",
+    implementer: { engine: "claude", model: "sonnet", effort: null },
+    reviewer: { engine: "codex", model: CODEX_SOL_MODEL, effort: "xhigh" },
   },
 ];
 
@@ -79,7 +108,33 @@ function isFlow(value: unknown): value is Flow {
 function isPreset(value: unknown): value is FlowPreset {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const preset = value as Partial<FlowPreset>;
-  return typeof preset.name === "string" && Boolean(preset.implementer) && Boolean(preset.reviewer);
+  return typeof preset.name === "string" && isRoleConfig(preset.implementer) && isRoleConfig(preset.reviewer);
+}
+
+function isRoleConfig(value: unknown): value is FlowPreset["implementer"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const role = value as Partial<FlowPreset["implementer"]>;
+  return (
+    (role.engine === "claude" || role.engine === "codex") &&
+    (role.model === null || typeof role.model === "string") &&
+    (role.effort === null || typeof role.effort === "string")
+  );
+}
+
+function sameRole(left: FlowPreset["implementer"], right: FlowPreset["implementer"]): boolean {
+  return left.engine === right.engine && left.model === right.model && left.effort === right.effort;
+}
+
+function samePreset(left: FlowPreset, right: FlowPreset): boolean {
+  return left.name === right.name && sameRole(left.implementer, right.implementer) && sameRole(left.reviewer, right.reviewer);
+}
+
+/** Replace untouched legacy defaults while retaining every custom preset. */
+export function mergeSeededPresets(presets: FlowPreset[]): FlowPreset[] {
+  const custom = presets.filter((preset) => !LEGACY_SEEDED_PRESETS.some((legacy) => samePreset(preset, legacy)));
+  const names = new Set(custom.map((preset) => preset.name));
+  const missingSeeds = SEEDED_PRESETS.filter((preset) => !names.has(preset.name));
+  return [...missingSeeds, ...custom];
 }
 
 export function loadFlows(): Flow[] {
@@ -106,9 +161,9 @@ export function saveFlows(flows: Flow[]): void {
 export function loadPresets(): FlowPreset[] {
   const raw = readJson(presetsFile()) as PresetFile | null;
   const presets = Array.isArray(raw?.presets) ? raw.presets.filter(isPreset) : [];
-  if (presets.length > 0) return presets;
-  savePresets(SEEDED_PRESETS);
-  return SEEDED_PRESETS;
+  const merged = mergeSeededPresets(presets);
+  if (JSON.stringify(merged) !== JSON.stringify(presets)) savePresets(merged);
+  return merged;
 }
 
 export function savePresets(presets: FlowPreset[]): void {

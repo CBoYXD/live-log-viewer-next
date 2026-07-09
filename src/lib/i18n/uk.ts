@@ -144,6 +144,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "draft.directory": "директорія",
   "draft.dirAria": "Робоча директорія агента",
   "draft.reasoning": "reasoning",
+  "draft.modelAria": "Модель агента",
+  "draft.modelDefault": "модель: дефолт",
   "draft.reasoningAria": "Рівень reasoning-зусилля",
   "draft.effortDefault": "effort: дефолт",
   "draft.speedAria": "Режим швидкості Codex",

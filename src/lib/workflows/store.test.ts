@@ -6,7 +6,7 @@ import path from "node:path";
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so the store loads dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-wf-store-test-"));
-const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, normalizeStages, normalizeTemplate, saveWorkflows } =
+const { buildWorkflow, DEFAULT_FIXER, loadTemplates, loadWorkflows, mergeSeededTemplates, normalizeStages, normalizeTemplate, saveWorkflows } =
   await import("./store");
 
 type WorkflowTemplate = import("./types").WorkflowTemplate;
@@ -91,6 +91,41 @@ test("templates seed the canonical fullstack pipeline on first load", () => {
   expect(templates.map((template) => template.name)).toContain("fullstack");
   const fullstack = templates.find((template) => template.name === "fullstack")!;
   expect(fullstack.stages.at(-1)?.kind).toBe("review-loop");
+  expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent.model).toBe("gpt-5.6-terra");
+  const review = fullstack.stages.at(-1)!;
+  expect(review.kind === "review-loop" && review.reviewer.model).toBe("gpt-5.6-sol");
+  expect(templates.map((template) => template.name)).toContain("Terra → Sol review");
+});
+
+test("template seed migration upgrades the untouched legacy fullstack definition", () => {
+  const legacy = normalizeTemplate({
+    name: "fullstack",
+    setup: "bun install",
+    verify: "bun test && bun run build",
+    finish: "pr",
+    stages: [
+      {
+        kind: "implement",
+        agent: { engine: "codex", model: null, effort: "high" },
+        scope: "Backend/API: server logic, data layer, API routes. Leave UI components alone.",
+      },
+      {
+        kind: "implement",
+        agent: { engine: "claude", model: "fable", effort: null },
+        scope: "UI/frontend: components, hooks, styling, i18n labels. Build on the backend contract from the previous stage.",
+      },
+      {
+        kind: "review-loop",
+        reviewer: { engine: "codex", model: null, effort: "xhigh" },
+        fixer: { engine: "codex", model: null, effort: "low" },
+        roundLimit: 5,
+        reviewerMode: "headless",
+      },
+    ],
+  })!;
+  const merged = mergeSeededTemplates([legacy]);
+  const fullstack = merged.find((template) => template.name === "fullstack")!;
+  expect(fullstack.stages[0]?.kind === "implement" && fullstack.stages[0].agent.model).toBe("gpt-5.6-terra");
 });
 
 test("workflows round-trip through the store", () => {

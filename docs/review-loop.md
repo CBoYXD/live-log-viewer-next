@@ -13,10 +13,10 @@ Open a project's scheme view and click the **Flow** chip above a conversation
 pane. The "Start a flow" dialog makes that conversation the implementer and
 asks for:
 
-- **Preset** — an engine/model/effort pair for each role. Seeded presets
-  include `Codex high → Fable` (codex implementer at high reasoning, Claude
-  reviewer); edit or add your own in
-  `~/.claude/viewer-state/review-loop-presets.json`.
+- **Preset** — an engine/model/effort pair for each role. Seeded presets put
+  GPT-5.6-Terra on implementation and GPT-5.6-Sol on adversarial review, with
+  Fable and Sonnet combinations available alongside them. Edit or add your
+  own in `~/.config/agent-log-viewer/state/review-loop-presets.json`.
 - **Base** — the git ref reviews diff against: current `HEAD` or the
   merge-base with the default branch. Captured once, so later rounds re-check
   earlier fixes across the whole range.

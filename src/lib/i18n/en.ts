@@ -153,6 +153,8 @@ export const en = {
   "draft.directory": "directory",
   "draft.dirAria": "Agent working directory",
   "draft.reasoning": "reasoning",
+  "draft.modelAria": "Agent model",
+  "draft.modelDefault": "model: default",
   "draft.reasoningAria": "Reasoning effort level",
   "draft.effortDefault": "effort: default",
   "draft.speedAria": "Codex speed mode",

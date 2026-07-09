@@ -167,7 +167,9 @@ The viewer orchestrates implement→review cycles: a long-lived implementer
 agent in tmux, a fresh read-only reviewer per round over the full diff,
 automatic relay of findings, and a verdict deck in the scheme view. Start one
 from the **Flow** chip above a conversation pane; presets pair engines and
-reasoning efforts per role (e.g. `Codex high → Fable`).
+reasoning efforts per role (e.g. `Terra high → Sol xhigh`). New Codex agents
+also expose explicit GPT-5.6-Sol and GPT-5.6-Terra choices beside effort and
+speed.
 
 See [docs/review-loop.md](docs/review-loop.md) for the round protocol,
 presets, the HTTP automation API, and troubleshooting. A Claude Code skill

@@ -48,12 +48,14 @@ const CLAUDE_TINTS: [RegExp, ModelTint][] = [
   [/haiku/, { color: "#d9a58c", soft: "#f9f1ec" }],
 ];
 const CODEX_TINTS: [RegExp, ModelTint][] = [
+  [/terra/, { color: "#2b7a62", soft: "#e5f3ee" }],
+  [/sol/, { color: "#a55b18", soft: "#fbefe0" }],
   [/spark/, { color: "#5ea3e4", soft: "#ecf4fd" }],
   [/mini|nano/, { color: "#7fb1e8", soft: "#eff6fd" }],
   [/codex/, { color: "#1d55ab", soft: "#e4edfa" }],
 ];
 
-/** Identity color tinted by model family (fable deep orange, opus violet, spark light blue…). */
+/** Identity color tinted by model family (Terra green, Sol amber, Fable deep orange…). */
 export function modelTint(file: FileEntry): ModelTint {
   const base = ENGINE_TINTS[file.engine];
   if (!base) return NEUTRAL_TINT;

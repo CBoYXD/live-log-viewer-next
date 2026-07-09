@@ -155,6 +155,7 @@ export async function sendTask(id: string, paths: string[]): Promise<TaskSendRes
     means the CLI keeps its own defaults. */
 export interface SpawnAgentInput {
   engine: "claude" | "codex";
+  model?: string;
   cwd: string;
   effort?: string;
   fast?: boolean;
