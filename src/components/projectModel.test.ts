@@ -9,8 +9,10 @@ import {
   descendantCounts,
   isConversation,
   kidsIndex,
+  quietHistoryRows,
   quietRootsWithActiveDescendants,
   residualItems,
+  resolveProjectView,
   subtree,
 } from "./projectModel";
 
@@ -186,6 +188,47 @@ describe("buildArchiveBranchGroups", () => {
     expect(groups).toHaveLength(100);
     expect(groups.some((group) => group.key === "/root-0")).toBe(false);
     expect(groups.some((group) => group.key === "/root-104")).toBe(true);
+  });
+});
+
+describe("quietHistoryRows", () => {
+  test("returns root conversations only when roots exist", () => {
+    const files = [
+      entry({ path: "/root-old", mtime: 10 }),
+      entry({ path: "/root-new", mtime: 30 }),
+      entry({ path: "/root-new/child", parent: "/root-new", kind: "subagent", mtime: 40 }),
+      entry({ path: "/codex-child", root: "codex-sessions", engine: "codex", fmt: "codex", parent: "/root-new", mtime: 50 }),
+      entry({ path: "/other-project", project: "elsewhere", mtime: 60 }),
+    ];
+
+    expect(quietHistoryRows(files, "demo").map((file) => file.path)).toEqual(["/root-new", "/root-old"]);
+  });
+
+  test("falls back to project rows when no root conversations exist", () => {
+    const files = [
+      entry({ path: "/child-only", parent: "/missing", kind: "subagent", mtime: 10 }),
+      entry({ path: "/task", root: "claude-tasks", engine: "shell", kind: "background", fmt: "plain", mtime: 20 }),
+    ];
+
+    expect(quietHistoryRows(files, "demo").map((file) => file.path)).toEqual(["/task", "/child-only"]);
+  });
+});
+
+describe("resolveProjectView", () => {
+  test("defaults quiet projects with history rows to the list", () => {
+    expect(resolveProjectView({ preferredView: null, hasNodes: false, hasArchiveNodes: true, hasHistoryRows: true })).toBe("list");
+  });
+
+  test("defaults active projects to the scheme", () => {
+    expect(resolveProjectView({ preferredView: null, hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("scheme");
+  });
+
+  test("active projects stay on the scheme after a saved list selection", () => {
+    expect(resolveProjectView({ preferredView: "list", hasNodes: true, hasArchiveNodes: false, hasHistoryRows: true })).toBe("scheme");
+  });
+
+  test("keeps an explicit scheme selection when an archive scheme exists", () => {
+    expect(resolveProjectView({ preferredView: "scheme", hasNodes: false, hasArchiveNodes: true, hasHistoryRows: true })).toBe("scheme");
   });
 });
 

@@ -60,9 +60,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "dash.emptyTitle": "На схемі поки порожньо",
   "dash.emptyHint": "Відкрий пульт у правому нижньому куті і клікни розмову — вона з'явиться тут",
   "dash.viewScheme": "схема",
-  "dash.viewList": "список",
+  "dash.viewList": "розмови",
 
-  "trash.title": "На схемі порожньо, але в проєкті є записи",
+  "trash.title": "Кореневі розмови",
   "trash.hint": "Клік по рядку відкриває розмову нодою; смітник видаляє її файл з диска назавжди.",
   "trash.deletedFromDisk": "· видалено з диска",
   "trash.open": "Відкрити {title}",

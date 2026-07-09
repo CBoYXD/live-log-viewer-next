@@ -66,10 +66,10 @@ export const en = {
   "dash.emptyTitle": "The scheme is empty for now",
   "dash.emptyHint": "Open the switchboard in the bottom-right corner and click a conversation — it will appear here",
   "dash.viewScheme": "scheme",
-  "dash.viewList": "list",
+  "dash.viewList": "conversations",
 
   // ProjectTrash
-  "trash.title": "The scheme is empty, but the project has records",
+  "trash.title": "Root conversations",
   "trash.hint": "Clicking a row opens the conversation as a node; the trash icon deletes its file from disk permanently.",
   "trash.deletedFromDisk": "· deleted from disk",
   "trash.open": "Open {title}",

@@ -357,6 +357,34 @@ export function buildArchiveBranchGroups(files: FileEntry[], project: string, li
   return groups.sort((a, b) => tick5(b.smt) - tick5(a.smt) || a.key.localeCompare(b.key));
 }
 
+/** Root conversations for the quiet history list, with a non-empty fallback. */
+export function quietHistoryRows(files: FileEntry[], project: string): FileEntry[] {
+  const projectRows = files
+    .filter((file) => projectKey(file) === project)
+    .sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path));
+  const roots = projectRows.filter(isConversation);
+  return roots.length ? roots : projectRows;
+}
+
+export type ProjectView = "scheme" | "list";
+
+export function resolveProjectView({
+  preferredView,
+  hasNodes,
+  hasArchiveNodes,
+  hasHistoryRows,
+}: {
+  preferredView: ProjectView | null;
+  hasNodes: boolean;
+  hasArchiveNodes: boolean;
+  hasHistoryRows: boolean;
+}): ProjectView {
+  if (hasNodes) return "scheme";
+  const preferred = preferredView ?? "list";
+  if (preferred === "scheme") return hasArchiveNodes ? "scheme" : "list";
+  return hasHistoryRows ? "list" : "scheme";
+}
+
 export interface TreeCard {
   root: FileEntry;
   /** All descendants of the root, any activity. */

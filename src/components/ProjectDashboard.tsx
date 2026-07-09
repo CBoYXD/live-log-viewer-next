@@ -27,6 +27,9 @@ import {
   collapsedTrees,
   isChildConversation,
   projectKey,
+  type ProjectView,
+  resolveProjectView,
+  quietHistoryRows,
   quietRootsWithActiveDescendants,
   residualItems,
 } from "./projectModel";
@@ -80,10 +83,9 @@ const prefsKey = (project: string) => `llvCols:${project}`;
 /* Conversation drafts survive remounts and reloads within the tab: an agent
    booted from a draft keeps its waiting pane until the transcript arrives. */
 const draftsKey = (project: string) => `llvDrafts:${project}`;
-/* How a quiet project (no live conversations) is drawn — its recent history as
-   a scheme canvas or a flat file list. Persisted per project. */
+/* Project view choice: active work opens on the scheme, quiet history opens as
+   root conversations. User selections persist per project. */
 const emptyViewKey = (project: string) => `llvEmptyView:${project}`;
-type EmptyView = "scheme" | "list";
 
 function loadDrafts(project: string): string[] {
   try {
@@ -127,6 +129,40 @@ function gotoProject(project: string) {
   location.hash = "#p=" + encodeURIComponent(project);
 }
 
+function ProjectViewTabs({
+  value,
+  onChange,
+  floating = false,
+}: {
+  value: ProjectView;
+  onChange: (next: ProjectView) => void;
+  floating?: boolean;
+}) {
+  const { t } = useLocale();
+  return (
+    <div
+      className={`z-30 inline-flex items-center gap-0.5 rounded-full border border-line bg-panel p-0.5 shadow-card ${
+        floating ? "absolute left-3 top-3" : "mx-3 mt-3 self-start"
+      }`}
+    >
+      {(["scheme", "list"] as const).map((mode) => (
+        <button
+          key={mode}
+          type="button"
+          aria-pressed={value === mode}
+          onClick={() => onChange(mode)}
+          className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            value === mode ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"
+          }`}
+        >
+          {mode === "scheme" ? <Network className="h-3 w-3" aria-hidden /> : <List className="h-3 w-3" aria-hidden />}
+          {t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ProjectDashboard({
   files,
   flows,
@@ -150,7 +186,7 @@ export function ProjectDashboard({
   const pendingFocusRef = useRef<string | null>(null);
   const [prefs, setPrefs] = useState<ColumnPrefs>({ manual: [], hidden: [], expanded: [] });
   const [drafts, setDrafts] = useState<string[]>([]);
-  const [emptyView, setEmptyView] = useState<EmptyView>("scheme");
+  const [emptyView, setEmptyView] = useState<{ project: string; view: ProjectView } | null>(null);
   const [highlight, setHighlight] = useState<string | null>(null);
   const [taskPanelOpen, setTaskPanelOpen] = useState(false);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
@@ -170,7 +206,8 @@ export function ProjectDashboard({
     /* eslint-disable react-hooks/set-state-in-effect */
     setPrefs(loaded);
     setDrafts(loadDrafts(project));
-    setEmptyView(localStorage.getItem(emptyViewKey(project)) === "list" ? "list" : "scheme");
+    const savedView = localStorage.getItem(emptyViewKey(project));
+    setEmptyView(savedView === "scheme" || savedView === "list" ? { project, view: savedView } : null);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, [project, openNonce]);
   useEffect(() => {
@@ -339,8 +376,8 @@ export function ProjectDashboard({
     sessionStorage.setItem(draftsKey(project), JSON.stringify(next));
   };
 
-  const chooseEmptyView = (next: EmptyView) => {
-    setEmptyView(next);
+  const chooseEmptyView = (next: ProjectView) => {
+    setEmptyView({ project, view: next });
     localStorage.setItem(emptyViewKey(project), next);
   };
 
@@ -501,16 +538,21 @@ export function ProjectDashboard({
     () => files.filter((file) => projectKey(file) === project).sort((a, b) => b.mtime - a.mtime),
     [files, project],
   );
+  const historyRows = useMemo(() => quietHistoryRows(files, project), [files, project]);
   const archiveGroups = useMemo(
     () => (hasNodes ? [] : buildArchiveBranchGroups(groupFiles.filter((file) => !hiddenSet.has(file.path)), project, 100)),
     [hasNodes, groupFiles, hiddenSet, project],
   );
   const hasArchiveNodes = archiveGroups.length > 0;
-  /* A quiet project's history can be drawn as a scheme canvas or a flat list;
-     the toggle only earns its place when both are meaningful. When just one
-     is, that one wins regardless of the saved preference. */
-  const emptyToggle = !hasNodes && hasArchiveNodes && projectFiles.length > 0;
-  const schemeVisible = hasNodes || (hasArchiveNodes && (!emptyToggle || emptyView === "scheme"));
+  const schemeAvailable = hasNodes || hasArchiveNodes;
+  const listAvailable = historyRows.length > 0;
+  const projectView = resolveProjectView({
+    preferredView: emptyView?.project === project ? emptyView.view : null,
+    hasNodes,
+    hasArchiveNodes,
+    hasHistoryRows: listAvailable,
+  });
+  const viewToggle = schemeAvailable && listAvailable;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -607,37 +649,43 @@ export function ProjectDashboard({
       ) : null}
 
       {isMobile ? (
-        hasNodes || hasArchiveNodes ? (
-          <MobileFocusView
-            project={project}
-            groups={hasNodes ? schemeGroups : archiveGroups}
-            manual={hasNodes ? schemeManual : []}
-            files={files}
-            flows={flows}
-            tasks={hasNodes ? projectTasks : []}
-            drafts={hasNodes ? drafts : []}
-            loaded={loaded}
-            focus={highlight}
-            onSelect={openSwitchboardFile}
-            onClose={closeNode}
-            onDraftClose={removeDraft}
-            onDraftSpawned={draftSpawned}
-            onHandoff={addHandoffDraft}
-          />
-        ) : projectFiles.length ? (
-          <QuietFileList files={projectFiles} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
-        ) : (
-          <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
-            <div>
-              <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
-              <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+        <>
+          {viewToggle ? <ProjectViewTabs value={projectView} onChange={chooseEmptyView} /> : null}
+          {projectView === "scheme" && schemeAvailable ? (
+            <MobileFocusView
+              project={project}
+              groups={hasNodes ? schemeGroups : archiveGroups}
+              manual={hasNodes ? schemeManual : []}
+              files={files}
+              flows={flows}
+              tasks={hasNodes ? projectTasks : []}
+              drafts={hasNodes ? drafts : []}
+              loaded={loaded}
+              focus={highlight}
+              onSelect={openSwitchboardFile}
+              onClose={closeNode}
+              onDraftClose={removeDraft}
+              onDraftSpawned={draftSpawned}
+              onHandoff={addHandoffDraft}
+            />
+          ) : listAvailable ? (
+            <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
+          ) : (
+            <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
+              <div>
+                <div className="text-[13.5px] font-semibold text-dim">{t("dash.emptyTitle")}</div>
+                <div className="mt-0.5 text-[12px] text-dim">{t("dash.emptyHint")}</div>
+              </div>
             </div>
-          </div>
-        )
+          )}
+        </>
       ) : (
         <div className="flex min-h-0 min-w-0 flex-1">
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {schemeVisible ? (
+            {viewToggle ? (
+              <ProjectViewTabs value={projectView} onChange={chooseEmptyView} floating />
+            ) : null}
+            {projectView === "scheme" && schemeAvailable ? (
               <SchemeBoard
                 project={project}
                 groups={hasNodes ? schemeGroups : archiveGroups}
@@ -655,8 +703,8 @@ export function ProjectDashboard({
                 onHandoff={addHandoffDraft}
                 onTaskDraft={openTaskDraft}
               />
-            ) : projectFiles.length ? (
-              <QuietFileList files={projectFiles} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
+            ) : listAvailable ? (
+              <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
             ) : (
               <div className="flex flex-1 items-center justify-center px-4 py-5 text-center">
                 <div>
@@ -665,26 +713,6 @@ export function ProjectDashboard({
                 </div>
               </div>
             )}
-            {/* Quiet-project view switch: only when both a scheme and a list
-                are worth offering. Sits top-left, clear of the attention pill. */}
-            {emptyToggle ? (
-              <div className="absolute left-3 top-3 z-30 inline-flex items-center gap-0.5 rounded-full border border-line bg-panel p-0.5 shadow-card">
-                {(["scheme", "list"] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    aria-pressed={emptyView === mode}
-                    onClick={() => chooseEmptyView(mode)}
-                    className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-                      emptyView === mode ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"
-                    }`}
-                  >
-                    {mode === "scheme" ? <Network className="h-3 w-3" aria-hidden /> : <List className="h-3 w-3" aria-hidden />}
-                    {t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
-                  </button>
-                ))}
-              </div>
-            ) : null}
             {/* The create button floats in the bottom-left corner of the board —
                 away from the fixed attention pill in the top-right, above the
                 residual strip. On the phone the header keeps this button. */}
