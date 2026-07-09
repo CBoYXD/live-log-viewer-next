@@ -21,8 +21,11 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      # Trusted publishing needs npm 11.5.1+
-      - run: npm install -g npm@latest
+      # Node 24 already bundles npm >= 11.5.1 with its provenance deps (sigstore)
+      # intact. Reinstalling npm@latest here intermittently ships a broken global
+      # tree missing 'sigstore', which fails `npm publish` under trusted
+      # publishing (MODULE_NOT_FOUND: sigstore). Use the bundled npm instead.
+      - run: npm --version
 
       - name: Check tag matches package.json version
         run: |
