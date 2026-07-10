@@ -87,7 +87,7 @@ async function listFilesInternal(
   selectedProject?: string,
   options: FileScanOptions = {},
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
-  const persist = options.persist !== false;
+  const persist = options.persist === true;
   const scan = includeProjectCatalog
     ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist })
     : { files: await discoverFiles(), projectCatalog: [] };

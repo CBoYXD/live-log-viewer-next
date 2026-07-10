@@ -408,9 +408,12 @@ export class CodexAppServerClient {
         }
         const listener = this.requestListeners.values().next().value as ((request: AppServerRequest) => unknown | Promise<unknown>) | undefined;
         if (!listener) {
+          console.warn(`[codex app-server] rejected unhandled server request ${message.method}`);
           this.write({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Viewer has no handler for this request" } });
           return;
         }
+        // Requests have one response owner. Additional listeners are observers
+        // for notifications and never compete to answer a JSON-RPC request.
         Promise.resolve(listener({ id: message.id, method: message.method, params: message.params }))
           .then((result) => this.write({ jsonrpc: "2.0", id: message.id, result: result ?? {} }))
           .catch((error) => this.write({ jsonrpc: "2.0", id: message.id, error: { code: -32000, message: redact(error instanceof Error ? error.message : "request handler failed") } }));

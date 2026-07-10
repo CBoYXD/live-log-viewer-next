@@ -230,7 +230,6 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
       // Cursor older than retention: reload the snapshot, keep it visible.
       void join(true);
     });
-    armHeartbeat();
   }
 
   function handleEnvelope(data: string): void {

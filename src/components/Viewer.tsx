@@ -468,11 +468,7 @@ export function Viewer() {
           reconnecting / degraded / offline. Renders nothing while slice-one is
           disabled, so on the landing page it is inert. Docked bottom-left, clear
           of the bottom-right CornerStatus and the top-right attention anchor. */}
-      {isMobile ? null : (
-        <div className="pointer-events-auto fixed bottom-3 left-3 z-20">
-          <ConnectionPill />
-        </div>
-      )}
+      {isMobile ? null : <ConnectionPill />}
     </div>
   );
 }

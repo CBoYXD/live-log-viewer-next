@@ -13,11 +13,13 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost): net.Ser
   fs.mkdirSync(path.dirname(socketPath), { recursive: true, mode: 0o700 });
   try { fs.unlinkSync(socketPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const server = net.createServer((socket) => {
-    socket.setTimeout(30_000, () => socket.destroy());
+    socket.setTimeout(31_000, () => socket.destroy());
     let buffer = "";
     socket.on("data", (chunk) => {
       buffer += String(chunk);
       if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) return socket.destroy();
+      // The client opens one connection per request, so one frame owns the
+      // socket and any bytes after its delimiter are intentionally ignored.
       const newline = buffer.indexOf("\n");
       if (newline < 0) return;
       const frame = buffer.slice(0, newline);

@@ -50,6 +50,10 @@ const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
 const sentKey = (id: string) => "llvSent:" + id;
 
+export function deliveryAttemptKey(current: string, stored?: string): string {
+  return stored || current;
+}
+
 /** A receipt still awaiting durable delivery (a migration hold) must never be
     pruned by the pane/spawn TTLs — its text lands on the successor, whose
     transcript is a different file, so only an explicit resolve/dismiss clears it. */
@@ -233,14 +237,14 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     sessionStorage.setItem(sentKey(cardId), JSON.stringify(next));
   };
 
-  const send = async (overrideText?: string) => {
+  const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
     setBusy(true);
     setStatus(null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
        against this id so the successor never receives the same prompt twice. */
-    const clientMessageId = idempotencyKey.current;
+    const clientMessageId = deliveryAttemptKey(idempotencyKey.current, retry?.clientMessageId);
     try {
       const res = await fetch("/api/tmux", {
         method: "POST",
@@ -283,7 +287,8 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         state: held ? (json.outcome as DeliveryReceiptState) : "sent",
         clientMessageId,
       };
-      persistSent([...sent, entry].slice(-SENT_LIMIT));
+      const prior = retry ? sent.filter((item) => item.id !== retry.receiptId) : sent;
+      persistSent([...prior, entry].slice(-SENT_LIMIT));
       idempotencyKey.current = mintIdempotencyKey(); // next draft is a new message
       setText("");
       attachments.clear();
@@ -467,8 +472,7 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
                   disabled={busy || voiceSending}
                   className="inline-flex shrink-0 items-center rounded px-0.5 text-dim hover:text-accent disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                   onClick={() => {
-                    persistSent(sent.filter((item) => item.id !== entry.id));
-                    void send(entry.text);
+                    void send(entry.text, { receiptId: entry.id, clientMessageId: entry.clientMessageId });
                   }}
                 >
                   <RotateCcw className="h-3 w-3" aria-hidden />

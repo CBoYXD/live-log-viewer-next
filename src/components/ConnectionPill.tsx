@@ -95,5 +95,9 @@ export function ConnectionPill({ legacy, compact }: ConnectionPillProps) {
   const resynced = resyncedAt !== null;
   const announce = useThrottledAnnounce(resynced ? t("runtime.announce.resynced") : t(ANNOUNCE_KEY[connection]));
   if (!enabled) return null;
-  return <ConnectionPillView connection={connection} resynced={resynced} legacy={legacy} compact={compact} announce={announce} t={t} />;
+  return (
+    <div className={compact ? "pointer-events-auto absolute right-2 top-1.5 z-30" : "pointer-events-auto fixed bottom-3 left-3 z-20"}>
+      <ConnectionPillView connection={connection} resynced={resynced} legacy={legacy} compact={compact} announce={announce} t={t} />
+    </div>
+  );
 }

@@ -30,7 +30,7 @@ export function runtimeEventStream(client: RuntimeHostClient, after: number, sig
       if (stopped || pulling) return;
       pulling = true;
       try {
-        const replay = await client.waitEvents(cursor, HEARTBEAT_MS);
+        const replay = await client.waitEvents(cursor, HEARTBEAT_MS, signal);
         if (stopped) return;
         if (replay.reset) {
           controller.enqueue(encoder.encode(controlFrame("reset", { floorSeq: replay.floorSeq })));

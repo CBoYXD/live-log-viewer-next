@@ -180,18 +180,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     const bundle = buildImagePayload(prompt, images);
     imagePaths = bundle.imagePaths;
     const account = accountManager.resolveSpawn(engine, body.accountId);
-    const runtimeClient = runtimeEventsEnabled() ? runtimeHostClient() : null;
+    let runtimeClient = runtimeEventsEnabled() ? runtimeHostClient() : null;
     const operationId = runtimeClient ? newOperationId() : null;
     const src = parentFromBody(body);
-    if (runtimeEventsEnabled() && !runtimeClient) throw new Error("runtime host socket is unavailable");
     if (runtimeClient && operationId) {
-      await runtimeClient.operation({
-        scope: runtimeScope("operation", operationId),
-        kind: "spawn.intent",
-        operationId,
-        producerKey: `viewer-spawn:${operationId}`,
-        payload: { engine, cwd, accountId: account.accountId, parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null },
-      });
+      try {
+        await runtimeClient.operation({
+          scope: runtimeScope("operation", operationId),
+          kind: "spawn.intent",
+          operationId,
+          producerKey: `viewer-spawn:${operationId}`,
+          payload: { engine, cwd, accountId: account.accountId, parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null },
+        });
+      } catch {
+        console.warn("[runtime] spawn bookkeeping unavailable; continuing through the legacy spawn path");
+        runtimeClient = null;
+      }
     }
     const spec = freshSpecFor(engine, cwd, {
       model: selectedModel.model,
@@ -231,17 +235,21 @@ export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse
     }
     if (runtimeClient && operationId) {
       const childConversationId = viewerConversationId(engine, childPath);
-      await runtimeClient.append({
-        scope: runtimeScope("edge", operationId),
-        kind: "edge.created",
-        producerKey: `viewer-spawn-edge:${operationId}`,
-        payload: {
-          edge: "viewer_spawn",
-          childConversationId,
-          parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null,
-          operationId,
-        },
-      });
+      try {
+        await runtimeClient.append({
+          scope: runtimeScope("edge", operationId),
+          kind: "edge.created",
+          producerKey: `viewer-spawn-edge:${operationId}`,
+          payload: {
+            edge: "viewer_spawn",
+            childConversationId,
+            parentConversationId: src && transcriptAllowed(src) ? conversationForTranscript(src) : null,
+            operationId,
+          },
+        });
+      } catch {
+        console.warn("[runtime] spawned agent is healthy; lineage bookkeeping will reconcile later");
+      }
     }
     if (src && transcriptAllowed(src)) {
       if (childPath) rememberHandoffChild(childPath, src);

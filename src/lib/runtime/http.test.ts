@@ -50,3 +50,13 @@ test("runtime command HTTP handling preserves validation, CSRF, status, and conf
   const conflict = await handleRuntimeCommand(request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }), "send", { enabled: () => true, client: () => conflictClient });
   expect(conflict.status).toBe(409);
 });
+
+test("runtime command routes fail closed while activation is disabled", async () => {
+  const response = await handleRuntimeCommand(
+    request({ conversationId: "conv-one", text: "continue", idempotencyKey: "send-one" }),
+    "send",
+    { enabled: () => false, client: () => null },
+  );
+  expect(response.status).toBe(503);
+  expect(await response.json()).toEqual({ error: "runtime events are disabled" });
+});

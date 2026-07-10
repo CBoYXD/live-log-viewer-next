@@ -597,18 +597,8 @@ export function receiptIsTerminal(status: ReceiptStatus): boolean {
  * Retry (never re-sends server-side) and replaced on Edit-and-resend.
  */
 export function mintIdempotencyKey(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return `op_${crypto.randomUUID()}`;
-  // Deterministic fallback for environments without WebCrypto (never in prod).
-  return `op_${Math.abs(hashString(String(performanceNow()))).toString(36)}`;
-}
-
-function performanceNow(): number {
-  if (typeof performance !== "undefined" && typeof performance.now === "function") return performance.now();
-  return 0;
-}
-
-function hashString(input: string): number {
-  let hash = 0;
-  for (let i = 0; i < input.length; i += 1) hash = (Math.imul(31, hash) + input.charCodeAt(i)) | 0;
-  return hash;
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return `op_${crypto.randomUUID()}`;
+  } catch { /* plain HTTP or restricted WebCrypto */ }
+  return `op_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 }

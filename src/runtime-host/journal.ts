@@ -212,7 +212,7 @@ export class RuntimeJournal {
         PRIMARY KEY(kind, id)
       );
       CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL, event_seq INTEGER NOT NULL, state TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS operation_receipts (operation_id TEXT PRIMARY KEY, event_seq INTEGER NOT NULL, revision INTEGER NOT NULL, state TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS producer_receipts (producer_kind TEXT NOT NULL, producer_key TEXT NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY(producer_kind, producer_key));
       CREATE TABLE IF NOT EXISTS operations (
         operation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
         request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
@@ -224,6 +224,10 @@ export class RuntimeJournal {
       );
     `);
     this.migrateLegacyEvents();
+    for (const row of this.db.query<EventRow, []>("SELECT * FROM events WHERE producer_key IS NOT NULL").all()) {
+      this.db.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?) ON CONFLICT(producer_kind, producer_key) DO NOTHING")
+        .run(row.producer_kind, row.producer_key, stableJson(toEvent(row)));
+    }
     this.db.exec("DROP INDEX IF EXISTS events_producer_key; CREATE UNIQUE INDEX IF NOT EXISTS events_event_id ON events(event_id); CREATE UNIQUE INDEX IF NOT EXISTS events_scope_revision ON events(scope, revision); CREATE UNIQUE INDEX IF NOT EXISTS events_producer_key ON events(producer_kind, producer_key) WHERE producer_key IS NOT NULL;");
     this.metaSetDefault("schema_version", String(RUNTIME_SCHEMA_VERSION));
     this.metaSetDefault("seq", "0");
@@ -369,7 +373,7 @@ export class RuntimeJournal {
         filesRevision: Number(this.meta("files_revision")),
         sessions: this.entityValues<RuntimeSession>("session"),
         attentions: this.entityValues<RuntimeAttention>("attention"),
-        recentOperations: this.entityValues<RuntimeOperationReceipt>("operation").sort((left, right) => right.at.localeCompare(left.at)).slice(0, 100),
+        recentOperations: this.recentEntityValues<RuntimeOperationReceipt>("operation", 100),
         edges: this.entityValues<RuntimeEdge>("edge"),
         flows: this.scopedValues<RuntimeSnapshot["flows"][number]["value"]>("flow"),
         workflows: this.scopedValues<RuntimeSnapshot["workflows"][number]["value"]>("workflow"),
@@ -491,6 +495,9 @@ export class RuntimeJournal {
       if (!anchor) throw new RuntimeJournalFault("journal compaction anchor is missing");
       this.db.query("DELETE FROM events WHERE seq <= ?").run(anchor.seq);
       this.db.exec("DELETE FROM consumer_checkpoints WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.event_id = consumer_checkpoints.event_id)");
+      this.db.query("DELETE FROM outbox WHERE state = 'completed' AND event_seq <= ?").run(anchor.seq);
+      this.db.query("DELETE FROM operations WHERE event_seq <= ? AND operation_id NOT IN (SELECT substr(id, 8) FROM outbox WHERE state = 'pending' AND id LIKE 'effect:%')").run(anchor.seq);
+      this.db.query("DELETE FROM entities WHERE kind = 'operation' AND checkpoint_seq <= ?").run(anchor.seq);
       this.metaSet("anchor_seq", String(anchor.seq));
       this.metaSet("anchor_hash", anchor.hash);
       this.db.exec("COMMIT");
@@ -505,8 +512,8 @@ export class RuntimeJournal {
   private appendInTransaction(input: NormalizedRuntimeEventInput): RuntimeEvent {
     const producerKey = input.producer.eventKey ?? null;
     if (producerKey) {
-      const duplicate = this.db.query<EventRow, [string, string]>("SELECT * FROM events WHERE producer_kind = ? AND producer_key = ?").get(input.producer.kind, producerKey);
-      if (duplicate) return toEvent(duplicate);
+      const duplicate = this.db.query<{ event_json: string }, [string, string]>("SELECT event_json FROM producer_receipts WHERE producer_kind = ? AND producer_key = ?").get(input.producer.kind, producerKey);
+      if (duplicate) return JSON.parse(duplicate.event_json) as RuntimeEvent;
     }
     const now = this.now();
     const seq = Number(this.meta("seq")) + 1;
@@ -553,11 +560,11 @@ export class RuntimeJournal {
       )
     `).run(event);
     this.db.query("INSERT INTO scope_revisions(scope, revision) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision").run(scope, revision);
+    if (producerKey) this.db.query("INSERT INTO producer_receipts(producer_kind, producer_key, event_json) VALUES (?, ?, ?)").run(input.producer.kind, producerKey, stableJson(toEvent(event)));
     const projection = stableJson({ revision, lastKind: input.kind, payload: input.payload });
     this.db.query("INSERT INTO projections(scope, revision, state_json, checkpoint_seq) VALUES (?, ?, ?, ?) ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision, state_json=excluded.state_json, checkpoint_seq=excluded.checkpoint_seq").run(scope, revision, projection, seq);
     this.project(event, input.payload);
     if (input.effect) this.insertEffect(input.effect, seq);
-    if (input.operationId) this.db.query("INSERT INTO operation_receipts(operation_id, event_seq, revision, state) VALUES (?, ?, ?, 'accepted') ON CONFLICT(operation_id) DO NOTHING").run(input.operationId, seq, revision);
     this.metaSet("seq", String(seq));
     this.metaSet("published_seq", String(seq));
     this.metaSet("hash", hash);
@@ -851,6 +858,12 @@ export class RuntimeJournal {
 
   private entityValues<T>(kind: string): T[] {
     return this.db.query<{ state_json: string }, [string]>("SELECT state_json FROM entities WHERE kind = ? ORDER BY id").all(kind).map((row) => JSON.parse(row.state_json) as T);
+  }
+
+  private recentEntityValues<T>(kind: string, limit: number): T[] {
+    return this.db.query<{ state_json: string }, [string, number]>("SELECT state_json FROM entities WHERE kind = ? ORDER BY checkpoint_seq DESC LIMIT ?")
+      .all(kind, limit)
+      .map((row) => JSON.parse(row.state_json) as T);
   }
 
   private scopedValues<T>(kind: string): Array<{ revision: number; value: T }> {

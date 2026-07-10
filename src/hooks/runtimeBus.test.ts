@@ -267,9 +267,9 @@ describe("runtimeBus reconnect", () => {
     h.bus.start();
     await flush();
     h.sources[0]!.open();
-    h.clock.advance(15_000);
+    h.clock.advance(14_000);
     h.sources[0]!.named("heartbeat", { seq: 100 });
-    h.clock.advance(15_000); // would have fired without the heartbeat reset
+    h.clock.advance(14_000); // would have fired without the heartbeat reset
     expect(h.bus.getState().connection).toBe("live");
   });
 });

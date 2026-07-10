@@ -41,6 +41,7 @@ export class RuntimeHostFence {
 
 export class RuntimeHost {
   private consumerQueue: Promise<void> = Promise.resolve();
+  private readonly consumerFailures = new Map<string, number>();
 
   constructor(readonly journal: RuntimeJournal, private readonly consumers?: RuntimeConsumerPorts) {}
 
@@ -76,10 +77,27 @@ export class RuntimeHost {
     const consumerEvent = session?.flowId && event.kind === "turn-ended" && typeof event.payload.flowId !== "string"
       ? { ...event, payload: { ...event.payload, flowId: session.flowId } }
       : event;
-    for (const projection of await consumeRuntimeEvent(consumerEvent, this.consumers)) {
-      await this.consume(this.journal.append(projection));
+    try {
+      for (const projection of await consumeRuntimeEvent(consumerEvent, this.consumers)) {
+        await this.consume(this.journal.append(projection));
+      }
+      this.consumerFailures.delete(event.eventId);
+      this.journal.markConsumerCompleted(event.eventId, "orchestration");
+    } catch (error) {
+      const failures = (this.consumerFailures.get(event.eventId) ?? 0) + 1;
+      this.consumerFailures.set(event.eventId, failures);
+      if (failures >= 3) {
+        console.error(`[runtime consumer] quarantined event ${event.eventId} after ${failures} failures`);
+        this.journal.markConsumerCompleted(event.eventId, "orchestration");
+        this.consumerFailures.delete(event.eventId);
+      }
+      throw error;
     }
-    this.journal.markConsumerCompleted(event.eventId, "orchestration");
+  }
+
+  private async recoverConsumersBestEffort(): Promise<void> {
+    try { await this.recoverConsumers(); }
+    catch { console.error("[runtime consumer] recovery deferred after a consumer failure"); }
   }
 
   async handle(request: RuntimeSocketRequest): Promise<RuntimeSocketResponse> {
@@ -91,13 +109,14 @@ export class RuntimeHost {
       else if (request.method === "append" || request.method === "operation") {
         const event = request.params?.event as RuntimeEventInput;
         const appended = this.journal.append(event);
-        await this.consumeExclusive(appended);
+        try { await this.consumeExclusive(appended); }
+        catch { console.error("[runtime consumer] committed event will retry asynchronously"); }
         result = request.method === "operation" && event.operationId
           ? { operationId: event.operationId, state: "accepted", seq: appended.seq, revision: appended.revision }
           : appended;
       } else if (request.method === "command") {
         result = this.journal.executeOperation(request.params?.command as RuntimeOperationCommand);
-        await this.recoverConsumers();
+        await this.recoverConsumersBestEffort();
       } else if (request.method === "operation-status") {
         result = this.journal.operationResult(String(request.params?.operationId ?? ""));
       } else throw new Error("runtime request method is unsupported");

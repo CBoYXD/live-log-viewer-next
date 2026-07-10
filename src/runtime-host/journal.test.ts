@@ -445,11 +445,34 @@ test("runtime host retries an uncheckpointed consumer after a committed event", 
       },
     },
   };
-  expect((await host.handle({ id: "request-one", ...request })).ok).toBe(false);
+  // The event commit remains successful even when its asynchronous consumer
+  // needs another pass; callers must never retry an already-committed append.
+  expect((await host.handle({ id: "request-one", ...request })).ok).toBe(true);
   expect((await host.handle({ id: "request-two", ...request })).ok).toBe(true);
   expect((await host.handle({ id: "request-three", ...request })).ok).toBe(true);
   expect(attempts).toBe(2);
   expect(journal.snapshot().flows[0]).toMatchObject({ value: { id: "flow-one", state: "spawn_pending" } });
+  journal.close();
+});
+
+test("runtime host quarantines a deterministic consumer failure without poisoning commands", async () => {
+  const journal = new RuntimeJournal(path.join(sandbox("consumer-poison"), "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  let attempts = 0;
+  const host = new RuntimeHost(journal, {
+    flowReady: () => { attempts += 1; throw new Error("poison event"); },
+    workflowStageCompleted: () => undefined,
+    taskDeliveryAcknowledged: () => undefined,
+  });
+  const event = {
+    scope: runtimeScope("session", "implementer"),
+    kind: "turn.completed",
+    producerKey: "terminal-consumer-poison",
+    payload: { flowId: "flow-one", readyNote: "REVIEW_READY: poison" },
+  };
+  for (let index = 0; index < 4; index += 1) {
+    expect((await host.handle({ id: `request-${index}`, method: "append", params: { event } })).ok).toBe(true);
+  }
+  expect(attempts).toBe(3);
   journal.close();
 });
 
@@ -574,10 +597,12 @@ test("journal compaction emits a deterministic retention reset and leaves an anc
   const dir = sandbox("compact");
   const filename = path.join(dir, "events.sqlite");
   const journal = new RuntimeJournal(filename, { maxEvents: 2, now: () => 100 });
-  for (let i = 0; i < 4; i += 1) journal.append({ scope: runtimeScope("session", "one"), kind: "item.completed", payload: { i } });
+  const first = journal.append({ scope: runtimeScope("session", "one"), kind: "item.completed", payload: { i: 0 }, producerKey: "compact-dedupe" });
+  for (let i = 1; i < 4; i += 1) journal.append({ scope: runtimeScope("session", "one"), kind: "item.completed", payload: { i } });
   expect(journal.replay(0)).toEqual({ reset: true, floorSeq: 2, events: [] });
   expect(journal.replay(999)).toEqual({ reset: true, floorSeq: 2, events: [] });
   expect(journal.replay(2).events.map((event) => event.seq)).toEqual([3, 4]);
+  expect(journal.append({ scope: runtimeScope("session", "one"), kind: "item.completed", payload: { i: 0 }, producerKey: "compact-dedupe" }).eventId).toBe(first.eventId);
   journal.close();
   const reopened = new RuntimeJournal(filename, { maxEvents: 2 });
   expect(reopened.replay(2).events).toHaveLength(2);
