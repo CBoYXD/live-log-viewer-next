@@ -26,6 +26,10 @@ asks for:
   tools disabled, nothing to clean up) or pane (an interactive tmux agent you
   can watch and interrogate).
 - **Round limit** — a forced pause after N rounds (default 5), extendable.
+- **Specification and acceptance criteria** — optional pinned review context,
+  stored with the flow and shown to every fresh reviewer. Leave it blank and
+  the kickoff asks the implementer to create `spec.md` before its first
+  `REVIEW_READY:` marker.
 
 ## How a round runs
 
@@ -50,7 +54,7 @@ Everything the UI does is plain HTTP against the local server:
 
 - `GET /api/flows` — flows and presets.
 - `POST /api/flows` — create: `{implementerPath, preset?, roles?, baseMode,
-  mode, reviewerMode, roundLimit}`.
+  spec?, mode, reviewerMode, roundLimit}`.
 - `PATCH /api/flows/<id>` — `{action: pause | resume | set-mode | advance |
   retry-round | cancel-round | extend | another-round | close}`. `advance`
   and `retry-round` accept an optional `note` the next reviewer sees as the

@@ -5,10 +5,13 @@ import type { Flow, Round } from "./types";
  * here without touching the state machine that delivers them.
  */
 
-export function kickoffPrompt(): string {
+export function kickoffPrompt(spec?: string): string {
   return [
     "You are now in an implement-review loop controlled by the local log viewer.",
     "",
+    ...(spec
+      ? ["Pinned flow specification and acceptance criteria:", spec, ""]
+      : ["Before your first REVIEW_READY, write spec.md with the task statement and an acceptance-criteria list using entries such as `AC1: …`.", ""]),
     "Work normally in this long-lived implementer session. When the work is ready for a fresh independent review, end your final assistant message with a line that starts exactly with:",
     "REVIEW_READY: <one-line note>",
     "Do not print the REVIEW_READY marker now and never quote it at the start of a line when acknowledging these instructions — print it only when the work is actually ready for review.",
@@ -28,6 +31,9 @@ export function reviewerPrompt(flow: Flow, round: Round): string {
     "",
     `Working directory: ${flow.cwd}`,
     `Review scope: git diff ${flow.baseRef}...HEAD plus uncommitted changes in the same working tree.`,
+    "",
+    "Pinned flow specification and acceptance criteria:",
+    flow.spec?.trim() || "No pinned specification was supplied for this flow.",
     /* The note comes from the implementer's REVIEW_READY line or, on a
        user-triggered round, from the user directly. */
     round.readyNote ? `Ready note: ${round.readyNote}` : "Ready note: none provided.",

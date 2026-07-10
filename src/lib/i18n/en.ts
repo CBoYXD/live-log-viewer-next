@@ -495,6 +495,8 @@ export const en = {
   "flowDialog.preset": "preset",
   "flowDialog.rolesManualOpen": "▾ roles manually",
   "flowDialog.rolesManual": "▸ roles manually (model / effort)",
+  "flowDialog.spec": "specification and acceptance criteria",
+  "flowDialog.specPlaceholder": "Task statement\nAC1: …\nAC2: …",
   "flowDialog.implementer": "implementer",
   "flowDialog.reviewer": "reviewer",
   "flowDialog.diffBase": "diff base",

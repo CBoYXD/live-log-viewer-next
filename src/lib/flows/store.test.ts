@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry } from "@/lib/agent/registry";
 import { CODEX_SOL_MODEL, CODEX_TERRA_MODEL } from "@/lib/agent/models";
 
-import { loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows } from "./store";
+import { FLOWS_SCHEMA_VERSION, loadFlows, mergeSeededPresets, reconcileFlowConversationOwnership, saveFlows } from "./store";
 import type { Flow, FlowPreset } from "./types";
 
 const LEGACY_DEFAULT: FlowPreset = {
@@ -28,6 +28,44 @@ test("seed migration replaces an untouched legacy preset with Terra and Sol role
 test("seed migration preserves a customized preset", () => {
   const custom = { ...LEGACY_DEFAULT, reviewer: { engine: "claude" as const, model: "fable", effort: "max" } };
   expect(mergeSeededPresets([custom])).toContainEqual(custom);
+});
+
+test("flow specs persist in the versioned state file and legacy flow entries load", () => {
+  const previousState = process.env.LLV_STATE_DIR;
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-spec-"));
+  process.env.LLV_STATE_DIR = sandbox;
+  const flow = {
+    id: "spec-flow",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd: "/repo",
+    implementerPath: "/implementer.jsonl",
+    roles: { implementer: { engine: "codex" as const, model: null, effort: "high" }, reviewer: { engine: "codex" as const, model: null, effort: "xhigh" } },
+    baseRef: "base",
+    baseMode: "head" as const,
+    mode: "auto" as const,
+    reviewerMode: "headless" as const,
+    roundLimit: 5,
+    state: "waiting_ready" as const,
+    stateDetail: null,
+    rounds: [],
+    createdAt: "now",
+    closedAt: null,
+  } satisfies Flow;
+  try {
+    saveFlows([{ ...flow, spec: "Ship the feature\nAC1: Reviewer receives this context" }]);
+    expect(JSON.parse(fs.readFileSync(path.join(sandbox, "flows.json"), "utf8"))).toMatchObject({
+      schemaVersion: FLOWS_SCHEMA_VERSION,
+      flows: [{ spec: "Ship the feature\nAC1: Reviewer receives this context" }],
+    });
+
+    fs.writeFileSync(path.join(sandbox, "flows.json"), JSON.stringify({ flows: [flow] }));
+    expect(loadFlows()).toEqual([{ ...flow, implementerConversationId: null, pausedState: null }]);
+  } finally {
+    if (previousState === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousState;
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test("flow bindings follow active conversation generations", () => {
