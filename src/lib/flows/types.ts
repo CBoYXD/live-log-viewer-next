@@ -30,6 +30,15 @@ export type FlowState =
 
 export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
+export type FlowBlock = {
+  reason: "rate_limited";
+  /** Stable address for a future continue-on-account action. */
+  conversationId: string | null;
+  /** Exhausted account. A successor action can exclude it from targets. */
+  accountId: string | null;
+  resetAt: number | null;
+};
+
 export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
@@ -82,6 +91,8 @@ export type Flow = {
   pausedState?: FlowState | null;
   /** Human-readable reason shown on the strip for needs_decision/paused. */
   stateDetail: string | null;
+  /** Ephemeral read-model block derived from the attached implementer. */
+  block?: FlowBlock | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;

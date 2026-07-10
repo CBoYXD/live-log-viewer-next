@@ -62,6 +62,7 @@ function attentionSnippet(t: TFunction, item: AttentionItem): string {
     const first = q.questions?.[0];
     return first?.header || first?.question.split("\n")[0] || t("status.awaitingAnswer");
   }
+  if (item.file.rateLimit) return t("status.rateLimited");
   const w = item.file.waitingInput;
   if (w) return w.menu?.question.split("\n")[0] || w.screenTail || t("status.awaitingTerminal");
   return t("status.stalled");
@@ -299,7 +300,7 @@ export function Viewer() {
     const ids = files
       .map((file) => ({
         file,
-        id: file.pendingQuestion || file.waitingInput ? attentionId(file) : null,
+        id: file.pendingQuestion || file.rateLimit || file.waitingInput ? attentionId(file) : null,
       }))
       .filter((item): item is { file: FileEntry; id: string } => item.id !== null);
     if (seenQuestionsRef.current === null) {

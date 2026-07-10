@@ -9,7 +9,7 @@ import { useLocale } from "@/lib/i18n";
 import { useRuntimeFlow } from "@/hooks/useRuntime";
 import { currentRound, flowLinkPhase, type FlowLinkPhase } from "@/components/scheme/agentLinks";
 
-import { patchFlow, PENDING_ACTIONS, stateLabel } from "./flowModel";
+import { flowPresentation, patchFlow } from "./flowModel";
 
 /* Hub tone per link phase: work in accent, waiting-on-you in amber, done in
    verdict green, idle gray — the palette the strip and verdict chips use. */
@@ -45,9 +45,10 @@ export function FlowHub({
   /** Matches the board's layout-glide transition. */
   moveTransition: string;
 }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   /* Event-driven progression wins over the poll, same as the strip. */
-  const flow = useRuntimeFlow(polledFlow.id) ?? polledFlow;
+  const runtimeFlow = useRuntimeFlow(polledFlow.id);
+  const flow = runtimeFlow ? { ...runtimeFlow, block: polledFlow.block } : polledFlow;
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,9 +56,10 @@ export function FlowHub({
   const phase = flowLinkPhase(flow.state);
   const tone = PHASE_TONE[phase];
   const round = currentRound(flow)?.n ?? 0;
-  const state = stateLabel(t, flow.state);
+  const presentation = flowPresentation(t, flow, locale);
+  const state = presentation.label;
   const label = round > 0 ? t("flowHub.aria", { n: round, state }) : t("flowHub.ariaNoRound", { state });
-  const pending = PENDING_ACTIONS[flow.state];
+  const pending = presentation.pending;
   const closed = flow.state === "closed" || flow.state === "approved";
 
   const run = async (action: FlowAction) => {
@@ -103,9 +105,9 @@ export function FlowHub({
           <span className="flex min-w-0 items-center gap-1.5">
             <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone }} aria-hidden />
             <span className="shrink-0 text-[11.5px] font-bold">{state}</span>
-            {flow.stateDetail ? (
-              <span className="min-w-0 truncate text-[10.5px] font-semibold text-dim" title={flow.stateDetail}>
-                {flow.stateDetail}
+            {presentation.detail ? (
+              <span className="min-w-0 truncate text-[10.5px] font-semibold text-dim" title={presentation.detail}>
+                {presentation.detail}
               </span>
             ) : null}
             {busy ? <RefreshCw className="ml-auto h-3 w-3 shrink-0 animate-spin text-dim" aria-hidden /> : null}

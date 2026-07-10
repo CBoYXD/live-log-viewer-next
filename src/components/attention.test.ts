@@ -60,6 +60,20 @@ describe("attentionId", () => {
     expect(attentionId(entry({ path: "/live", activity: "live" }), NOW)).toBeNull();
   });
 
+  test("a rate-limited live conversation enters hard-blocked attention", () => {
+    const limited = entry({
+      path: "/limited",
+      activity: "live",
+      proc: "running",
+      rateLimit: { source: "pane", accountId: "main", window: "session", resetAt: NOW + 900 },
+    });
+
+    expect(attentionId(limited, NOW)).toBe(`/limited:rate-limited:${NOW + 900}`);
+    expect(buildAttentionQueue([limited], NOW)).toMatchObject([
+      { file: { path: "/limited" }, tier: "blocked", since: limited.mtime },
+    ]);
+  });
+
   /* The toast seen-set and push-sent.json entries carry ids in the historical
      inline format; the shared helper must reproduce it byte for byte. */
   test("id strings are byte-identical to the historical inline derivation", () => {

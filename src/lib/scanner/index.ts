@@ -119,6 +119,7 @@ async function listFilesInternal(
     entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
     const probe = await waitingInputProbe(entry);
     entry.waitingInput = probe.waiting;
+    entry.rateLimit = probe.rateLimit;
     /* A stalled transcript whose pane sits at a plain composer was interrupted
        mid-turn (Esc leaves the turn open in the jsonl): the agent is idle, not
        blocked, so it must not wear the «interrupted or waiting for permission» state. */

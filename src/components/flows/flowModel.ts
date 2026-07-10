@@ -1,10 +1,11 @@
 import { useMemo, useSyncExternalStore } from "react";
 
-import { getLocale, type MessageKey, type TFunction, translate } from "@/lib/i18n";
+import { getLocale, type Locale, type MessageKey, type TFunction, translate } from "@/lib/i18n";
 import type { Flow, FlowAction, FlowRoleKey, FlowState, ReviewVerdict } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
 import { isConversation } from "@/components/projectModel";
+import { formatRateLimitTime } from "@/components/rateLimit";
 
 /** Fired after any successful flow PATCH so pollers refresh immediately. */
 export const FLOWS_CHANGED_EVENT = "llv:flows-changed";
@@ -177,8 +178,28 @@ export const PENDING_ACTIONS: Partial<Record<FlowState, { labelKey: MessageKey; 
   done_comment: { labelKey: "flowStrip.anotherRound", action: "another-round" },
 };
 
+export function flowPresentation(t: TFunction, flow: Flow, locale: Locale) {
+  if (flow.block?.reason === "rate_limited") {
+    return {
+      label: t("flowState.blocked_rate_limited"),
+      detail: flow.block.resetAt
+        ? t("flowState.rate_limit_until", { time: formatRateLimitTime(flow.block.resetAt, locale) })
+        : t("flowState.rate_limit_wait"),
+      attention: true,
+      pending: null,
+    };
+  }
+  return {
+    label: stateLabel(t, flow.state),
+    detail: flow.stateDetail,
+    attention: ATTENTION_STATES.has(flow.state),
+    pending: PENDING_ACTIONS[flow.state] ?? null,
+  };
+}
+
 /** The loop side working right now — drives the role tags on the scheme. */
 export function activeLoopRole(flow: Flow): FlowRoleKey | null {
+  if (flow.block) return null;
   if (flow.state === "spawning" || flow.state === "reviewing") return "reviewer";
   if (flow.state === "waiting_ready" || flow.state === "relaying" || flow.state === "fixing") return "implementer";
   return null;
@@ -186,6 +207,7 @@ export function activeLoopRole(flow: Flow): FlowRoleKey | null {
 
 /** The cycle leg traffic is on: forward = implementer → reviewer. */
 export function activeLoopLeg(flow: Flow): "forward" | "back" | null {
+  if (flow.block) return null;
   if (flow.state === "spawn_pending" || flow.state === "spawning" || flow.state === "reviewing") return "forward";
   if (flow.state === "relay_pending" || flow.state === "relaying" || flow.state === "fixing") return "back";
   if (flow.state === "waiting_ready") return flow.rounds.length ? "back" : null;

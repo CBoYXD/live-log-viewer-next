@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flowModel";
+import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -100,5 +100,27 @@ describe("reviewer folding", () => {
     expect(claimedReviewerDescendantPaths(files, active).size).toBe(0);
     // …but folding still consumes the full list, so the reviewer is re-homed.
     expect(foldClaimedReviewers(files, [closed]).map((file) => file.path)).toEqual(["/implementer", "/subtask"]);
+  });
+});
+
+test("a quota-blocked flow presents the transient block and suppresses its pending action", () => {
+  const limited = flow({
+    implementerPath: "/implementer",
+    reviewerPath: "/reviewer",
+    state: "waiting_ready",
+    block: {
+      reason: "rate_limited",
+      conversationId: "conversation_impl",
+      accountId: "main",
+      resetAt: 1_800_003_300,
+    },
+  });
+  const t = (key: string) => key;
+
+  expect(flowPresentation(t as never, limited, "en")).toEqual({
+    label: "flowState.blocked_rate_limited",
+    detail: "flowState.rate_limit_until",
+    attention: true,
+    pending: null,
   });
 });

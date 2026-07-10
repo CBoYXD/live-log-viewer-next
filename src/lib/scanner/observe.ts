@@ -41,7 +41,7 @@ export async function observeFiles(): Promise<FileEntry[]> {
   await each(entries, async (entry) => {
     const pending = pendingQuestionFor(entry);
     entry.pendingQuestion = pending && entry.pid !== null ? { ...pending, paneTarget: await resolveTarget(entry.pid) } : pending;
-    const probe = await waitingInputProbe(entry); entry.waitingInput = probe.waiting;
+    const probe = await waitingInputProbe(entry); entry.waitingInput = probe.waiting; entry.rateLimit = probe.rateLimit;
     if (probe.atComposer && entry.activity === "stalled") { entry.activity = Date.now() / 1000 - entry.mtime < 900 ? "recent" : "idle"; entry.activityReason = "pane_at_composer"; }
     entry.plan = planFor(entry); entry.goal = goalFor(entry); entry.ctx = ctxFor(entry);
   });

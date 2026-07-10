@@ -1,7 +1,7 @@
-import { parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
+import { detectLiveRateLimit, parseScreenMenu, screenAtIdleComposer, screenWaitsForInput } from "@/lib/status";
 import { paneScreen, resolveTarget } from "@/lib/tmux";
 
-import type { FileEntry, WaitingInput } from "../types";
+import type { FileEntry, RateLimitState, WaitingInput } from "../types";
 
 const QUIET_SECONDS = 15;
 const STABLE_MS = 15_000;
@@ -28,16 +28,29 @@ function screenBlock(screen: string): string {
 
 export interface WaitingProbe {
   waiting: WaitingInput | null;
+  rateLimit: RateLimitState | null;
   /** The pane was read and shows a plain composer, no dialog: the agent is
       parked at its prompt, so a still-open turn in the transcript is an
       interrupt artifact rather than a wait on the user. */
   atComposer: boolean;
 }
 
-const NO_PROBE: WaitingProbe = { waiting: null, atComposer: false };
+const NO_PROBE: WaitingProbe = { waiting: null, rateLimit: null, atComposer: false };
 
-export async function waitingInputProbe(entry: FileEntry): Promise<WaitingProbe> {
-  const now = Date.now();
+export interface WaitingInputProbeDeps {
+  now(): number;
+  resolveTarget(pid: number): Promise<string | null>;
+  paneScreen(target: string): Promise<string>;
+}
+
+const DEFAULT_DEPS: WaitingInputProbeDeps = {
+  now: () => Date.now(),
+  resolveTarget,
+  paneScreen,
+};
+
+export async function waitingInputProbe(entry: FileEntry, deps: WaitingInputProbeDeps = DEFAULT_DEPS): Promise<WaitingProbe> {
+  const now = deps.now();
   for (const [key, value] of probes) {
     if (now - value.at > PROBE_TTL_MS) probes.delete(key);
   }
@@ -45,17 +58,26 @@ export async function waitingInputProbe(entry: FileEntry): Promise<WaitingProbe>
     probes.delete(entry.path);
     return NO_PROBE;
   }
-  if (Date.now() / 1000 - entry.mtime < QUIET_SECONDS) return NO_PROBE;
-  const target = await resolveTarget(entry.pid);
+  if (now / 1000 - entry.mtime < QUIET_SECONDS) return NO_PROBE;
+  const target = await deps.resolveTarget(entry.pid);
   if (target === null) return NO_PROBE;
-  const screen = await paneScreen(target);
+  const screen = await deps.paneScreen(target);
+  const liveRateLimit = detectLiveRateLimit(screen, now / 1000);
+  if (liveRateLimit) {
+    probes.delete(entry.path);
+    return {
+      waiting: null,
+      rateLimit: { source: "pane", accountId: null, window: null, resetAt: liveRateLimit.resetAt },
+      atComposer: false,
+    };
+  }
   if (!looksPromptLike(screen)) {
     probes.delete(entry.path);
     /* Only a positively idle composer counts: a quiet busy screen (long
        command, streamed output, no menu) must keep its stalled verdict, or
        the turn-open guard downstream (activity, STAGE_DONE detection) loses
        its meaning. */
-    return { waiting: null, atComposer: screenAtIdleComposer(screen) };
+    return { waiting: null, rateLimit: null, atComposer: screenAtIdleComposer(screen) };
   }
   const previous = probes.get(entry.path);
   if (!previous || previous.screen !== screen) {
@@ -66,6 +88,7 @@ export async function waitingInputProbe(entry: FileEntry): Promise<WaitingProbe>
   if (now / 1000 - previous.since < STABLE_MS / 1000) return NO_PROBE;
   return {
     waiting: { since: previous.since, screenTail: screenBlock(screen), target, menu: parseScreenMenu(screen) },
+    rateLimit: null,
     atComposer: false,
   };
 }

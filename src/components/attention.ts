@@ -63,6 +63,9 @@ function isoSeconds(iso: string): number | null {
  */
 export function attentionId(file: FileEntry, now: number = Date.now() / 1000): string | null {
   if (file.pendingQuestion) return file.pendingQuestion.toolUseId;
+  if (file.rateLimit) {
+    return `${file.path}:rate-limited:${file.rateLimit.resetAt ?? "unknown"}`;
+  }
   if (file.waitingInput) return `${file.path}:waiting:${Math.floor(file.waitingInput.since)}`;
   /* The stalled tier needs a live process behind the transcript: an open turn
      whose agent already exited is an abandoned session, not a pending
@@ -89,9 +92,11 @@ export function buildAttentionQueue(
     if (project !== undefined && projectKey(file) !== project) continue;
     const id = attentionId(file, now);
     if (id === null) continue;
-    const tier: AttentionTier = file.pendingQuestion || file.waitingInput ? "blocked" : "stalled";
+    const tier: AttentionTier = file.pendingQuestion || file.rateLimit || file.waitingInput ? "blocked" : "stalled";
     const since = file.pendingQuestion
       ? (isoSeconds(file.pendingQuestion.askedAt) ?? file.mtime)
+      : file.rateLimit
+        ? file.mtime
       : file.waitingInput
         ? file.waitingInput.since
         : file.mtime;
