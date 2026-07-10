@@ -73,6 +73,17 @@ test("three controller cycles move depleted Main to a stronger managed account a
       turn: { state: "idle", source: "empty", terminalAt: null },
       observedAt: new Date(current).toISOString(),
     }]);
+    registry.upsert({
+      key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+      artifactPath: "/main.jsonl",
+      cwd: "/repo",
+      accountId: "default",
+      status: "idle",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
     const conversationId = registry.conversationForPath("/main.jsonl")!.id;
     const provider: SuccessorProviderPort = {
       async create(input) {

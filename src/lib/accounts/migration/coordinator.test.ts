@@ -6,7 +6,7 @@ import path from "node:path";
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 import { boardFor, mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 
-import { advanceConversationMigration, drainHeldDeliveries, previewMigration, reconcileMigrations } from "./coordinator";
+import { advanceConversationMigration, createMigrationIntent, drainHeldDeliveries, previewMigration, reconcileMigrations } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 import { CodexForkOutcomeUnknownError, SuccessorPendingError } from "./provider";
 
@@ -73,6 +73,52 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("a standard account switch migrates active conversations and defers inactive history", async () => {
+    const store = registry();
+    store.reconcileConversations([
+      observation("/inactive-history.jsonl", "managed", "idle"),
+      observation("/active-turn.jsonl", "managed", "busy"),
+    ]);
+
+    const preview = await previewMigration("codex", "default", store);
+    expect(preview.counts).toEqual({ total: 2, idle: 0, busy: 1, deferred: 1, alreadyTarget: 0 });
+
+    const result = await createMigrationIntent(
+      "codex",
+      "default",
+      "manual",
+      "active-scope-switch",
+      preview.previewRevision,
+      "active",
+      store,
+    );
+
+    expect(result.intent.state).toBe("draining");
+    expect(store.engineRouting("codex").activeAccountId).toBe("default");
+    expect(store.conversationForPath("/active-turn.jsonl")?.migration).toMatchObject({ targetId: "default", phase: "waiting-turn" });
+    expect(store.conversationForPath("/inactive-history.jsonl")?.migration).toBeNull();
+  });
+
+  test("an idle conversation with a live host stays in the eager switch scope", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/live-idle.jsonl", "managed", "idle")]);
+    store.upsert({
+      key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+      artifactPath: "/live-idle.jsonl",
+      cwd: "/repo",
+      accountId: "managed",
+      status: "idle",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+
+    const preview = await previewMigration("codex", "default", store);
+
+    expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, deferred: 0, alreadyTarget: 0 });
+  });
+
   test("preview reads the controller inventory without rewriting the registry", async () => {
     const store = registry();
     store.reconcileConversations([observation("/owned.jsonl", "managed", "idle")]);
@@ -81,7 +127,7 @@ describe("durable account migration coordinator", () => {
     const preview = await previewMigration("codex", "default", store);
 
     const after = fs.statSync(store.filename, { bigint: true });
-    expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+    expect(preview.counts).toEqual({ total: 1, idle: 0, busy: 0, deferred: 1, alreadyTarget: 0 });
     expect(after.ino).toBe(before.ino);
   });
 
@@ -848,7 +894,7 @@ describe("durable account migration coordinator", () => {
     ]);
 
     const preview = await previewMigration("codex", "default", store);
-    expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+    expect(preview.counts).toEqual({ total: 1, idle: 0, busy: 0, deferred: 1, alreadyTarget: 0 });
     store.commitMigrationIntent({
       engine: "codex",
       targetId: "default",

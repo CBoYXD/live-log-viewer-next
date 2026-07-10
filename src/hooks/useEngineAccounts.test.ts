@@ -72,6 +72,21 @@ test("selectAndMigrate posts a migrate intent to the engine active route and ado
   expect(typeof (migrateCall?.body as { requestId?: string }).requestId).toBe("string");
 });
 
+test("selectAndMigrate forwards an explicit bulk scope", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload();
+    return new Response(null, { status: 202 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.selectAndMigrate("work", 7, "all")).toBeTrue();
+
+  const migrateCall = calls.find((call) => call.url === "/api/accounts/claude/active" && (call.body as { mode?: string }).mode === "migrate");
+  expect(migrateCall?.body).toMatchObject({ id: "work", scope: "all", previewRevision: 7 });
+});
+
 test("preview posts mode:preview and parses the scope counts without mutating active", async () => {
   const { fetcher } = scripted((url, body) => {
     if (url === "/api/accounts") return claudePayload();
@@ -98,7 +113,7 @@ test("preview canonicalises the flat coordinator DTO using the known target acco
   await advance();
   const preview = await store.preview("work");
   // The client fills the target identity/label from the account it asked about.
-  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, previewRevision: 9 });
+  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1, deferred: 0 }, previewRevision: 9 });
   expect(store.active).toBe("main");
 });
 

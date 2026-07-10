@@ -149,6 +149,40 @@ test("canceling an armed removal backs out without removing the account", async 
   expect([...view.host.querySelectorAll("button")].some((button) => button.textContent === "Remove")).toBe(true);
 });
 
+test("the confirm step offers an explicit migration for deferred history", async () => {
+  let selectedScope: "active" | "all" | undefined;
+  const initial = state(login({ phase: "authenticated" }), {
+    accounts: [
+      { id: "main", label: "Main", kind: "legacy", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null },
+      { id: "work", label: "Work", kind: "managed", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null, login: null },
+    ],
+    active: "main",
+    preview: async () => ({
+      targetId: "work",
+      targetLabel: "Work",
+      counts: { total: 4, idle: 0, busy: 1, deferred: 3 },
+      previewRevision: 9,
+    }),
+    selectAndMigrate: async (_id, _revision, scope) => {
+      selectedScope = scope;
+      return true;
+    },
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const work = [...view.host.querySelectorAll("button")].find((button) => button.textContent?.includes("Work"))!;
+
+  flushSync(() => { work.click(); });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  flushSync(() => {});
+
+  expect(view.host.textContent).toContain("Migrate all");
+  const bulk = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Migrate all (4)")!;
+  expect(bulk).toBeDefined();
+  flushSync(() => { bulk.click(); });
+  expect(selectedScope).toBe("all");
+});
+
 test("keyboard Cancel restores focus to the Claude sign-in row after it enters canceling", async () => {
   let canceled: string | null = null;
   const initial = state(login(), {

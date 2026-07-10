@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { accountManager } from "@/lib/accounts/manager";
 import { listClaudeAccounts } from "@/lib/accounts/claude";
 import { listCodexAccounts } from "@/lib/accounts/codex";
-import { agentRegistry, type AgentRegistry, type ConversationObservation, type RegistryConversation } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type ConversationObservation, type MigrationScope, type RegistryConversation } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import {
   remapBoardPaths as remapDurableBoardPaths,
@@ -34,7 +34,7 @@ import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
 export interface MigrationPreview {
   targetId: string;
   targetLabel: string;
-  counts: { total: number; idle: number; busy: number; alreadyTarget: number };
+  counts: { total: number; idle: number; busy: number; deferred: number; alreadyTarget: number };
   previewRevision: number;
 }
 
@@ -93,22 +93,10 @@ function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry
   const snapshot = registry.snapshot();
   const target = (engine === "claude" ? accountManager.resolveSpawn("claude", targetId) : accountManager.resolveSpawn("codex", targetId));
   const targetLabel = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((account) => account.id === target.accountId)?.label ?? target.accountId;
-  let idle = 0;
-  let busy = 0;
-  let alreadyTarget = 0;
-  for (const conversation of Object.values(snapshot.conversations)) {
-    if (conversation.engine !== engine) continue;
-    const generation = conversation.generations.at(-1);
-    if (!generation) continue;
-    if (generation.accountId === null) continue;
-    if (generation.accountId === targetId) { alreadyTarget += 1; continue; }
-    if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") busy += 1;
-    else idle += 1;
-  }
   return {
     targetId,
     targetLabel,
-    counts: { total: idle + busy, idle, busy, alreadyTarget },
+    counts: registry.migrationScope(engine, targetId),
     previewRevision: snapshot.engineRouting[engine].revision,
   };
 }
@@ -129,6 +117,7 @@ export async function createMigrationIntent(
   origin: MigrationOrigin,
   requestId: string = crypto.randomUUID(),
   previewRevision?: number,
+  scope: MigrationScope = "active",
   registry: AgentRegistry = agentRegistry(),
   evidence: MigrationIntent["evidence"] = null,
 ): Promise<{ intent: MigrationIntent; preview: MigrationPreview }> {
@@ -142,6 +131,7 @@ export async function createMigrationIntent(
     requestId,
     expectedRevision: previewRevision ?? preview.previewRevision,
     evidence,
+    scope,
   });
   return { intent, preview };
 }

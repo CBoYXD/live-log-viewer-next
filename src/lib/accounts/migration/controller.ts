@@ -14,6 +14,7 @@ import { reconcileWorkflowConversationOwnership } from "@/lib/workflows/store";
 import { paneInfo } from "@/lib/tmux";
 
 import { drainHeldDeliveries, reconcileMigrationInventory, reconcileMigrations, type HeldDeliveryPort } from "./coordinator";
+import { registerAccountMigrationTick } from "./controllerSignal";
 import type { SuccessorProviderPort } from "./contracts";
 import { RegisteredSuccessorProvider } from "./provider";
 import { QuotaController } from "./quotaController";
@@ -113,6 +114,7 @@ const globalController = globalThis as unknown as {
 
 export async function startAccountMigrationController(): Promise<void> {
   const controller = globalController.__llvAccountMigrationController ??= new AccountMigrationController();
+  registerAccountMigrationTick(() => controller.tick());
   if (!globalController.__llvAccountMigrationTimer) {
     const timer = setInterval(() => void controller.tick().catch(() => {
       console.error("[account migration controller] durable reconciliation tick failed");

@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 
 import {
   type AccountEffective,
+  type AccountMigrationScope,
   type AutoBalance,
   type EngineMigration,
   type MigrationPreview,
@@ -190,9 +191,9 @@ export interface EngineAccountsState extends EngineAccountsSnapshot {
   /** Non-mutating scope preview for the confirm step; null when it fails. Every
       switch surface previews first — there is no mode-less bare switch anymore. */
   preview: (id: string) => Promise<MigrationPreview | null>;
-  /** Confirmed engine-wide migration to `id`; coalesces to the latest target.
-      Also the zero-scope path when a preview finds nothing live to move. */
-  selectAndMigrate: (id: string, previewRevision?: number) => Promise<boolean>;
+  /** Confirms routing to `id` and selects active or full conversation scope.
+      Also handles the zero-eager path when only deferred history exists. */
+  selectAndMigrate: (id: string, previewRevision?: number, scope?: AccountMigrationScope) => Promise<boolean>;
   /** Halts a draining intent (idempotent). */
   stopMigration: () => Promise<boolean>;
   /** Re-runs the failed sessions of the current intent (idempotent). */
@@ -504,7 +505,7 @@ export function createEngineAccountsStore(
     }
   };
 
-  const selectAndMigrate = (id: string, previewRevision?: number): Promise<boolean> => {
+  const selectAndMigrate = (id: string, previewRevision?: number, scope: AccountMigrationScope = "active"): Promise<boolean> => {
     if (!id) return Promise.resolve(false);
     return runMutation("migrate", async () => {
       const previous = snapshot.active;
@@ -514,7 +515,7 @@ export function createEngineAccountsStore(
         const response = await fetcher(activeUrl, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id, mode: "migrate", migrate: true, previewRevision, requestId: mintRequestId() }),
+          body: JSON.stringify({ id, mode: "migrate", migrate: true, scope, previewRevision, requestId: mintRequestId() }),
         });
         if (!response.ok) throw new Error("migration request failed");
       } catch {

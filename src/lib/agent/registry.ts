@@ -142,6 +142,8 @@ export interface RegistryConversation {
       identity while the canonical generation path advances. */
   continuityPaths: string[];
   migration: ConversationMigration | null;
+  /** Explicit Stop/Keep decision for one target at one routing revision. */
+  migrationOptOut: { targetId: string; routeRevision: number; updatedAt: string } | null;
   turn: TurnState & { observedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -181,6 +183,78 @@ export interface ConversationObservation {
   launchProfile: LaunchProfile;
   turn: TurnState;
   observedAt: string;
+}
+
+export type MigrationScope = "active" | "all";
+
+export interface MigrationScopeCounts {
+  total: number;
+  idle: number;
+  busy: number;
+  deferred: number;
+  alreadyTarget: number;
+}
+
+function migrationReadiness(
+  file: RegistryFile,
+  conversation: RegistryConversation,
+): "idle" | "busy" | "deferred" {
+  if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") return "busy";
+  if (conversation.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) return "idle";
+  const sourcePath = conversation.generations.at(-1)?.path;
+  const hasActiveHost = sourcePath !== undefined && Object.values(file.entries).some((entry) =>
+    entry.artifactPath === sourcePath && ["starting", "live", "idle", "handoff"].includes(entry.status));
+  if (hasActiveHost) return "idle";
+  const hasPendingDelivery = Object.values(file.heldDeliveries).some((delivery) =>
+    delivery.conversationId === conversation.id && delivery.state !== "delivered");
+  return hasPendingDelivery ? "idle" : "deferred";
+}
+
+function migrationScopeCounts(
+  file: RegistryFile,
+  engine: Extract<AgentEngine, "claude" | "codex">,
+  targetId: string,
+): MigrationScopeCounts {
+  const counts: MigrationScopeCounts = { total: 0, idle: 0, busy: 0, deferred: 0, alreadyTarget: 0 };
+  for (const conversation of Object.values(file.conversations)) {
+    if (conversation.engine !== engine) continue;
+    const source = conversation.generations.at(-1);
+    if (!source || source.accountId === null) continue;
+    if (source.accountId === targetId) {
+      counts.alreadyTarget += 1;
+      continue;
+    }
+    counts.total += 1;
+    counts[migrationReadiness(file, conversation)] += 1;
+  }
+  return counts;
+}
+
+function conversationMigrationForIntent(
+  conversation: RegistryConversation,
+  source: NativeGeneration,
+  intent: MigrationIntent,
+  phase: ConversationMigration["phase"],
+  changedAt: string,
+): ConversationMigration {
+  const boardProject = conversation.migration?.boardProject ?? null;
+  return {
+    intentId: intent.id,
+    phase,
+    targetId: intent.targetId,
+    revision: intent.revision,
+    error: null,
+    errorCode: null,
+    operationId: crypto.randomUUID(),
+    sourceGenerationId: source.id,
+    providerReceipt: null,
+    boardProject,
+    boardOperationId: conversation.migration?.boardOperationId ?? null,
+    boardPlacementProject: conversation.migration?.boardPlacementProject
+      ?? boardProject
+      ?? source.launchProfile.project,
+    updatedAt: changedAt,
+  };
 }
 
 export class MigrationRevisionError extends Error {
@@ -276,11 +350,20 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     ...(Array.isArray(legacyContinuity) ? legacyContinuity.filter((pathname): pathname is string => typeof pathname === "string") : []),
     ...(migration?.providerReceipt?.continuityPaths ?? []),
   ])];
+  const rawOptOut = (value as Partial<RegistryConversation>).migrationOptOut;
+  const migrationOptOut = rawOptOut
+    && typeof rawOptOut.targetId === "string"
+    && Number.isInteger(rawOptOut.routeRevision)
+    && rawOptOut.routeRevision >= 0
+    && typeof rawOptOut.updatedAt === "string"
+    ? rawOptOut
+    : null;
   return {
     ...value,
     generations,
     continuityPaths,
     migration,
+    migrationOptOut,
     turn: value.turn && typeof value.turn === "object"
       ? { state: value.turn.state, source: value.turn.source, terminalAt: value.turn.terminalAt ?? null, observedAt: value.turn.observedAt ?? null }
       : { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
@@ -721,6 +804,7 @@ export class AgentRegistry {
       generations: [],
       continuityPaths: [],
       migration: null,
+      migrationOptOut: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
       createdAt,
       updatedAt: createdAt,
@@ -945,6 +1029,7 @@ export class AgentRegistry {
         }],
         continuityPaths: [],
         migration: null,
+        migrationOptOut: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
         createdAt,
         updatedAt: createdAt,
@@ -995,6 +1080,7 @@ export class AgentRegistry {
             }],
             continuityPaths: [],
             migration: null,
+            migrationOptOut: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },
             createdAt,
             updatedAt: createdAt,
@@ -1084,6 +1170,10 @@ export class AgentRegistry {
     return clone(this.snapshot().engineRouting[engine]);
   }
 
+  migrationScope(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string): MigrationScopeCounts {
+    return migrationScopeCounts(this.snapshot(), engine, targetId);
+  }
+
   retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
     this.mutate((file) => {
       const changedAt = now();
@@ -1119,6 +1209,7 @@ export class AgentRegistry {
     requestId: string;
     expectedRevision: number;
     evidence?: MigrationIntent["evidence"];
+    scope?: MigrationScope;
   }): MigrationIntent {
     return this.mutate((file) => {
       const repeated = Object.values(file.migrationIntents).find((intent) =>
@@ -1163,30 +1254,66 @@ export class AgentRegistry {
           if (conversation.migration && conversation.migration.phase !== "committed") conversation.migration = null;
           continue;
         }
+        const readiness = migrationReadiness(file, conversation);
+        if ((input.scope ?? "all") === "active" && readiness === "deferred") continue;
         scoped += 1;
-        const boardProject = conversation.migration?.boardProject ?? null;
-        const boardPlacementProject = conversation.migration?.boardPlacementProject
-          ?? boardProject
-          ?? source.launchProfile.project;
-        conversation.migration = {
-          intentId: intent.id,
-          phase: conversation.turn.state === "busy" || conversation.turn.state === "unknown" ? "waiting-turn" : "requested",
-          targetId: input.targetId,
-          revision: intent.revision,
-          error: null,
-          errorCode: null,
-          operationId: crypto.randomUUID(),
-          sourceGenerationId: source.id,
-          providerReceipt: null,
-          boardProject,
-          boardOperationId: conversation.migration?.boardOperationId ?? null,
-          boardPlacementProject,
-          updatedAt: changedAt,
-        };
+        conversation.migration = conversationMigrationForIntent(
+          conversation,
+          source,
+          intent,
+          readiness === "busy" ? "waiting-turn" : "requested",
+          changedAt,
+        );
         conversation.updatedAt = changedAt;
       }
       if (scoped === 0) intent.state = "complete";
       return clone(intent);
+    });
+  }
+
+  requestConversationMigrationToActiveAccount(id: ViewerConversationId): RegistryConversation {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, id);
+      const conversation = file.conversations[canonicalId];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      const targetId = file.engineRouting[conversation.engine].activeAccountId;
+      const routeRevision = file.engineRouting[conversation.engine].revision;
+      const source = conversation.generations.at(-1);
+      if (!targetId || !source || source.accountId === null || source.accountId === targetId) return clone(conversation);
+      if (conversation.migrationOptOut?.targetId === targetId
+        && conversation.migrationOptOut.routeRevision === routeRevision) return clone(conversation);
+      if (conversation.migration?.targetId === targetId
+        && !["committed", "rolled-back", "failed-recoverable"].includes(conversation.migration.phase)) {
+        return clone(conversation);
+      }
+
+      const changedAt = now();
+      let intent = Object.values(file.migrationIntents)
+        .filter((candidate) => candidate.engine === conversation.engine && candidate.targetId === targetId && candidate.state !== "stopped")
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
+      if (!intent) {
+        intent = {
+          id: crypto.randomUUID(),
+          engine: conversation.engine,
+          targetId,
+          origin: "manual",
+          revision: 1,
+          state: "draining",
+          createdAt: changedAt,
+          updatedAt: changedAt,
+          requestIds: [`lazy:${file.engineRouting[conversation.engine].revision}:${canonicalId}`],
+          evidence: null,
+          stoppedAt: null,
+        };
+        file.migrationIntents[intent.id] = intent;
+      } else {
+        intent.state = "draining";
+        intent.updatedAt = changedAt;
+      }
+
+      conversation.migration = conversationMigrationForIntent(conversation, source, intent, "requested", changedAt);
+      conversation.updatedAt = changedAt;
+      return clone(conversation);
     });
   }
 
@@ -1403,6 +1530,13 @@ export class AgentRegistry {
       intent.updatedAt = now();
       if (state === "stopped") {
         for (const conversation of Object.values(file.conversations)) {
+          if (conversation.engine !== intent.engine) continue;
+          const route = file.engineRouting[conversation.engine];
+          const current = conversation.generations.at(-1);
+          if (route.activeAccountId === intent.targetId && current?.accountId !== intent.targetId) {
+            conversation.migrationOptOut = { targetId: intent.targetId, routeRevision: route.revision, updatedAt: intent.updatedAt };
+            conversation.updatedAt = intent.updatedAt;
+          }
           if (conversation.migration?.intentId !== id || conversation.migration.phase === "committed") continue;
           const source = conversation.generations.find((generation) => generation.id === conversation.migration?.sourceGenerationId)
             ?? conversation.generations.at(-1);
@@ -1591,6 +1725,14 @@ export class AgentRegistry {
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");
       const rolledAt = now();
+      const route = file.engineRouting[conversation.engine];
+      if (route.activeAccountId === conversation.migration.targetId) {
+        conversation.migrationOptOut = {
+          targetId: conversation.migration.targetId,
+          routeRevision: route.revision,
+          updatedAt: rolledAt,
+        };
+      }
       for (const delivery of Object.values(file.heldDeliveries)) {
         if (delivery.conversationId !== canonicalId || delivery.state === "delivered" || delivery.state === "delivery-uncertain") continue;
         delivery.state = "assigned";
