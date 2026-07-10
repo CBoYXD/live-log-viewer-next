@@ -42,7 +42,7 @@ test("loading announces politely and disables the buttons against double-clicks"
   expect(html).toContain("motion-reduce:animate-none");
 });
 
-test("a successful attach copy confirms via a polite status, not color alone", () => {
+test("a successful attach copy confirms via a polite status", () => {
   const html = renderToStaticMarkup(
     <AttachControlsView status={{ phase: "copied", kind: "attach" }} onCopy={noop} onRefresh={noop} />,
   );
@@ -58,7 +58,7 @@ test("a read-only copy confirms with its own wording", () => {
   expect(html).not.toContain(en["attach.copied"]);
 });
 
-test("a clipboard failure is asserted with text and offers no refresh (not endpoint-recoverable)", () => {
+test("a clipboard failure is asserted with text and omits the endpoint refresh action", () => {
   const html = renderToStaticMarkup(
     <AttachControlsView status={{ phase: "error", kind: "attach", reason: "clipboard" }} onCopy={noop} onRefresh={noop} />,
   );
