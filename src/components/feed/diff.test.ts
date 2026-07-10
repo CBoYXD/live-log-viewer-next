@@ -127,6 +127,70 @@ describe("Codex apply_patch grammar", () => {
   });
 });
 
+describe("intraline replacement highlighting", () => {
+  test("segments a similar removed and added line around their changed characters", () => {
+    const model = diffFromApplyPatch(
+      ["*** Begin Patch", "*** Update File: src/limit.ts", "@@", "-const limit = 10;", "+const limit = 20;", "*** End Patch"].join("\n"),
+    );
+    const lines = only(model.files).hunks[0].lines;
+
+    expect(lines).toEqual([
+      {
+        t: "-",
+        text: "const limit = 10;",
+        intraline: [
+          { text: "const limit = ", changed: false },
+          { text: "1", changed: true },
+          { text: "0;", changed: false },
+        ],
+      },
+      {
+        t: "+",
+        text: "const limit = 20;",
+        intraline: [
+          { text: "const limit = ", changed: false },
+          { text: "2", changed: true },
+          { text: "0;", changed: false },
+        ],
+      },
+    ]);
+  });
+
+  test("pairs replacement runs by line position", () => {
+    const model = diffFromApplyPatch(
+      [
+        "*** Begin Patch",
+        "*** Update File: src/limit.ts",
+        "@@",
+        "-const first = 10;",
+        "-const second = 30;",
+        "+const first = 20;",
+        "+const second = 40;",
+        "*** End Patch",
+      ].join("\n"),
+    );
+    const changes = only(model.files).hunks[0].lines.map((line) =>
+      line.intraline
+        ?.filter((span) => span.changed)
+        .map((span) => span.text)
+        .join(""),
+    );
+
+    expect(changes).toEqual(["1", "3", "2", "4"]);
+  });
+
+  test("keeps unrelated replacement lines at line-level emphasis", () => {
+    const model = diffFromApplyPatch(
+      ["*** Begin Patch", "*** Update File: src/value.ts", "@@", "-aaaaaaaaaaaaaaaa", "+bbbbbbbbbbbbbbbb", "*** End Patch"].join("\n"),
+    );
+
+    expect(only(model.files).hunks[0].lines).toEqual([
+      { t: "-", text: "aaaaaaaaaaaaaaaa" },
+      { t: "+", text: "bbbbbbbbbbbbbbbb" },
+    ]);
+  });
+});
+
 describe("caps and safety", () => {
   test("more than the file cap flags filesTruncated and drops the rest", () => {
     const parts = ["*** Begin Patch"];

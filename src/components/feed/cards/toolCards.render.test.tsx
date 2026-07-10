@@ -68,6 +68,15 @@ test("diff lines carry structural token colors and real +/- markers", () => {
   expect(html).not.toMatch(/#[0-9a-fA-F]{6}/);
 });
 
+test("similar replacement lines render stronger intraline add/remove emphasis", () => {
+  const patch = ["*** Begin Patch", "*** Update File: src/limit.ts", "@@", "-const limit = 10;", "+const limit = 20;", "*** End Patch"].join("\n");
+  const body = diffFromApplyPatch(patch);
+  const html = renderToStaticMarkup(<DiffCard body={{ type: "diff", files: body.files, filesTruncated: body.filesTruncated }} />);
+
+  expect(html).toContain("bg-diff-add-strong");
+  expect(html).toContain("bg-diff-del-strong");
+});
+
 test("output preview shows content with an accessible copy control", () => {
   const html = renderToStaticMarkup(<OutputPreview output={"line1\nline2"} truncated={false} />);
   expect(html).toContain("line1");

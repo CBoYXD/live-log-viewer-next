@@ -27,8 +27,10 @@
      later in one place. */
   --color-diff-add: #1a7f37;
   --color-diff-add-soft: #e6ffec;
+  --color-diff-add-strong: #b7ebc6;
   --color-diff-del: #cf222e;
   --color-diff-del-soft: #ffebe9;
+  --color-diff-del-strong: #ffd1cf;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto,
     sans-serif;
   --font-mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
