@@ -29,7 +29,7 @@ interface SendResponse {
   imagePaths?: string[];
   /** Set when the message booted a fresh agent window instead of an existing pane. */
   spawned?: boolean;
-  outcome?: "delivered-to-live" | "resumed";
+  outcome?: "delivered-to-live" | "resumed" | "held";
 }
 
 function respond(outcome: DeliveryOutcome): NextResponse<SendResponse | ApiError | { ok: false; outcome: "failed"; error: string }> {

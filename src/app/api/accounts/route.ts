@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import path from "node:path";
 
 import { activeCodexAccountId, codexAccountsMutationLocked, codexLoginPaneStatus, listCodexAccounts, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { deviceAuthChallenge } from "@/lib/accounts/deviceAuth";
@@ -6,11 +7,34 @@ import { activeClaudeAccountId, claudeAccountsMutationLocked, listClaudeAccounts
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { paneInfo, paneScreen } from "@/lib/tmux";
+import { agentRegistry } from "@/lib/agent/registry";
+import { evaluateAutoBalance } from "@/lib/accounts/migration/autoBalance";
+import { fetchClaudeLimits, readCodexLimits } from "@/lib/limits";
+
+async function tickAutoBalance(): Promise<void> {
+  const registry = agentRegistry();
+  const now = Date.now();
+  if (registry.autoBalancePolicy("claude").enabled) {
+    const observations = await Promise.all(listClaudeAccounts().filter((account) => account.authPresent).map(async (account) => {
+      const read = await fetchClaudeLimits(path.join(account.home, ".credentials.json"));
+      return { engine: "claude" as const, accountId: account.id, authenticated: account.authPresent, limits: read.data, provenance: { source: read.source, reason: read.reason, staleSince: null }, observedAt: now };
+    }));
+    evaluateAutoBalance("claude", activeClaudeAccountId(), observations, now, registry);
+  }
+  if (registry.autoBalancePolicy("codex").enabled) {
+    const observations = await Promise.all(listCodexAccounts().filter((account) => account.authPresent).map(async (account) => {
+      const read = await readCodexLimits({ account });
+      return { engine: "codex" as const, accountId: account.id, authenticated: account.authPresent, limits: read.data, provenance: { source: read.source, reason: read.reason, staleSince: null }, observedAt: now };
+    }));
+    evaluateAutoBalance("codex", activeCodexAccountId(), observations, now, registry);
+  }
+}
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  await tickAutoBalance();
   // When the registry is degraded it still reads as default-only-plus-valid, but any
   // write throws CorruptCodexAccountsError. Skip the best-effort stale-pane cleanup in
   // that state so the read path stays a 200 and the corrupt bytes are left untouched.
@@ -56,10 +80,15 @@ export async function GET() {
     limits: { state: "unavailable", session: null, weekly: null, checkedAt: null },
     login: claudeLoginSupervisor.forAccount(account.id),
   }));
+  const registry = agentRegistry();
+  const snapshot = registry.snapshot();
+  const migration = (engine: "claude" | "codex") => Object.values(snapshot.migrationIntents).find((intent) => intent.engine === engine && intent.state === "draining") ?? null;
   return NextResponse.json({
-    codex: { active: activeCodexAccountId(), accounts },
+    codex: { active: activeCodexAccountId(), accounts, migration: migration("codex"), autoBalance: registry.autoBalancePolicy("codex") },
     // A corrupt Claude registry keeps the compatible Codex response available and
     // reduces Claude to immutable legacy Main until an operator repairs it.
-    claude: { active: activeClaudeAccountId(), accounts: claudeAccounts, mutationLocked: claudeAccountsMutationLocked() },
+    claude: { active: activeClaudeAccountId(), accounts: claudeAccounts, mutationLocked: claudeAccountsMutationLocked(), migration: migration("claude"), autoBalance: registry.autoBalancePolicy("claude") },
+    migration: { codex: migration("codex"), claude: migration("claude") },
+    autoBalance: { codex: registry.autoBalancePolicy("codex"), claude: registry.autoBalancePolicy("claude") },
   });
 }

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
 import { procBackend } from "@/lib/proc";
+import type { AutoBalancePolicy, ConversationMigration, HeldDelivery, MigrationIntent, MigrationOrigin, NativeGeneration, ViewerConversationId } from "@/lib/accounts/migration/contracts";
 
 import type { AgentEngine } from "./cli";
 import { sessionKeyId, type SessionKey } from "./sessionKey";
@@ -50,17 +51,35 @@ export interface SpawnReceipt {
   error: string | null;
 }
 
-interface RegistryFile {
-  version: 1;
+export interface RegistryConversation {
+  id: ViewerConversationId;
+  engine: Extract<AgentEngine, "claude" | "codex">;
+  generations: NativeGeneration[];
+  migration: ConversationMigration | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RegistryFile {
+  version: 2;
   entries: Record<string, AgentRegistryEntry>;
   receipts: Record<string, SpawnReceipt>;
   importedResumePanes: boolean;
   /** Compatibility evidence only. It never authorizes a pane until the live
       resolver proves server, process, engine, and transcript ownership. */
   legacyResumePanes: { serverPid: number | null; panes: Record<string, ResumePaneRecord> };
+  conversations: Record<string, RegistryConversation>;
+  migrationIntents: Record<string, MigrationIntent>;
+  engineRouting: Record<Extract<AgentEngine, "claude" | "codex">, { activeAccountId: string | null; revision: number }>;
+  autoBalance: Record<Extract<AgentEngine, "claude" | "codex">, AutoBalancePolicy>;
+  heldDeliveries: Record<string, HeldDelivery>;
 }
 
-const EMPTY: RegistryFile = { version: 1, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: { serverPid: null, panes: {} } };
+function emptyPolicy(): AutoBalancePolicy {
+  return { enabled: false, revision: 0, cooldownUntil: null, departed: {}, lastOutcome: null, lastTrigger: null, restartedAt: now() };
+}
+
+const EMPTY: RegistryFile = { version: 2, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: { serverPid: null, panes: {} }, conversations: {}, migrationIntents: {}, engineRouting: { claude: { activeAccountId: null, revision: 0 }, codex: { activeAccountId: null, revision: 0 } }, autoBalance: { claude: emptyPolicy(), codex: emptyPolicy() }, heldDeliveries: {} };
 
 export class RegistryReadError extends Error {}
 
@@ -72,21 +91,42 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function upgradeV1(parsed: Omit<Partial<RegistryFile>, "version">): RegistryFile {
+  const legacy = parsed.legacyResumePanes;
+  return {
+    ...clone(EMPTY),
+    entries: (parsed.entries as RegistryFile["entries"]) ?? {},
+    receipts: (parsed.receipts as RegistryFile["receipts"]) ?? {},
+    importedResumePanes: parsed.importedResumePanes === true,
+    legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
+      ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
+      : { serverPid: null, panes: {} },
+  };
+}
+
 function readFile(filename: string): RegistryFile {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<RegistryFile>;
-    if (parsed.version !== 1 || !parsed.entries || !parsed.receipts || typeof parsed.entries !== "object" || typeof parsed.receipts !== "object") {
+    const parsed = JSON.parse(fs.readFileSync(filename, "utf8")) as Omit<Partial<RegistryFile>, "version"> & { version?: unknown };
+    if (parsed.version === 1 && parsed.entries && parsed.receipts && typeof parsed.entries === "object" && typeof parsed.receipts === "object") {
+      return upgradeV1(parsed);
+    }
+    if (parsed.version !== 2 || !parsed.entries || !parsed.receipts || typeof parsed.entries !== "object" || typeof parsed.receipts !== "object") {
       throw new RegistryReadError("agent registry schema is unsupported");
     }
     const legacy = parsed.legacyResumePanes;
     return {
-      version: 1,
+      version: 2,
       entries: parsed.entries,
       receipts: parsed.receipts,
       importedResumePanes: parsed.importedResumePanes === true,
       legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
         ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
         : { serverPid: null, panes: {} },
+      conversations: parsed.conversations && typeof parsed.conversations === "object" ? parsed.conversations : {},
+      migrationIntents: parsed.migrationIntents && typeof parsed.migrationIntents === "object" ? parsed.migrationIntents : {},
+      engineRouting: parsed.engineRouting && typeof parsed.engineRouting === "object" ? { ...EMPTY.engineRouting, ...parsed.engineRouting } : clone(EMPTY.engineRouting),
+      autoBalance: parsed.autoBalance && typeof parsed.autoBalance === "object" ? { ...EMPTY.autoBalance, ...parsed.autoBalance } : { claude: emptyPolicy(), codex: emptyPolicy() },
+      heldDeliveries: parsed.heldDeliveries && typeof parsed.heldDeliveries === "object" ? parsed.heldDeliveries : {},
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return clone(EMPTY);
@@ -291,6 +331,143 @@ export class AgentRegistry {
           receipt.artifactPath = artifactPath;
         }
       }
+    });
+  }
+
+  /** Allocates one Viewer-owned identity for every native generation. Paths
+      remain an interoperability detail and can change on every account move. */
+  ensureConversation(engine: Extract<AgentEngine, "claude" | "codex">, artifactPath: string, accountId: string | null): RegistryConversation {
+    return this.mutate((file) => {
+      const existing = Object.values(file.conversations).find((conversation) => conversation.engine === engine && conversation.generations.some((generation) => generation.path === artifactPath));
+      if (existing) return clone(existing);
+      const createdAt = now();
+      const conversation: RegistryConversation = {
+        id: `conversation_${crypto.randomUUID()}`,
+        engine,
+        generations: [{ id: crypto.randomUUID(), path: artifactPath, accountId, createdAt, archivedAt: null }],
+        migration: null,
+        createdAt,
+        updatedAt: createdAt,
+      };
+      file.conversations[conversation.id] = conversation;
+      return clone(conversation);
+    });
+  }
+
+  conversationForPath(artifactPath: string): RegistryConversation | null {
+    return Object.values(this.snapshot().conversations).find((conversation) => conversation.generations.some((generation) => generation.path === artifactPath)) ?? null;
+  }
+
+  conversation(id: ViewerConversationId): RegistryConversation | null {
+    return this.snapshot().conversations[id] ?? null;
+  }
+
+  canonicalPath(artifactPath: string): string {
+    const conversation = this.conversationForPath(artifactPath);
+    return conversation?.generations.at(-1)?.path ?? artifactPath;
+  }
+
+  setEngineRouting(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string): number {
+    return this.mutate((file) => {
+      const route = file.engineRouting[engine];
+      route.activeAccountId = accountId;
+      route.revision += 1;
+      return route.revision;
+    });
+  }
+
+  engineRouting(engine: Extract<AgentEngine, "claude" | "codex">): { activeAccountId: string | null; revision: number } {
+    return clone(this.snapshot().engineRouting[engine]);
+  }
+
+  upsertMigrationIntent(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string, origin: MigrationOrigin, requestId: string, evidence: MigrationIntent["evidence"] = null): MigrationIntent {
+    return this.mutate((file) => {
+      const active = Object.values(file.migrationIntents).find((intent) => intent.engine === engine && intent.state === "draining");
+      if (active) {
+        if (active.origin === "manual" && origin === "auto") return clone(active);
+        if (!active.requestIds.includes(requestId)) active.requestIds.push(requestId);
+        if (active.targetId !== targetId || active.origin !== origin) { active.targetId = targetId; active.origin = origin; active.revision += 1; active.evidence = evidence; }
+        active.updatedAt = now();
+        return clone(active);
+      }
+      const createdAt = now();
+      const intent: MigrationIntent = { id: crypto.randomUUID(), engine, targetId, origin, revision: 1, state: "draining", createdAt, updatedAt: createdAt, requestIds: [requestId], evidence, stoppedAt: null };
+      file.migrationIntents[intent.id] = intent;
+      return clone(intent);
+    });
+  }
+
+  setConversationMigration(id: ViewerConversationId, migration: ConversationMigration | null): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[id];
+      if (!conversation) throw new Error("viewer conversation is unknown");
+      conversation.migration = migration;
+      conversation.updatedAt = now();
+      return clone(conversation);
+    });
+  }
+
+  commitSuccessor(id: ViewerConversationId, successor: Omit<NativeGeneration, "createdAt" | "archivedAt">, expectedRevision: number): RegistryConversation {
+    return this.mutate((file) => {
+      const conversation = file.conversations[id];
+      if (!conversation?.migration || conversation.migration.revision !== expectedRevision) throw new Error("migration revision is stale");
+      const predecessor = conversation.generations.at(-1);
+      if (!predecessor) throw new Error("viewer conversation has no native generation");
+      predecessor.archivedAt = now();
+      conversation.generations.push({ ...successor, createdAt: now(), archivedAt: null });
+      conversation.migration = { ...conversation.migration, phase: "committed", updatedAt: now() };
+      conversation.updatedAt = now();
+      return clone(conversation);
+    });
+  }
+
+  setMigrationIntentState(id: string, state: MigrationIntent["state"]): MigrationIntent {
+    return this.mutate((file) => {
+      const intent = file.migrationIntents[id];
+      if (!intent) throw new Error("migration intent is unknown");
+      intent.state = state;
+      intent.stoppedAt = state === "stopped" ? now() : intent.stoppedAt;
+      intent.updatedAt = now();
+      return clone(intent);
+    });
+  }
+
+  autoBalancePolicy(engine: Extract<AgentEngine, "claude" | "codex">): AutoBalancePolicy {
+    return clone(this.snapshot().autoBalance[engine]);
+  }
+
+  setAutoBalancePolicy(engine: Extract<AgentEngine, "claude" | "codex">, enabled: boolean, expectedRevision?: number): AutoBalancePolicy {
+    return this.mutate((file) => {
+      const policy = file.autoBalance[engine];
+      if (expectedRevision !== undefined && policy.revision !== expectedRevision) throw new Error("automatic balance policy revision is stale");
+      policy.enabled = enabled;
+      policy.revision += 1;
+      return clone(policy);
+    });
+  }
+
+  recordAutoBalanceOutcome(engine: Extract<AgentEngine, "claude" | "codex">, outcome: AutoBalancePolicy["lastOutcome"], evidence: AutoBalancePolicy["lastTrigger"], cooldownUntil: string): AutoBalancePolicy {
+    return this.mutate((file) => {
+      const policy = file.autoBalance[engine];
+      policy.cooldownUntil = cooldownUntil;
+      policy.lastOutcome = outcome;
+      policy.lastTrigger = evidence;
+      if (evidence) policy.departed[evidence.sourceId] = now();
+      policy.revision += 1;
+      return clone(policy);
+    });
+  }
+
+  holdDelivery(conversationId: ViewerConversationId, text: string, clientMessageId: string | null = null): HeldDelivery {
+    if (!text || text.length > 32_000) throw new Error("held delivery must contain at most 32000 characters");
+    return this.mutate((file) => {
+      const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === conversationId && item.clientMessageId === clientMessageId) : undefined;
+      if (existing) return clone(existing);
+      const held = { id: crypto.randomUUID(), conversationId, text, createdAt: now(), clientMessageId };
+      const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === conversationId).length;
+      if (count >= 100) throw new Error("held delivery limit reached for conversation");
+      file.heldDeliveries[held.id] = held;
+      return clone(held);
     });
   }
 }

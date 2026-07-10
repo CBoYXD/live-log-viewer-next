@@ -62,6 +62,11 @@ export interface FileEntry {
   cmdDesc?: string;
   /** Review-loop ownership for grouping implementer/reviewer sessions. */
   flow?: FlowAnnotation;
+  /** Stable identity above engine-native transcript generations. */
+  conversationId?: string;
+  predecessorPath?: string;
+  migratedTo?: string;
+  migration?: { phase: string; targetId: string; revision: number; error: string | null };
 }
 
 export interface ProjectCatalogEntry {

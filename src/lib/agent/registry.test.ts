@@ -46,4 +46,29 @@ describe("agent registry", () => {
     expect(() => store.beginSpawn("codex", "/repo")).toThrow("cannot be read");
     expect(fs.readFileSync(store.filename, "utf8")).toBe("{ broken");
   });
+
+  test("upgrades v1, retains stable identity, and commits an A to B to A generation chain", () => {
+    const store = registry();
+    fs.writeFileSync(store.filename, JSON.stringify({ version: 1, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: { serverPid: null, panes: {} } }));
+    const conversation = store.ensureConversation("codex", "/a.jsonl", "a");
+    expect(store.snapshot().version).toBe(2);
+    store.setConversationMigration(conversation.id, { intentId: "intent-a", phase: "verifying", targetId: "b", revision: 1, error: null, updatedAt: new Date().toISOString() });
+    store.commitSuccessor(conversation.id, { id: "native-b", path: "/b.jsonl", accountId: "b" }, 1);
+    store.setConversationMigration(conversation.id, { intentId: "intent-b", phase: "verifying", targetId: "a", revision: 2, error: null, updatedAt: new Date().toISOString() });
+    const final = store.commitSuccessor(conversation.id, { id: "native-a2", path: "/a2.jsonl", accountId: "a" }, 2);
+    expect(final.id).toBe(conversation.id);
+    expect(final.generations.map((generation) => generation.path)).toEqual(["/a.jsonl", "/b.jsonl", "/a2.jsonl"]);
+    expect(store.canonicalPath("/a.jsonl")).toBe("/a2.jsonl");
+  });
+
+  test("coalesces durable intents and enforces policy compare-and-set", () => {
+    const store = registry();
+    const first = store.upsertMigrationIntent("claude", "a", "auto", "first");
+    const latest = store.upsertMigrationIntent("claude", "b", "manual", "second");
+    expect(latest.id).toBe(first.id);
+    expect(latest.targetId).toBe("b");
+    expect(latest.revision).toBe(2);
+    expect(() => store.setAutoBalancePolicy("claude", true, 1)).toThrow("revision is stale");
+    expect(store.setAutoBalancePolicy("claude", true, 0).enabled).toBe(true);
+  });
 });

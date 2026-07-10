@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
 import { readTranscriptHosts } from "@/lib/agent/transcriptHost";
+import { agentRegistry } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { pathForPanePid, reconcileTasks } from "@/lib/tasks/reconcile";
@@ -19,6 +20,17 @@ export async function GET(request: Request): Promise<NextResponse> {
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject);
+  const registry = agentRegistry();
+  for (const file of files) {
+    if (file.engine !== "claude" && file.engine !== "codex") continue;
+    const conversation = registry.ensureConversation(file.engine, file.path, registry.conversationForPath(file.path)?.generations.at(-1)?.accountId ?? null);
+    const generation = conversation.generations.find((item) => item.path === file.path);
+    const latest = conversation.generations.at(-1);
+    file.conversationId = conversation.id;
+    if (generation && latest && generation.path !== latest.path) file.migratedTo = latest.path;
+    if (latest?.path === file.path && conversation.generations.length > 1) file.predecessorPath = conversation.generations.at(-2)?.path;
+    if (conversation.migration && conversation.migration.phase !== "committed") file.migration = { phase: conversation.migration.phase, targetId: conversation.migration.targetId, revision: conversation.migration.revision, error: conversation.migration.error };
+  }
   /* This is the scanner-refresh reconciliation point. A failed tmux probe is
      represented by the resolver and preserves durable rows for a later retry. */
   await readTranscriptHosts(true);
