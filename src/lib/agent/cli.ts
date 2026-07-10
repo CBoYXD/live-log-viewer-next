@@ -60,6 +60,7 @@ export interface ResumeSpec {
   command: string;
   cwd: string;
   windowName: string;
+  engine: AgentEngine;
   /** Transcript path the session will write, when knowable at spawn time —
       a fresh claude session launched with a pre-chosen --session-id. */
   transcript?: string;
@@ -81,6 +82,11 @@ export interface FreshSpecOptions {
 
 const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"];
 export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHADOWED_ENV.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`; }
+
+export interface ResumeSpecOptions {
+  model?: string | null;
+  effort?: string | null;
+}
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
 export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpecOptions = {}): ResumeSpec {
@@ -108,6 +114,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
       command: managed ? `${claudeEnvPrefix(options.claudeConfigDir!)} ${command}` : command,
       cwd,
       windowName: "claude-new",
+      engine: "claude",
       transcript: claudeTranscriptPath(cwd, sid, options.claudeProjectsDir ?? path.join(legacyClaudeHome(), "projects")),
     };
   }
@@ -123,6 +130,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     command: `CODEX_HOME=${shellQuote(home)} ${command}`,
     cwd,
     windowName: "codex-new",
+    engine: "codex",
   };
 }
 
@@ -131,7 +139,7 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
  * prompt can be typed into it. Claude subagent transcripts have no resumable
  * session of their own, so only root session files qualify.
  */
-export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null {
+export function resumeSpecFor(root: string, pathname: string, options: ResumeSpecOptions = {}): ResumeSpec | null {
   const base = path.basename(pathname);
   if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
     const sid = base.slice(0, -".jsonl".length);
@@ -140,11 +148,16 @@ export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null
     if (!home) return null;
     const managed = isManagedClaudeHome(home);
     const settings = managed ? claudeSettingsPath() : null;
-    const command = `${shellQuote(resolveBinary("claude"))} --dangerously-skip-permissions${settings ? ` --settings ${shellQuote(settings)}` : ""} --resume ${shellQuote(sid)}`;
+    let command = `${shellQuote(resolveBinary("claude"))} --dangerously-skip-permissions`;
+    if (settings) command += ` --settings ${shellQuote(settings)}`;
+    if (options.model) command += ` --model ${shellQuote(options.model)}`;
+    if (options.effort) command += ` --effort ${shellQuote(options.effort)}`;
+    command += ` --resume ${shellQuote(sid)}`;
     return {
       command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
+      engine: "claude",
     };
   }
   if (root === "codex-sessions" && base.endsWith(".jsonl")) {
@@ -152,11 +165,16 @@ export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null
     if (!id) return null;
     const home = codexHomeOwningSessionPath(pathname);
     if (!home) return null;
-    const credentialsStore = isManagedCodexHome(home) ? " -c cli_auth_credentials_store=file" : "";
+    let command = `${resolveBinary("codex")}`;
+    if (isManagedCodexHome(home)) command += " -c cli_auth_credentials_store=file";
+    if (options.model) command += ` -m ${shellQuote(options.model)}`;
+    if (options.effort) command += ` -c ${shellQuote(`model_reasoning_effort=${options.effort}`)}`;
+    command += ` resume ${id}`;
     return {
-      command: `CODEX_HOME=${shellQuote(home)} ${resolveBinary("codex")}${credentialsStore} resume ${id}`,
+      command: `CODEX_HOME=${shellQuote(home)} ${command}`,
       cwd: resumeCwd(pathname),
       windowName: "codex-resume",
+      engine: "codex",
     };
   }
   return null;
