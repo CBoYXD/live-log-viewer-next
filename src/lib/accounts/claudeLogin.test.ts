@@ -20,6 +20,11 @@ afterAll(() => { if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR; 
 test("parser handles ANSI and chunks while only allowlisted URLs survive", () => {
   expect(cleanClaudeLoginOutput("\u001b[31mhello\u001b[0m")).toBe("hello");
   expect(loginUrlFromOutput("https://evil.test/x https://claude.ai/login?a=1")).toBe("https://claude.ai/login?a=1");
+  /* CLI 2.1.x prints the claude.com URL wrapped in an OSC-8 hyperlink; the
+     visible copy between the open/close sequences must survive cleaning. */
+  const osc8 = "visit: \u001b]8;;https://claude.com/cai/oauth/authorize?code=true&state=abc\u001b\\https://claude.com/cai/oauth/authorize?code=true&state=abc\u001b]8;;\u001b\\ ";
+  expect(loginUrlFromOutput(cleanClaudeLoginOutput(osc8))).toBe("https://claude.com/cai/oauth/authorize?code=true&state=abc");
+  expect(loginUrlFromOutput("see https://platform.claude.com/oauth/code/callback now")).toBe("https://platform.claude.com/oauth/code/callback");
   expect(isExpectedClaudeLoginCommand("/usr/local/bin/claude\0auth\0login\0--claudeai\0")).toBe(true);
   expect(isExpectedClaudeLoginCommand("/usr/bin/node\0/opt/claude/cli.js\0auth\0login\0--claudeai\0")).toBe(true);
   expect(isExpectedClaudeLoginCommand("/bin/sh\0/usr/local/bin/claude\0auth\0login\0--claudeai\0")).toBe(true);

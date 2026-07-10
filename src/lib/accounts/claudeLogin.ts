@@ -13,8 +13,14 @@ const OUTPUT_LIMIT = 64 * 1024;
 const CODE_LIMIT = 8 * 1024;
 const LOGIN_TIMEOUT_MS = 10 * 60_000;
 const TERM_GRACE_MS = 2_000;
-const URL_HOSTS = new Set(["claude.ai", "console.anthropic.com"]);
-const ANSI = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
+/* claude.com / platform.claude.com are what the 2.1.x CLI actually prints
+   ("https://claude.com/cai/oauth/authorize?…"); the older hosts stay for
+   compatibility. A missing host here shows as "Очікуємо посилання…" forever. */
+const URL_HOSTS = new Set(["claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"]);
+/* The OSC branch must stop at the FIRST ST/BEL terminator ([^\x07\x1B]*, not
+   [^\x07]*): the CLI wraps the login URL in an OSC-8 hyperlink, and a greedy
+   match swallowed the visible URL between the open and close sequences. */
+const ANSI = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))/g;
 const URL_PATTERN = /https:\/\/[^\s"'<>]+/g;
 
 export type LoginOperation = LoginOperationSummary & {
