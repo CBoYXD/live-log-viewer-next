@@ -105,6 +105,33 @@ export function detectBlockingGate(screen: string): BlockingGate | null {
   return null;
 }
 
+function nextLocalClockTime(now: number, hour: number, minute: number): number | null {
+  if (!Number.isFinite(now) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  const current = new Date(now * 1000);
+  const reset = new Date(current);
+  reset.setHours(hour, minute, 0, 0);
+  if (reset.getTime() <= current.getTime()) reset.setDate(reset.getDate() + 1);
+  return Math.floor(reset.getTime() / 1000);
+}
+
+function resetTimeFromRateLimitScreen(screen: string, now: number): number | null {
+  const match = /(?:try again|resets?)(?:\s+\w+){0,4}\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?/i.exec(screen);
+  if (!match) return null;
+  const rawHour = Number(match[1]);
+  const minute = Number(match[2] ?? "0");
+  if (rawHour < 1 || rawHour > 12) return null;
+  const hour = rawHour % 12 + (match[3]?.toLowerCase() === "p" ? 12 : 0);
+  return nextLocalClockTime(now, hour, minute);
+}
+
+/** Typed view of a current full-screen quota wall. Region-aware gate logic
+    preserves ready composers whose transcript happens to discuss limits. */
+export function detectLiveRateLimit(screen: string, now = Date.now() / 1000): { resetAt: number | null } | null {
+  if (detectBlockingGate(screen) !== "rate_limit") return null;
+  const tail = screen.split("\n").slice(-14).join("\n");
+  return { resetAt: resetTimeFromRateLimitScreen(tail, now) };
+}
+
 /* Prompt shapes of the waiting-input scrape fallback: a numbered option menu
    under a highlight cursor is how both CLIs draw questions the viewer has no
    structured record for. Anchored to the line start — menu options always

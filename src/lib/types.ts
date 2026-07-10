@@ -12,6 +12,16 @@ export type Engine = "codex" | "claude" | "shell";
 export type Activity = "live" | "recent" | "stalled" | "idle";
 export type Fmt = "codex" | "claude" | "plain";
 
+/** Current quota wall affecting a hosted conversation. Account provenance
+    joins the existing conversation identity at the read-model boundary. */
+export interface RateLimitState {
+  source: "pane" | "account";
+  accountId: string | null;
+  window: "session" | "weekly" | null;
+  /** Unix seconds when work can resume, when the engine reports it. */
+  resetAt: number | null;
+}
+
 /** One sidebar entry returned by GET /api/files. */
 export interface FileEntry {
   path: string;
@@ -57,6 +67,8 @@ export interface FileEntry {
   goal?: AgentGoal | null;
   /** Best-effort TUI scrape fallback for prompts without a transcript protocol. */
   waitingInput: WaitingInput | null;
+  /** Live pane wall or fresh structured account exhaustion. */
+  rateLimit?: RateLimitState | null;
   /** claude-tasks only: recovered originating Bash command ("" if not found). */
   cmd?: string;
   /** claude-tasks only: the Bash tool `description` field. */

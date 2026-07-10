@@ -22,6 +22,7 @@ import { paneState, type PaneState } from "./paneState";
 import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
+import { RateLimitBadge } from "./RateLimitBadge";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, engineEdge, fmtAge } from "./utils";
 
 const noop = () => undefined;
@@ -224,6 +225,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </span>
             )}
             <EffortPills file={file} />
+            <RateLimitBadge rateLimit={file.rateLimit} />
             {/* The phone header keeps only actionable or alarming chips: ctx
                 appears once it nears the limit, the worktree name and the
                 branch-kind label yield their room to the rest of the row. */}

@@ -586,6 +586,9 @@ export const en = {
   "flowState.needs_decision": "needs a decision",
   "flowState.paused": "paused",
   "flowState.closed": "closed",
+  "flowState.blocked_rate_limited": "blocked: rate-limited",
+  "flowState.rate_limit_until": "resets at {time}",
+  "flowState.rate_limit_wait": "waiting for the quota reset",
   "flowModel.failed": "failed ({status})",
 
   "wfState.provisioning": "provisioning the worktree",
@@ -771,7 +774,10 @@ export const en = {
   "status.returnedResult": "returned with a result",
   "status.stalled": "interrupted or awaiting permission",
   "status.finishedTurn": "finished the turn — waiting for a reply",
+  "status.rateLimited": "rate-limited",
   "status.flow": "flow: {label}",
+  "rateLimit.badge": "rate-limited",
+  "rateLimit.badgeUntil": "rate-limited until {time}",
 
   // useDictation errors
   "dictation.capWarn": "less than a minute of recording left",

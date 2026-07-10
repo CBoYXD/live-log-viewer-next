@@ -8,7 +8,7 @@ import type { ActionEvent, FileEntry } from "@/lib/types";
 import { cleanTitle } from "@/lib/title";
 
 import { attentionId } from "@/components/attention";
-import { ATTENTION_STATES, claimedReviewerPaths, flowByImplementer, stateLabel } from "@/components/flows/flowModel";
+import { claimedReviewerPaths, flowByImplementer, flowPresentation } from "@/components/flows/flowModel";
 import { descendantCounts, isAuxTask, isConversation, isSubagent, projectKey } from "@/components/projectModel";
 import { fmtAge } from "@/components/utils";
 
@@ -41,6 +41,7 @@ function recentBucketSort(a: SwitchboardItem, b: SwitchboardItem): number {
 
 function timelineLabel(t: TFunction, file: FileEntry, latestByFile: ReadonlyMap<string, ActionEvent>): string {
   if (file.pendingQuestion) return file.pendingQuestion.kind === "plan" ? t("status.awaitingPlan") : t("status.awaitingAnswer");
+  if (file.rateLimit) return t("status.rateLimited");
   if (file.waitingInput) return t("status.awaitingTerminal");
   /* A live agent's own plan step names its current goal better than the last
      timeline event does. */
@@ -61,7 +62,7 @@ function isReturnedSubagent(file: FileEntry): boolean {
 }
 
 export function isAwaitingUser(file: FileEntry, now = Date.now() / 1000): boolean {
-  if (file.pendingQuestion || file.waitingInput) return true;
+  if (file.pendingQuestion || file.rateLimit || file.waitingInput) return true;
   /* An interrupted session stops being "yours to answer" after a while: a
      permission prompt from two days ago is dead context, so old stalled
      entries sink into the recency buckets instead of inflating the waiting
@@ -109,7 +110,7 @@ export function useSwitchboardData(
         const age = now - file.mtime;
         const flow = flowByImpl.get(file.path);
         let kind: SwitchboardCardKind =
-          file.pendingQuestion || file.waitingInput
+          file.pendingQuestion || file.rateLimit || file.waitingInput
             ? "waiting"
             : file.activity === "live"
             ? "working"
@@ -120,9 +121,10 @@ export function useSwitchboardData(
                 : "older";
         let statusLine = timelineLabel(t, file, latestByFile);
         if (flow) {
-          if (ATTENTION_STATES.has(flow.state)) kind = "waiting";
+          const presentation = flowPresentation(t, flow, locale);
+          if (presentation.attention) kind = "waiting";
           else if (flow.state === "reviewing" || flow.state === "relaying" || flow.state === "spawning") kind = "working";
-          statusLine = `${t("status.flow", { label: stateLabel(t, flow.state) })}${flow.stateDetail ? ` — ${flow.stateDetail}` : ""}`;
+          statusLine = `${t("status.flow", { label: presentation.label })}${presentation.detail ? ` — ${presentation.detail}` : ""}`;
         }
         return {
           file,

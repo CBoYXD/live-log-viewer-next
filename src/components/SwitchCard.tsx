@@ -9,6 +9,7 @@ import type { FileEntry } from "@/lib/types";
 import { EffortPills } from "./EffortPills";
 import { CtxChip } from "./PlanChip";
 import { ProcessStatusControls } from "./TaskHeader";
+import { RateLimitBadge } from "./RateLimitBadge";
 import { activityDot, cleanTitle, effortTint, effortTitle, engineBadge, fmtAge } from "./utils";
 
 export type SwitchCardSize = "large" | "small";
@@ -79,6 +80,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
           <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style}>{badge.label}</span>
         )}
         <EffortPills file={file} />
+        <RateLimitBadge rateLimit={file.rateLimit} />
         <span
           className={`ml-auto min-w-0 truncate rounded-full border border-line bg-bg px-1.5 py-0.5 text-[9.5px] font-semibold ${
             project === currentProject ? "text-dim" : "text-ink"

@@ -10,7 +10,7 @@ import type { Flow, FlowAction } from "@/lib/flows/types";
 import { Hint } from "@/components/Hint";
 import { useRuntimeFlow } from "@/hooks/useRuntime";
 
-import { ATTENTION_STATES, patchFlow, PENDING_ACTIONS, stateLabel, verdictTone } from "./flowModel";
+import { flowPresentation, patchFlow, verdictTone } from "./flowModel";
 import { RoundStateIcon } from "./RoundIcons";
 
 const BUSY_STATES: ReadonlySet<Flow["state"]> = new Set(["spawning", "reviewing", "relaying", "fixing"]);
@@ -19,6 +19,7 @@ const BUSY_STATES: ReadonlySet<Flow["state"]> = new Set(["spawning", "reviewing"
 const LIMIT_STOPS = [1, 2, 3, 4, 5, 0];
 
 function stateDot(flow: Flow): string {
+  if (flow.block) return "bg-err";
   if (flow.state === "approved") return "bg-ok";
   if (flow.state === "needs_decision") return "bg-err";
   if (flow.state === "paused") return "bg-[#e0ae45]";
@@ -33,10 +34,11 @@ function stateDot(flow: Flow): string {
  * refresh carries the resulting state back.
  */
 export function FlowStrip({ flow: polledFlow, onFocusRound }: { flow: Flow; onFocusRound?: (n: number) => void }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   /* Event-driven progression wins over the poll: if the runtime bus carries
      this flow, its state is fresher than the last /api/files snapshot. */
-  const flow = useRuntimeFlow(polledFlow.id) ?? polledFlow;
+  const runtimeFlow = useRuntimeFlow(polledFlow.id);
+  const flow = runtimeFlow ? { ...runtimeFlow, block: polledFlow.block } : polledFlow;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState("");
@@ -51,11 +53,12 @@ export function FlowStrip({ flow: polledFlow, onFocusRound }: { flow: Flow; onFo
     setBusy(false);
   };
 
-  const pending = PENDING_ACTIONS[flow.state];
-  const attention = ATTENTION_STATES.has(flow.state);
+  const presentation = flowPresentation(t, flow, locale);
+  const pending = presentation.pending;
+  const attention = presentation.attention;
   const closed = flow.state === "closed" || flow.state === "approved";
   /* The note rides along with the action that starts the next round. */
-  const noteTakingAction = flow.state === "waiting_ready" || flow.state === "needs_decision";
+  const noteTakingAction = Boolean(pending) && (flow.state === "waiting_ready" || flow.state === "needs_decision");
 
   return (
     <div
@@ -68,10 +71,10 @@ export function FlowStrip({ flow: polledFlow, onFocusRound }: { flow: Flow; onFo
       <span className="flex min-w-0 max-w-[38%] shrink-0 items-center gap-2">
         <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${stateDot(flow)}`} aria-hidden />
         <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-dim">{t("flowStrip.flow")}</span>
-        <span className="shrink-0 text-[12px] font-bold">{stateLabel(t, flow.state)}</span>
-        {flow.stateDetail ? (
-          <span className="min-w-0 truncate text-[11.5px] font-semibold text-dim" title={flow.stateDetail}>
-            {flow.stateDetail}
+        <span className="shrink-0 text-[12px] font-bold">{presentation.label}</span>
+        {presentation.detail ? (
+          <span className="min-w-0 truncate text-[11.5px] font-semibold text-dim" title={presentation.detail}>
+            {presentation.detail}
           </span>
         ) : null}
       </span>
