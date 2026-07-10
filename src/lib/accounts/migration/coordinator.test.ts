@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { AgentRegistry, MigrationRevisionError, type ConversationObservation } from "@/lib/agent/registry";
 
-import { advanceConversationMigration, drainHeldDeliveries } from "./coordinator";
+import { advanceConversationMigration, drainHeldDeliveries, previewMigration } from "./coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "./contracts";
 
 const roots: string[] = [];
@@ -16,7 +16,7 @@ function registry(): AgentRegistry {
   return new AgentRegistry(path.join(root, "registry.json"));
 }
 
-function observation(pathname: string, accountId: string, state: "idle" | "busy" | "terminal", role: "root" | "worker" = "worker"): ConversationObservation {
+function observation(pathname: string, accountId: string | null, state: "idle" | "busy" | "terminal", role: "root" | "worker" = "worker"): ConversationObservation {
   return {
     engine: "codex",
     path: pathname,
@@ -60,6 +60,27 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("unowned inventory stays outside previews and committed migration scope", async () => {
+    const store = registry();
+    store.reconcileConversations([
+      observation("/owned.jsonl", "managed", "idle"),
+      observation("/scanner-artifact.log", null, "busy"),
+    ]);
+
+    const preview = await previewMigration("codex", "default", store, []);
+    expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "default",
+      origin: "manual",
+      requestId: "owned-only",
+      expectedRevision: preview.previewRevision,
+    });
+
+    expect(store.conversationForPath("/owned.jsonl")?.migration).toMatchObject({ targetId: "default" });
+    expect(store.conversationForPath("/scanner-artifact.log")?.migration).toBeNull();
+  });
+
   test("commits routing, intent, and every conversation scope including roots atomically", () => {
     const store = registry();
     store.reconcileConversations([

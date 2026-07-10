@@ -24,6 +24,44 @@ afterEach(() => {
 });
 
 describe("safe history copy", () => {
+  test("accepts owner-controlled 0755 directory trees and rejects writable peer roots", () => {
+    const f = fixture();
+    const year = path.join(f.sourceRoot, "2026");
+    const month = path.join(year, "07");
+    const day = path.join(month, "10");
+    fs.mkdirSync(day, { recursive: true, mode: 0o755 });
+    for (const directory of [f.sourceRoot, year, month, day, f.targetRoot]) fs.chmodSync(directory, 0o755);
+    const sourcePath = path.join(day, "rollout.jsonl");
+    fs.writeFileSync(sourcePath, "standard Codex history\n", { mode: 0o644 });
+
+    const copied = safeCopyHistory({
+      sourcePath,
+      sourceRoot: f.sourceRoot,
+      targetRoot: f.targetRoot,
+      destinationRelative: "2026/07/10/rollout.jsonl",
+      operationId: "standard-modes",
+    });
+    expect(fs.readFileSync(copied.path, "utf8")).toBe("standard Codex history\n");
+
+    fs.chmodSync(f.sourceRoot, 0o775);
+    expect(() => safeCopyHistory({
+      sourcePath,
+      sourceRoot: f.sourceRoot,
+      targetRoot: f.targetRoot,
+      destinationRelative: "source-writable.jsonl",
+      operationId: "source-writable",
+    })).toThrow(HistorySecurityError);
+    fs.chmodSync(f.sourceRoot, 0o755);
+    fs.chmodSync(f.targetRoot, 0o775);
+    expect(() => safeCopyHistory({
+      sourcePath,
+      sourceRoot: f.sourceRoot,
+      targetRoot: f.targetRoot,
+      destinationRelative: "target-writable.jsonl",
+      operationId: "target-writable",
+    })).toThrow(HistorySecurityError);
+  });
+
   test("streams, hashes, publishes with private modes, and dedupes one operation", () => {
     const f = fixture();
     const first = safeCopyHistory({ ...f, destinationRelative: "2026/07/rollout.jsonl", operationId: "operation-1" });
@@ -62,7 +100,7 @@ describe("safe history copy", () => {
       .toThrow(HistorySecurityError);
     fs.unlinkSync(hardlink);
 
-    fs.chmodSync(f.sourcePath, 0o644);
+    fs.chmodSync(f.sourcePath, 0o664);
     expect(() => safeCopyHistory({ ...f, destinationRelative: "mode.jsonl", operationId: "mode" }))
       .toThrow(HistorySecurityError);
     fs.chmodSync(f.sourcePath, 0o600);

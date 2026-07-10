@@ -30,7 +30,10 @@ function owned(stat: fs.Stats): boolean {
 function safeDirectory(pathname: string): fs.Stats {
   let stat: fs.Stats;
   try { stat = fs.lstatSync(pathname); } catch { throw new HistorySecurityError("unsafe-root"); }
-  if (!stat.isDirectory() || stat.isSymbolicLink() || !owned(stat) || (stat.mode & 0o077) !== 0) {
+  // Codex creates account and date hierarchy directories as 0755. Read and
+  // traverse bits preserve integrity; any peer write bit would permit a path
+  // component swap and remains forbidden.
+  if (!stat.isDirectory() || stat.isSymbolicLink() || !owned(stat) || (stat.mode & 0o022) !== 0) {
     throw new HistorySecurityError("unsafe-root");
   }
   return stat;
@@ -73,7 +76,9 @@ export function validateHistorySource(sourcePath: string, sourceRoot: string, ma
   }
   if (!contained(rootReal, sourceReal)) throw new HistorySecurityError("unsafe-source");
   const listed = fs.lstatSync(sourcePath);
-  if (!listed.isFile() || listed.isSymbolicLink() || listed.nlink !== 1 || !owned(listed) || (listed.mode & 0o077) !== 0) {
+  // Installed Codex rollouts are commonly 0644. The migration reads them only
+  // from an owned, write-protected hierarchy and republishes the copy as 0600.
+  if (!listed.isFile() || listed.isSymbolicLink() || listed.nlink !== 1 || !owned(listed) || (listed.mode & 0o022) !== 0) {
     throw new HistorySecurityError("unsafe-source");
   }
   if (listed.size > maxBytes) throw new HistorySecurityError("history-too-large");

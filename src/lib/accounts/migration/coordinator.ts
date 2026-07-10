@@ -94,6 +94,7 @@ function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry
     if (conversation.engine !== engine) continue;
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
+    if (generation.accountId === null) continue;
     if (generation.accountId === targetId) { alreadyTarget += 1; continue; }
     if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") busy += 1;
     else idle += 1;

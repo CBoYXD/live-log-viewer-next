@@ -118,14 +118,15 @@ test("unknown Claude transcript model omits the successor override", async () =>
   expect(command).not.toContain("--model");
 });
 
-test("Codex successor provider forks, safely copies, resumes, and verifies through app-server ports", async () => {
+test("Codex successor provider accepts standard 0755 account roots and migrates through app-server ports", async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "llv-provider-codex-"));
   roots.push(base);
   const source = accountRoot("codex", base, "source");
   const target = accountRoot("codex", base, "target");
+  for (const directory of [source.home, source.transcriptRoot, target.home, target.transcriptRoot]) fs.chmodSync(directory, 0o755);
   const sourcePath = path.join(source.transcriptRoot, "2026", "07", "10", "rollout-019f423a-d6e9-7903-b597-3e676b6ff3d4.jsonl");
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(sourcePath, "{\"type\":\"session_meta\"}\n", { mode: 0o600 });
+  fs.writeFileSync(sourcePath, "{\"type\":\"session_meta\"}\n", { mode: 0o644 });
   const forkId = "019f423a-d6e9-4903-8597-3e676b6ff3d4";
   const forkPath = path.join(source.transcriptRoot, "2026", "07", "10", `rollout-${forkId}.jsonl`);
   const calls: string[] = [];
@@ -133,7 +134,7 @@ test("Codex successor provider forks, safely copies, resumes, and verifies throu
   let goalOptions: unknown = null;
   const client = (home: string) => ({
     async readAccount() { calls.push(`${path.basename(home)}:account`); return { account: { type: "chatgpt" }, requiresOpenaiAuth: false }; },
-    async forkThread() { calls.push("source:fork"); fs.writeFileSync(forkPath, "{\"type\":\"session_meta\"}\n", { mode: 0o600 }); return { id: forkId, path: forkPath }; },
+    async forkThread() { calls.push("source:fork"); fs.writeFileSync(forkPath, "{\"type\":\"session_meta\"}\n", { mode: 0o644 }); return { id: forkId, path: forkPath }; },
     async resumeThread(id: string, options: unknown) { calls.push("target:resume"); resumeOptions = options; return { id, path: null }; },
     async readThread(id: string) { calls.push("target:read"); return { id, path: null }; },
     async setThreadName() { calls.push("target:name"); },

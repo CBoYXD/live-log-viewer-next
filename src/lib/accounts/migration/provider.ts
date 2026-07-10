@@ -70,7 +70,7 @@ function findCodexRollout(root: string, nativeId: string): string {
 
 function ensureTargetRoot(account: AccountContext): void {
   const home = fs.lstatSync(account.home);
-  if (!home.isDirectory() || home.isSymbolicLink() || (process.getuid && home.uid !== process.getuid()) || (home.mode & 0o077) !== 0) {
+  if (!home.isDirectory() || home.isSymbolicLink() || (process.getuid && home.uid !== process.getuid()) || (home.mode & 0o022) !== 0) {
     throw new Error("target account home failed safety checks");
   }
   if (path.dirname(path.resolve(account.transcriptRoot)) !== path.resolve(account.home)) throw new Error("target transcript root is outside its account home");
@@ -78,7 +78,7 @@ function ensureTargetRoot(account: AccountContext): void {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
   const root = fs.lstatSync(account.transcriptRoot);
-  if (!root.isDirectory() || root.isSymbolicLink() || (process.getuid && root.uid !== process.getuid()) || (root.mode & 0o077) !== 0) {
+  if (!root.isDirectory() || root.isSymbolicLink() || (process.getuid && root.uid !== process.getuid()) || (root.mode & 0o022) !== 0) {
     throw new Error("target transcript root failed safety checks");
   }
 }
