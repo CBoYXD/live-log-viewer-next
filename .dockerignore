@@ -5,3 +5,17 @@ npm-debug.log*
 Dockerfile
 docker-compose.yml
 docs/docker.md
+
+# Local working artifacts — never part of the app image. Without these the
+# build context from the main checkout balloons past 10GB (nested worktrees
+# carry their own node_modules/.next).
+.worktrees
+worktrees
+.tmux-multi-agent
+.agents
+.playwright-mcp
+.claude
+dist
+*.log
+*.png
+tsconfig.tsbuildinfo

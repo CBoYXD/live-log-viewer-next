@@ -175,5 +175,11 @@ COPY --from=build /app/src ./src
 COPY --from=build /app/scripts/whisper_transcribe.py ./scripts/whisper_transcribe.py
 COPY --from=build /app/node_modules ./node_modules
 
+# COPY preserves source-context modes. Agent worktrees are created with umask
+# 077, which once shipped root-owned 0600 files into an image that runs as uid
+# 1000 and crash-looped on EACCES (/app/tsconfig.json). Normalize read bits so
+# context perms can never take the runtime down again.
+RUN chmod -R a+rX /app
+
 EXPOSE 8898
 CMD ["sh", "-c", "exec node_modules/.bin/next start --port ${PORT:-8898} --hostname ${HOSTNAME:-127.0.0.1}"]
