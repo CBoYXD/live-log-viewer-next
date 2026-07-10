@@ -718,7 +718,7 @@ export function createEngineAccountsStore(
           return false;
         }
         const accounts = snapshot.accounts.filter((account) => account.id !== accountId);
-        patchSnapshot({ accounts, challenge: pendingDeviceAuth(accounts), identityVersion: snapshot.identityVersion + 1 });
+        patchSnapshot({ accounts, challenge: pendingDeviceAuth(accounts), identityVersion: snapshot.identityVersion + 1, notice: null });
       } catch {
         patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.removeFailed", target: label, action: null } });
         await refresh();

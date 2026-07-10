@@ -619,5 +619,6 @@ test("managed account removal retries with force only after the API reports a sa
     { id: "work", force: true },
   ]);
   expect(store.accounts.some((account) => account.id === "work")).toBeFalse();
+  expect(store.notice).toBeNull();
   unsub();
 });

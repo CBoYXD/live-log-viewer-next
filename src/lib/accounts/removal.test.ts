@@ -30,3 +30,12 @@ test("a pending Viewer spawn blocks managed-home removal for its assigned accoun
   expect(accountRemovalBlockers("claude", "work")).toEqual(["live_sessions"]);
   expect(accountRemovalBlockers("claude", "other")).toEqual([]);
 });
+
+test("an unresolved live launch blocks removal of every managed account for its engine", () => {
+  const registry = new AgentRegistry(path.join(process.env.LLV_STATE_DIR!, "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  registry.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: null });
+
+  expect(accountRemovalBlockers("codex", "work")).toEqual(["live_sessions"]);
+  expect(accountRemovalBlockers("claude", "work")).toEqual([]);
+});

@@ -13,8 +13,10 @@ process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
 
 const { DELETE: remove, POST } = await import("./route");
+const { createManagedCodexAccount } = await import("@/lib/accounts/codex");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
+const { agentRegistry } = await import("@/lib/agent/registry");
 
 class FakeChild extends EventEmitter {
   readonly stdin = { write: (line: string) => { this.onWrite(JSON.parse(line) as Record<string, unknown>); return true; }, end: () => undefined };
@@ -114,4 +116,38 @@ test("managed Codex removal requires force during device login and cancels the l
   }));
   expect(forced.status).toBe(200);
   expect(children[0]?.kills).toBeGreaterThan(0);
+});
+
+test("managed Codex removal retires routing and migration intents targeting the account", async () => {
+  const account = createManagedCodexAccount("Routed removal");
+  const registry = agentRegistry();
+  registry.setEngineRouting("codex", account.id);
+  const intent = registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: account.id,
+    origin: "manual",
+    requestId: "remove-routed-codex",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+
+  expect(response.status).toBe(200);
+  expect(registry.engineRouting("codex").activeAccountId).toBe("default");
+  expect(registry.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
+});
+
+test("managed Codex removal reports a corrupt registry as locked", async () => {
+  const file = path.join(process.env.LLV_STATE_DIR!, "codex-accounts.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{ corrupt");
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/codex", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: "missing" }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
 });

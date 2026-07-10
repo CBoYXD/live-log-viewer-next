@@ -180,11 +180,12 @@ export function createManagedClaudeAccount(label: string): ClaudeAccount {
 
 export function removeManagedClaudeAccount(id: string): void {
   withRegistryLock(() => {
-    cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) return;
+    cached = null; const registry = mutable(); const existing = registry.accounts.find((item) => item.id === id); if (!existing) throw new UnknownClaudeAccountError(id);
     const home = managedHome(id);
-    if (fs.existsSync(home) && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
+    const exists = fs.existsSync(home);
+    if (exists && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
+    if (exists) fs.rmSync(home, { recursive: true, force: true });
     write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
-    fs.rmSync(home, { recursive: true, force: true });
   });
 }
 
@@ -195,7 +196,8 @@ export function cleanupOrphanedClaudeHomes(): string[] {
     const registry = mutable();
     const registered = new Set(registry.accounts.map((account) => account.id));
     let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(claudeAccountsRoot(), { withFileTypes: true }); } catch { return []; }
+    try { entries = fs.readdirSync(claudeAccountsRoot(), { withFileTypes: true }); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
     const removed: string[] = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || registered.has(entry.name) || !managedClaudeHomeIsSafe(entry.name, true)) continue;

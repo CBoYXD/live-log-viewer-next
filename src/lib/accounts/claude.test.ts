@@ -86,6 +86,39 @@ test("managed account removal deletes its registry record and home, while orphan
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
+test("a home deletion failure keeps the Claude account registered and retryable", () => {
+  const account = mod.createManagedClaudeAccount("Retry removal");
+  const originalRm = fs.rmSync;
+  fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+    if (String(target).includes(account.id)) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    return originalRm(target, options);
+  }) as typeof fs.rmSync;
+  try {
+    expect(() => mod.removeManagedClaudeAccount(account.id)).toThrow("denied");
+  } finally {
+    fs.rmSync = originalRm;
+  }
+
+  expect(mod.listClaudeAccounts().map((item) => item.id)).toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(true);
+  expect(() => mod.removeManagedClaudeAccount(account.id)).not.toThrow();
+});
+
+test("orphan cleanup propagates a Claude accounts-root read failure", () => {
+  const root = mod.claudeAccountsRoot();
+  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+  const originalRead = fs.readdirSync;
+  fs.readdirSync = ((target: fs.PathLike, options?: unknown) => {
+    if (path.resolve(String(target)) === path.resolve(root)) throw Object.assign(new Error("unreadable"), { code: "EACCES" });
+    return originalRead(target, options as never);
+  }) as typeof fs.readdirSync;
+  try {
+    expect(() => mod.cleanupOrphanedClaudeHomes()).toThrow("unreadable");
+  } finally {
+    fs.readdirSync = originalRead;
+  }
+});
+
 test("an interrupted registry replacement leaves the prior atomic registry readable", () => {
   const account = mod.createManagedClaudeAccount("Atomic");
   const registry = mod.claudeRegistryPath();

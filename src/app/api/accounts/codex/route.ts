@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { CorruptCodexAccountsError, InvalidAccountLabelError, UnknownAccountError, UnsafeCodexHomeError, cleanupOrphanedCodexHomes, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setCodexAccountLoginPane } from "@/lib/accounts/codex";
+import { CorruptCodexAccountsError, InvalidAccountLabelError, UnknownAccountError, UnsafeCodexHomeError, cleanupOrphanedCodexHomes, codexAccountsMutationLocked, createManagedCodexAccount, listCodexAccounts, removeManagedCodexAccount, setCodexAccountLoginPane } from "@/lib/accounts/codex";
 import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export const runtime = "nodejs";
@@ -60,6 +61,7 @@ export async function DELETE(req: NextRequest) {
   if (typeof body.id !== "string" || typeof body.force !== "undefined" && typeof body.force !== "boolean") {
     return NextResponse.json({ error: "account id and force flag are invalid", code: "invalid_request" }, { status: 400 });
   }
+  if (codexAccountsMutationLocked()) return NextResponse.json({ error: "Codex accounts require registry repair", code: "accounts_locked" }, { status: 409 });
   const account = listCodexAccounts().find((candidate) => candidate.id === body.id);
   if (!account || account.kind !== "managed") return NextResponse.json({ error: "Codex account is unavailable", code: "unknown_account" }, { status: 404 });
   const login = managedCodexRuntime().peekLogin(account);
@@ -73,6 +75,7 @@ export async function DELETE(req: NextRequest) {
   try {
     if (login.attemptState === "pending") await managedCodexRuntime().cancelLogin(account.id);
     if (account.loginPane !== null) setCodexAccountLoginPane(account.id, null);
+    agentRegistry().retireAccount("codex", account.id, "default");
     removeManagedCodexAccount(account.id);
     return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {

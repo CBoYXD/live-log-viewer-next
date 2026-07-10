@@ -13,6 +13,8 @@ process.env.LLV_STATE_DIR = path.join(sandbox, "state");
 process.env.LLV_CLAUDE_HOME = path.join(sandbox, "legacy");
 
 const { ClaudeLoginSupervisor, setClaudeLoginSupervisorForTests } = await import("@/lib/accounts/claudeLogin");
+const { claudeRegistryPath, createManagedClaudeAccount } = await import("@/lib/accounts/claude");
+const { agentRegistry } = await import("@/lib/agent/registry");
 const { DELETE: remove, POST } = await import("./route");
 const { DELETE } = await import("./login/[operationId]/route");
 const { POST: submitInput } = await import("./login/[operationId]/input/route");
@@ -141,4 +143,38 @@ test("managed Claude removal requires force during login and cancels the operati
   }));
   expect(forced.status).toBe(200);
   await expect(forced.json()).resolves.toEqual({ removed: { id: account.id } });
+});
+
+test("managed Claude removal retires routing and migration intents targeting the account", async () => {
+  const account = createManagedClaudeAccount("Routed removal");
+  const registry = agentRegistry();
+  registry.setEngineRouting("claude", account.id);
+  const intent = registry.commitMigrationIntent({
+    engine: "claude",
+    targetId: account.id,
+    origin: "manual",
+    requestId: "remove-routed-claude",
+    expectedRevision: registry.engineRouting("claude").revision,
+  });
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: account.id }),
+  }));
+
+  expect(response.status).toBe(200);
+  expect(registry.engineRouting("claude").activeAccountId).toBe("default");
+  expect(registry.snapshot().migrationIntents[intent.id]?.state).toBe("stopped");
+});
+
+test("managed Claude removal reports a corrupt registry as locked", async () => {
+  const file = claudeRegistryPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, "{ corrupt");
+
+  const response = await remove(new NextRequest("http://127.0.0.1/api/accounts/claude", {
+    method: "DELETE", headers: { host: "127.0.0.1", "content-type": "application/json" }, body: JSON.stringify({ id: "missing" }),
+  }));
+
+  expect(response.status).toBe(409);
+  await expect(response.json()).resolves.toEqual(expect.objectContaining({ code: "accounts_locked" }));
 });

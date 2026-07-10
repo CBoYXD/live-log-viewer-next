@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
+import { CorruptClaudeAccountsError, InvalidClaudeAccountLabelError, UnknownClaudeAccountError, UnsafeClaudeHomeError, cleanupOrphanedClaudeHomes, claudeAccountsMutationLocked, createManagedClaudeAccount, listClaudeAccounts, removeManagedClaudeAccount } from "@/lib/accounts/claude";
 import { claudeLoginSupervisor } from "@/lib/accounts/claudeLogin";
 import { accountRemovalBlockers } from "@/lib/accounts/removal";
+import { agentRegistry } from "@/lib/agent/registry";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 export const runtime = "nodejs";
@@ -77,6 +78,7 @@ export async function DELETE(req: NextRequest) {
   if (typeof body.id !== "string" || typeof body.force !== "undefined" && typeof body.force !== "boolean") {
     return failure(400, "invalid_request", "Account id and force flag are invalid");
   }
+  if (claudeAccountsMutationLocked()) return failure(409, "accounts_locked", "Claude accounts require registry repair");
   const account = listClaudeAccounts().find((candidate) => candidate.id === body.id);
   if (!account || account.kind !== "managed") return failure(404, "unknown_account", "Claude account is unavailable");
   const login = claudeLoginSupervisor.forAccount(account.id);
@@ -89,6 +91,7 @@ export async function DELETE(req: NextRequest) {
   }
   try {
     if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
+    agentRegistry().retireAccount("claude", account.id, "default");
     removeManagedClaudeAccount(account.id);
     return NextResponse.json({ removed: { id: account.id } });
   } catch (error) {
