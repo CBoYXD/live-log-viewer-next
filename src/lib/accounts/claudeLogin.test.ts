@@ -22,8 +22,11 @@ test("parser handles ANSI and chunks while only allowlisted URLs survive", () =>
   expect(loginUrlFromOutput("https://evil.test/x https://claude.ai/login?a=1")).toBe("https://claude.ai/login?a=1");
   expect(isExpectedClaudeLoginCommand("/usr/local/bin/claude\0auth\0login\0--claudeai\0")).toBe(true);
   expect(isExpectedClaudeLoginCommand("/usr/bin/node\0/opt/claude/cli.js\0auth\0login\0--claudeai\0")).toBe(true);
+  expect(isExpectedClaudeLoginCommand("/bin/sh\0/usr/local/bin/claude\0auth\0login\0--claudeai\0")).toBe(true);
   expect(isExpectedClaudeLoginCommand("/usr/local/bin/claude\0auth\0status\0--json\0")).toBe(false);
   expect(isExpectedClaudeLoginCommand("/usr/local/bin/claude\0auth\0login\0--claudeai\0--extra\0")).toBe(false);
+  expect(isExpectedClaudeLoginCommand("/bin/sh\0/usr/local/bin/claude\0auth\0status\0--json\0")).toBe(false);
+  expect(isExpectedClaudeLoginCommand("/bin/sh\0-c\0claude auth login --claudeai\0")).toBe(false);
 });
 
 test("a clean environment starts the Claude CLI login protocol without activation flags", () => {

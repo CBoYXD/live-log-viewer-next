@@ -40,6 +40,7 @@ export interface LoginChild {
   stderr?: NodeJS.ReadableStream | null;
   once(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   once(event: "error", listener: (error: Error) => void): this;
+  kill?(signal?: NodeJS.Signals): boolean;
 }
 
 export interface ClaudeLoginPorts {
@@ -68,7 +69,12 @@ export function isExpectedClaudeLoginCommand(commandLine: string): boolean {
   const args = commandLine.split("\0").filter(Boolean);
   const direct = /(?:^|\/)claude$/.test(args[0] ?? "") && args.length === 4;
   const wrapped = /(?:^|\/)(?:node|bun)$/.test(args[0] ?? "") && /claude/i.test(args[1] ?? "") && args.length === 5;
-  const offset = direct ? 1 : wrapped ? 2 : -1;
+  /* Inside the Docker runtime `claude` is the nsenter shim — a /bin/sh script —
+     so the spawned pid's cmdline reads `/bin/sh /usr/local/bin/claude auth
+     login --claudeai`. Without this form the fence rejects every container
+     login with launch_unfenced. */
+  const shimmed = /(?:^|\/)(?:sh|dash|bash)$/.test(args[0] ?? "") && /(?:^|\/)claude$/.test(args[1] ?? "") && args.length === 5;
+  const offset = direct ? 1 : wrapped || shimmed ? 2 : -1;
   return offset >= 0 && args[offset] === "auth" && args[offset + 1] === "login" && args[offset + 2] === "--claudeai";
 }
 
@@ -247,6 +253,12 @@ export class ClaudeLoginSupervisor {
       const startToken = pid ? this.ports.pidStartToken(pid) : null;
       if (!pid || !startToken || !this.ports.isExpectedClaude(pid)) {
         child.stdin?.end();
+        /* The child was already spawned; without a kill a fence rejection
+           leaks a live interactive `claude auth login` process on the host.
+           Kill through the child handle, never through ports.kill(pid): the
+           pid failed the identity fence, so signaling it by number is exactly
+           what the fence exists to prevent. */
+        try { child.kill?.("SIGKILL"); } catch { /* already gone */ }
         return this.summary(this.finish(id, "failed", loginResult("failure", "launch_unfenced", "Claude login process could not be verified")));
       }
       const current = this.operations.get(id)!;
