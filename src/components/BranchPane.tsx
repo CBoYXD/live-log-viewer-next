@@ -9,8 +9,11 @@ import { registerPane } from "@/lib/chime";
 import { type TFunction, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
+import { cardMigrationState, postSessionMigration } from "@/lib/accounts/migration";
+
 import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
+import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
 import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
@@ -97,6 +100,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   const badge = engineBadge(file);
   const state = paneState(file);
   const tone = PANE_TONES[state];
+  const migState = cardMigrationState(file.migration);
   /* Panes outside the viewport stop polling and parsing: the board can hold
      dozens of live conversations while only a handful fit on screen. The
      margin pre-wakes panes just beyond the edge so panning never shows a
@@ -223,6 +227,19 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             )}
           </div>
         </header>
+        {/* Account-migration status ribbon (issue #40): sits in the same slot
+            family as the flow banner. Renders only while this conversation is
+            migrating; absent otherwise, so non-migrating panes are unchanged. */}
+        {migState ? (
+          <MigrationRibbon
+            state={migState}
+            targetLabel={file.migration?.targetLabel ?? file.migration?.targetAccountId ?? ""}
+            currentLabel={file.migration?.sourceLabel}
+            error={file.migration?.failure ?? null}
+            onRetry={() => void postSessionMigration(file.path, "retry")}
+            onKeep={() => void postSessionMigration(file.path, "rollback")}
+          />
+        ) : null}
         {banner ?? null}
         {tasks.length ? (
           <FlipRow className="shrink-0 border-b border-line bg-[#fbfbfd]" enter="fade">
@@ -233,6 +250,9 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
             ))}
           </FlipRow>
         ) : null}
+        {/* The "done" seam of a committed migration: a divider naming the
+            account this conversation continued from, above its transcript. */}
+        <MigrationDivider predecessorLabel={file.predecessorLabel} />
         <LogFeed
           file={file}
           showSvc={false}
