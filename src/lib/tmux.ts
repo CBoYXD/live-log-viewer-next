@@ -771,6 +771,9 @@ export async function resolveTmuxAttach(
     return { ok: false, reason: "tmux-unavailable" };
   }
   const tmuxServerStartIdentity = processIdentity(tmuxServerPid);
+  if (tmuxServerPid === expected.tmuxServerPid && expected.tmuxServerStartIdentity !== null && tmuxServerStartIdentity === null) {
+    return { ok: false, reason: "tmux-unavailable" };
+  }
   if (
     tmuxServerPid !== expected.tmuxServerPid ||
     (expected.tmuxServerStartIdentity !== null && tmuxServerStartIdentity !== expected.tmuxServerStartIdentity)
@@ -798,12 +801,16 @@ export async function resolveTmuxAttach(
   if (!Number.isInteger(observedServerPid) || observedServerPid <= 0 || !paneId || !Number.isInteger(panePid) || panePid <= 0 || !target) {
     return { ok: false, reason: "tmux-unavailable" };
   }
+  const paneStartIdentity = processIdentity(panePid);
+  if (paneId === expected.paneId && panePid === expected.panePid && expected.paneStartIdentity !== null && paneStartIdentity === null) {
+    return { ok: false, reason: "tmux-unavailable" };
+  }
   const state = classifyTmuxAttachSnapshot(expected, {
     tmuxServerPid: observedServerPid,
     tmuxServerStartIdentity: observedServerPid === tmuxServerPid ? tmuxServerStartIdentity : processIdentity(observedServerPid),
     paneId,
     panePid,
-    paneStartIdentity: processIdentity(panePid),
+    paneStartIdentity,
     target,
   });
   if (state !== "ok") return { ok: false, reason: state };

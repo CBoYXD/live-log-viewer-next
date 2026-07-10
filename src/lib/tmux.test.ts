@@ -336,4 +336,25 @@ describe("cleanupTmuxHostIfMatches", () => {
       expect(result).toBe(expected);
     }
   });
+
+  test("retries when required server or pane process identity is unavailable", async () => {
+    for (const missingIdentityPid of [900, 100]) {
+      let calls = 0;
+      const result = await cleanupTmuxHostIfMatches(host, {
+        runTmux: async () => {
+          calls += 1;
+          if (calls === 1) return { code: 0, stdout: "900\n", stderr: "" };
+          return { code: 0, stdout: "900\t%11\t100\tagents:2.0\n", stderr: "" };
+        },
+        processIdentity: (pid) => {
+          if (pid === missingIdentityPid) return null;
+          if (pid === 900) return "900:one";
+          if (pid === 100) return "100:one";
+          return null;
+        },
+      });
+      expect(result).toBe("unverifiable");
+      expect(calls).toBe(missingIdentityPid === 900 ? 1 : 2);
+    }
+  });
 });
