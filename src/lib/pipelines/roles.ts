@@ -1,4 +1,4 @@
-import { listRoles } from "@/lib/roles/registry";
+import { listRoles, validateRoleParams } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
@@ -66,6 +66,23 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
 
 export function setPipelineRoleLookup(lookup: PipelineRoleLookup | null): void {
   installedLookup = lookup;
+}
+
+/**
+ * Canonical value-validation for a pipeline stage's role params, so a create
+ * POST cannot freeze a scaffold with a bogus select option, an out-of-range
+ * integer, an unknown key, or over-long text — the same rules the shared role
+ * registry enforces. `requireRequired` is off: a pipeline stage resolves absent
+ * params to registry defaults (a reviewer needs no explicit diffSource — it
+ * reviews the stage's own branch), matching how role-less stages already work.
+ * Returns an error string for the caller to surface as a 400, or null when ok.
+ */
+export function validatePipelineRoleParams(roleId: string, params: Record<string, string | number> | undefined): string | null {
+  if (!params) return null;
+  const definition = listRoles().find((candidate) => candidate.id === roleId);
+  if (!definition) return null; // an unknown roleId is already rejected upstream
+  const result = validateRoleParams(definition, params, { requireRequired: false });
+  return result.ok ? null : result.error;
 }
 
 export function resolvePipelineRole(

@@ -18,6 +18,7 @@ import { activeLoopLeg, activeLoopRole, canStartFlow, verdictTone } from "@/comp
 import { FlowHub } from "@/components/flows/FlowHub";
 import { PipelineDialog } from "@/components/pipelines/PipelineDialog";
 import { PipelineHub } from "@/components/pipelines/PipelineHub";
+import { canSourcePipeline } from "@/components/pipelines/pipelineModel";
 import { FlowStrip } from "@/components/flows/FlowStrip";
 import { RoleTag } from "@/components/flows/RoleTag";
 import { RateLimitBadge } from "@/components/RateLimitBadge";
@@ -505,6 +506,7 @@ function NodeShell({
   dormant,
   flow,
   canFlow,
+  canPipeline,
   onSelect,
   onClose,
   onFocusRound,
@@ -523,6 +525,9 @@ function NodeShell({
   flow: Flow | null;
   /** This node may host a new flow (root claude/codex conversation without one). */
   canFlow: boolean;
+  /** This conversation may seed a pipeline — broader than canFlow: children and
+      flow-hosting roots qualify too (#93 AC3). */
+  canPipeline: boolean;
   onSelect: (file: FileEntry) => void;
   onClose: (path: string) => void;
   onFocusRound: (flowId: string, round: number) => void;
@@ -555,26 +560,35 @@ function NodeShell({
         <div className="absolute -top-[60px] left-0 z-[4]" style={{ width: PAIR_W }}>
           <FlowStrip flow={flow} onFocusRound={(round) => onFocusRound(flow.id, round)} />
         </div>
-      ) : canFlow ? (
-        <div className="absolute -top-11 left-0 z-[4] flex items-center gap-1.5">
-          <button
-            data-scheme-ui
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            aria-expanded={flowOpen}
-            title={t("scheme.flowTitle")}
-            onClick={() => setFlowOpen((value) => !value)}
-          >
-            <span className="text-[13px] leading-none text-accent">⟳</span> {t("scheme.flow")}
-          </button>
-          <button
-            data-scheme-ui
-            className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-            aria-expanded={pipelineOpen}
-            title={t("scheme.pipelineTitle")}
-            onClick={() => setPipelineOpen(true)}
-          >
-            <span className="text-[13px] leading-none text-accent">⇢</span> {t("scheme.pipeline")}
-          </button>
+      ) : null}
+      {/* Flow + pipeline entry buttons. The pipeline button is decoupled from
+          flow eligibility (#93 AC3): it appears on any pipeline-source
+          conversation — children and flow-hosting roots included — sitting in
+          the controls row when free, or above the flow strip when one is up. */}
+      {canFlow || canPipeline ? (
+        <div className={`absolute left-0 z-[4] flex items-center gap-1.5 ${flow ? "-top-[92px]" : "-top-11"}`}>
+          {canFlow ? (
+            <button
+              data-scheme-ui
+              className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-expanded={flowOpen}
+              title={t("scheme.flowTitle")}
+              onClick={() => setFlowOpen((value) => !value)}
+            >
+              <span className="text-[13px] leading-none text-accent">⟳</span> {t("scheme.flow")}
+            </button>
+          ) : null}
+          {canPipeline ? (
+            <button
+              data-scheme-ui
+              className="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-panel px-2.5 text-[11px] font-semibold text-dim shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              aria-expanded={pipelineOpen}
+              title={t("scheme.pipelineTitle")}
+              onClick={() => setPipelineOpen(true)}
+            >
+              <span className="text-[13px] leading-none text-accent">⇢</span> {t("scheme.pipeline")}
+            </button>
+          ) : null}
         </div>
       ) : null}
       {flowOpen ? (
@@ -844,6 +858,7 @@ export const NodesLayer = memo(function NodesLayer({
             dormant={dormant}
             flow={flowsByImpl.get(node.file.path) ?? null}
             canFlow={canStartFlow(node.file, flowsByImpl)}
+            canPipeline={canSourcePipeline(node.file)}
             onSelect={onSelect}
             onClose={onClose}
             onFocusRound={onFocusRound}

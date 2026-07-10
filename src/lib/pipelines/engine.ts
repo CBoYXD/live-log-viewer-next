@@ -21,8 +21,9 @@ import type { FileEntry } from "@/lib/types";
 import { realExec, type ExecPort } from "@/lib/workflows/provision";
 
 import { commitPipelineStage, provisionPipelineWorktree, resetPipelineStage } from "./git";
+import { MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "./limits";
 import { renderStagePrompt } from "./prompts";
-import { pipelineRoleLookup, resolvePipelineRole, type PipelineRoleLookup } from "./roles";
+import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams, type PipelineRoleLookup } from "./roles";
 import { buildPipeline, loadPipelines, PipelineStoreError, withPipelineMutation } from "./store";
 import type {
   CreatePipelineRequest,
@@ -231,11 +232,6 @@ export function defaultPipelinePorts(): PipelinePorts {
 const spawnsThisProcess = new Set<string>();
 const TERMINAL_STATES = new Set<Pipeline["state"]>(["completed", "closed"]);
 
-/* Everything created here rides every 10s files poll, so unbounded
-   create-time strings become permanent payload weight. */
-const MAX_TASK_LENGTH = 4_000;
-const MAX_SPEC_LENGTH = 16_000;
-const MAX_STAGE_PROMPT_LENGTH = 8_000;
 
 function attemptKey(pipeline: Pipeline, stage: PipelineStage, attempt: PipelineStageAttempt): string {
   return `${pipeline.id}:${stage.id}:${attempt.n}`;
@@ -680,6 +676,12 @@ function normalizeStages(value: unknown, lookup?: PipelineRoleLookup | null): { 
       return { error: `stage ${id} role params must be strings or numbers` };
     }
     if (roleParams && !roleId) return { error: `stage ${id} role params require a roleId` };
+    if (roleId && roleParams) {
+      /* Canonical value checks (options, integer bounds, text length, unknown
+         keys) so an invalid param can't freeze into the stored scaffold. */
+      const paramError = validatePipelineRoleParams(roleId, roleParams as Record<string, string | number>);
+      if (paramError) return { error: `stage ${id} ${paramError}` };
+    }
     if (stage.model !== undefined && stage.model !== null && typeof stage.model !== "string") return { error: `stage ${id} model must be a string or null` };
     if (stage.effort !== undefined && stage.effort !== null && typeof stage.effort !== "string") return { error: `stage ${id} effort must be a string or null` };
     const input: PipelineStageInput = {

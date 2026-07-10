@@ -135,6 +135,25 @@ test("role params are accepted, persisted on the stage, and type-checked", async
   expect(bad.error).toContain("params must be strings or numbers");
 });
 
+test("invalid role param values fail canonical validation with a 400", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const badSelect = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { mode: "bananas" } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(badSelect.status).toBe(400);
+  expect(badSelect.error).toContain("invalid role parameter: mode");
+
+  savePipelines([]);
+  const unknownKey = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder", params: { bogus: "x" } }, engine: "codex", prompt: "a", next: "review" },
+    { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "b", next: null },
+  ] as never }, ports);
+  expect(unknownKey.status).toBe(400);
+  expect(unknownKey.error).toContain("unknown role parameter: bogus");
+});
+
 test("linear run stages persist sessions, structured outputs, commits, and lineage", async () => {
   const h = harness();
   await create(h.ports);

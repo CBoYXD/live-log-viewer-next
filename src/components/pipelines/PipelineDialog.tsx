@@ -4,8 +4,9 @@ import { Plus, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { CODEX_SOL_MODEL } from "@/lib/agent/models";
-import { useLocale } from "@/lib/i18n";
-import type { RoleConfig } from "@/lib/roles/types";
+import { useLocale, type MessageKey } from "@/lib/i18n";
+import { MAX_ROLE_PARAM_TEXT_LENGTH, MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "@/lib/pipelines/limits";
+import type { RoleConfig, RoleParameter } from "@/lib/roles/types";
 
 import {
   PIPELINE_TEMPLATES,
@@ -46,6 +47,25 @@ function readDraft(project: string): DraftSnapshot {
 
 function blankStage(runtime: RoleConfig): DraftStage {
   return { key: nextStageKey(), kind: "run", roleId: "", engine: runtime.engine, model: "", effort: "", access: "read-write", prompt: "", roleParams: {} };
+}
+
+/** Client mirror of the registry's per-parameter value checks. Absent/blank
+    resolves to a registry default (not required here, matching the API), so only
+    supplied values are checked. Returns an i18n key on failure, else null. */
+export function roleParamError(parameter: RoleParameter, value: string | number | undefined): MessageKey | null {
+  const raw = value ?? "";
+  if (raw === "") return null;
+  if (parameter.kind === "integer") {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || (parameter.min !== undefined && n < parameter.min) || (parameter.max !== undefined && n > parameter.max)) {
+      return "pipelineDialog.errors.paramInvalid";
+    }
+    return null;
+  }
+  if (parameter.kind === "select") {
+    return parameter.options?.includes(String(raw)) ? null : "pipelineDialog.errors.paramInvalid";
+  }
+  return String(raw).length > MAX_ROLE_PARAM_TEXT_LENGTH ? "pipelineDialog.errors.paramInvalid" : null;
 }
 
 /** Turns a client template into draft stages, resolving each role's runtime from
@@ -167,15 +187,26 @@ export function PipelineDialog({
     if (!task.trim()) return t("pipelineDialog.errors.taskRequired");
     if (!repoDir.trim()) return t("pipelineDialog.errors.repoRequired");
     if (stages.some((stage) => !stage.prompt.trim())) return t("pipelineDialog.errors.promptRequired");
-    /* A role can mark parameters required (reviewer diff source, verifier
-       claims); an empty one would silently resolve to a registry default. */
+    /* Mirror the API's create-time size limits so a full dialog does not bounce
+       off a server 400 (AC1). */
+    if (task.trim().length > MAX_TASK_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.task"), max: MAX_TASK_LENGTH });
+    if (spec.trim().length > MAX_SPEC_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.spec"), max: MAX_SPEC_LENGTH });
+    if (stages.some((stage) => stage.prompt.trim().length > MAX_STAGE_PROMPT_LENGTH)) {
+      return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.prompt"), max: MAX_STAGE_PROMPT_LENGTH });
+    }
+    /* Mirror the canonical role-param value checks (options, integer bounds,
+       text length). Absent/blank params resolve to registry defaults server-
+       side, so — like the API — they are not required here. */
     for (const stage of stages) {
       const role = stage.roleId ? roles.find((item) => item.id === stage.roleId) ?? null : null;
-      const missing = role?.parameters.find((parameter) => parameter.required && String(stage.roleParams[parameter.key] ?? "").trim() === "");
-      if (role && missing) return t("pipelineDialog.errors.paramRequired", { label: missing.label });
+      if (!role) continue;
+      for (const parameter of role.parameters) {
+        const invalid = roleParamError(parameter, stage.roleParams[parameter.key]);
+        if (invalid) return t(invalid, { label: parameter.label });
+      }
     }
     return null;
-  }, [task, repoDir, stages, roles, t]);
+  }, [task, spec, repoDir, stages, roles, t]);
 
   const submit = async () => {
     if (busy) return;
@@ -241,6 +272,7 @@ export function PipelineDialog({
           <input
             ref={taskRef}
             value={task}
+            maxLength={MAX_TASK_LENGTH}
             placeholder={t("pipelineDialog.taskPlaceholder")}
             className="h-9 rounded-[8px] border border-line bg-bg px-2.5 text-[12.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setTask(event.target.value)}
@@ -252,6 +284,7 @@ export function PipelineDialog({
           <textarea
             value={spec}
             rows={3}
+            maxLength={MAX_SPEC_LENGTH}
             placeholder={t("pipelineDialog.specPlaceholder")}
             className="resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => setSpec(event.target.value)}

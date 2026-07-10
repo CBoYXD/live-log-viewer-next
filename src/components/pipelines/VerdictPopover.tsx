@@ -50,7 +50,9 @@ export function VerdictPopover({
   const label = stageChipLabel(t, stage);
   const verdict = attempt.verdict;
   const parked = pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
-  const attempts = stageAttempts(pipeline, stage.id);
+  /* Only attempts before the one in the header — the current attempt is already
+     represented above, so listing it here would duplicate its status (AC5). */
+  const priorAttempts = stageAttempts(pipeline, stage.id).filter((prior) => prior.n < attempt.n);
   const findings = verdict?.findings ?? [];
   const shown = expanded ? findings : findings.slice(0, MAX_COLLAPSED_FINDINGS);
   const tone = verdict ? VERDICT_TONES[verdict.status] : null;
@@ -117,10 +119,10 @@ export function VerdictPopover({
         </div>
       ) : null}
 
-      {attempts.length > 1 ? (
+      {priorAttempts.length ? (
         <div className="flex flex-col gap-0.5 border-t border-line pt-1.5">
           <span className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("pipelineVerdict.priorAttempts")}</span>
-          {attempts.map((prior) => (
+          {priorAttempts.map((prior) => (
             <span key={prior.n} className="font-mono text-[9.5px] text-dim">
               {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : prior.state })}
             </span>

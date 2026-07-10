@@ -694,7 +694,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.errors.taskRequired": "потрібне завдання",
   "pipelineDialog.errors.repoRequired": "потрібен репозиторій",
   "pipelineDialog.errors.promptRequired": "кожен етап запуску потребує промпт",
-  "pipelineDialog.errors.paramRequired": "{label} обовʼязковий для цієї ролі",
+  "pipelineDialog.errors.tooLong": "{field} перевищує {max} символів",
+  "pipelineDialog.errors.paramInvalid": "{label} має недопустиме значення",
 
   "dash.pipeline": "Пайплайн",
   "dash.newPipeline": "Новий пайплайн",

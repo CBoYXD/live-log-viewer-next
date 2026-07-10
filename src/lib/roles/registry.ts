@@ -15,7 +15,18 @@ function boundedText(value: unknown): string | null {
   return text && text.length <= 2_000 ? text : null;
 }
 
-function validateParams(definition: RoleDefinition, raw: unknown): { ok: true; value: RoleParamValues } | { ok: false; error: string } {
+/**
+ * Canonical role-parameter validation: unknown keys, select options, integer
+ * bounds, and text length are always enforced. `requireRequired` gates the
+ * missing-required check so contexts where a parameter is optional (pipeline
+ * stages resolve absent params to registry defaults) can reuse the same value
+ * checks without forcing spawn-time required fields.
+ */
+export function validateRoleParams(
+  definition: RoleDefinition,
+  raw: unknown,
+  { requireRequired = true }: { requireRequired?: boolean } = {},
+): { ok: true; value: RoleParamValues } | { ok: false; error: string } {
   if (raw !== undefined && (!raw || typeof raw !== "object" || Array.isArray(raw))) return { ok: false, error: "roleParams must be an object" };
   const source = (raw ?? {}) as Record<string, unknown>;
   const byKey = new Map(definition.parameters.map((parameter) => [parameter.key, parameter]));
@@ -26,7 +37,7 @@ function validateParams(definition: RoleDefinition, raw: unknown): { ok: true; v
   for (const parameter of definition.parameters) {
     const input = source[parameter.key];
     if (input === undefined || input === "") {
-      if (parameter.required) return { ok: false, error: `missing required role parameter: ${parameter.key}` };
+      if (parameter.required && requireRequired) return { ok: false, error: `missing required role parameter: ${parameter.key}` };
       values[parameter.key] = parameter.kind === "integer" ? parameter.min ?? 1 : parameter.options?.[0] ?? "";
       continue;
     }
@@ -77,7 +88,7 @@ function resolveConfig(definition: RoleDefinition, params: RoleParamValues, expl
 export function resolveRole(role: string, params: unknown = {}, explicit: ExplicitRoleConfig = {}, definitions: RoleDefinition[] = loadRoleDefinitions()): RoleResolution {
   const definition = definitions.find((candidate) => candidate.id === role);
   if (!definition) return { ok: false, error: "unknown role" };
-  const parsedParams = validateParams(definition, params);
+  const parsedParams = validateRoleParams(definition, params);
   if (!parsedParams.ok) return parsedParams;
   const config = resolveConfig(definition, parsedParams.value, explicit);
   if (!config.ok) return config;

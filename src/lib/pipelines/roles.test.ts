@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { MAX_SCAFFOLD_LENGTH, saveRoleOverrides } from "@/lib/roles/store";
 
-import { pipelineRoleLookup, resolvePipelineRole } from "./roles";
+import { pipelineRoleLookup, resolvePipelineRole, validatePipelineRoleParams } from "./roles";
 
 const REGISTRY_LOOKUP = (roleId: string) => {
   if (roleId === "builder") return { engine: "codex" as const, model: "gpt-5.6-sol", effort: "medium", access: "read-write" as const, promptScaffold: "Builder guidance" };
@@ -124,6 +124,16 @@ test("a referenced role with an empty scaffold fails the create instead of persi
     : null;
   expect(resolvePipelineRole({ role: { roleId: "builder" } }, "run", lookup).error)
     .toContain("empty prompt scaffold");
+});
+
+test("validatePipelineRoleParams enforces canonical value rules, not required-when-absent", () => {
+  /* Absent required params are fine — a pipeline reviewer reviews its branch. */
+  expect(validatePipelineRoleParams("reviewer", {})).toBeNull();
+  expect(validatePipelineRoleParams("reviewer", { diffSource: "PR#1", lens: "scope" })).toBeNull();
+  /* Supplied invalid values are rejected exactly as the shared registry would. */
+  expect(validatePipelineRoleParams("reviewer", { lens: "bogus" })).toContain("invalid role parameter: lens");
+  expect(validatePipelineRoleParams("reviewer", { parallelN: 999 })).toContain("invalid role parameter: parallelN");
+  expect(validatePipelineRoleParams("reviewer", { unknownKey: "x" })).toContain("unknown role parameter: unknownKey");
 });
 
 test("operator role params substitute into the resolved prompt scaffold", () => {

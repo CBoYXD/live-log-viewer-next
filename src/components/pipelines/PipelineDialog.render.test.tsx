@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { RoleConfig } from "@/lib/roles/types";
 
-import { PipelineDialog, stagesFromTemplate, templateReady } from "./PipelineDialog";
+import type { RoleParameter } from "@/lib/roles/types";
+
+import { PipelineDialog, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
 import { PIPELINE_TEMPLATES } from "./pipelineModel";
 import type { RoleCatalogItem } from "./StageRow";
 
@@ -78,6 +80,21 @@ test("a template seeds each role's own resolved runtime, not the Builder fallbac
   expect(architect).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high" });
   expect(builder).toMatchObject({ roleId: "builder", model: "gpt-5.6-sol", effort: "medium" });
   expect(reviewer).toMatchObject({ roleId: "reviewer", kind: "review-loop", access: "read-only" });
+});
+
+test("roleParamError mirrors the API: values checked, absent allowed", () => {
+  const select: RoleParameter = { key: "lens", label: "Lens", description: "", kind: "select", options: ["correctness", "scope"] };
+  const integer: RoleParameter = { key: "parallelN", label: "Parallel passes", description: "", kind: "integer", min: 1, max: 8 };
+  const text: RoleParameter = { key: "diffSource", label: "Diff source", description: "", kind: "text", required: true };
+  /* Absent/blank resolves to a registry default server-side, so it is not blocked. */
+  expect(roleParamError(text, "")).toBeNull();
+  expect(roleParamError(text, undefined)).toBeNull();
+  /* Supplied values are validated against options / bounds / length. */
+  expect(roleParamError(select, "bogus")).toBe("pipelineDialog.errors.paramInvalid");
+  expect(roleParamError(select, "scope")).toBeNull();
+  expect(roleParamError(integer, 999)).toBe("pipelineDialog.errors.paramInvalid");
+  expect(roleParamError(integer, 4)).toBeNull();
+  expect(roleParamError(text, "x".repeat(2_001))).toBe("pipelineDialog.errors.paramInvalid");
 });
 
 test("role-seeded templates wait for the catalog; role-less ones are always ready", () => {

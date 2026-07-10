@@ -17,6 +17,18 @@ import type {
 
 export const PIPELINES_CHANGED_EVENT = "llv:pipelines-changed";
 
+/**
+ * A node can seed a pipeline (its transcript becomes the src lineage of stage 0)
+ * whenever it is a claude/codex session — a root or a child, whether or not it
+ * already hosts a review-loop flow. This is intentionally broader than
+ * `canStartFlow`: the pipeline entry point (#93 AC3) must not inherit flow-only
+ * eligibility, which excludes children and flow-hosting roots.
+ */
+export function canSourcePipeline(file: FileEntry): boolean {
+  if (file.engine !== "claude" && file.engine !== "codex") return false;
+  return file.root === "claude-projects" ? file.kind === "session" : file.root === "codex-sessions";
+}
+
 /** Stable DOM id for a pipeline's dashboard strip, so the on-board hub can
     reveal the always-available detailed surface (#93 §2.2). */
 export function pipelineStripDomId(pipelineId: string): string {

@@ -721,7 +721,8 @@ export const en = {
   "pipelineDialog.errors.taskRequired": "task is required",
   "pipelineDialog.errors.repoRequired": "repository is required",
   "pipelineDialog.errors.promptRequired": "every run stage needs a prompt",
-  "pipelineDialog.errors.paramRequired": "{label} is required for this role",
+  "pipelineDialog.errors.tooLong": "{field} exceeds {max} characters",
+  "pipelineDialog.errors.paramInvalid": "{label} has an invalid value",
 
   "dash.pipeline": "Pipeline",
   "dash.newPipeline": "New pipeline",

@@ -5,6 +5,7 @@ import { useId, useRef, useState } from "react";
 
 import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import { ENGINE_MODELS } from "@/lib/agent/models";
+import { MAX_ROLE_PARAM_TEXT_LENGTH, MAX_STAGE_PROMPT_LENGTH } from "@/lib/pipelines/limits";
 import type { FlowEngine } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import { BUILDER_APPLY_FIXES_CONFIG, BUILDER_FRONTEND_CONFIG } from "@/lib/roles/paramConfig";
@@ -219,7 +220,7 @@ export function StageRow({
                   {parameter.options?.map((option) => <option key={option} value={option}>{option}</option>)}
                 </select>
               ) : (
-                <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} value={String(stage.roleParams[parameter.key] ?? "")} aria-label={parameter.label} onChange={(event) => setRoleParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} className="h-7 min-w-0 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" />
+                <input type={parameter.kind === "integer" ? "number" : "text"} min={parameter.min} max={parameter.max} maxLength={parameter.kind === "text" ? MAX_ROLE_PARAM_TEXT_LENGTH : undefined} value={String(stage.roleParams[parameter.key] ?? "")} aria-label={parameter.label} onChange={(event) => setRoleParam(parameter.key, parameter.kind === "integer" && event.target.value ? Number(event.target.value) : event.target.value)} className="h-7 min-w-0 rounded-[7px] border border-line bg-panel px-1.5 text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" />
               )}
             </label>
           ))}
@@ -293,6 +294,7 @@ export function StageRow({
           ref={promptRef}
           value={stage.prompt}
           rows={isReview ? 2 : 3}
+          maxLength={MAX_STAGE_PROMPT_LENGTH}
           placeholder={t(isReview ? "pipelineDialog.reviewNotePlaceholder" : "pipelineDialog.promptPlaceholder")}
           className="resize-y rounded-[8px] border border-line bg-panel px-2 py-1.5 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           onChange={(event) => patch({ prompt: event.target.value })}
