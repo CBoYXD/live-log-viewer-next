@@ -75,14 +75,14 @@ test("selectAndMigrate posts a migrate intent to the engine active route and ado
 test("preview posts mode:preview and parses the scope counts without mutating active", async () => {
   const { fetcher } = scripted((url, body) => {
     if (url === "/api/accounts") return claudePayload();
-    if ((body as { mode?: string })?.mode === "preview") return { targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, rootWarning: true, previewRevision: 9 };
+    if ((body as { mode?: string })?.mode === "preview") return { targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, previewRevision: 9 };
     return new Response(null, { status: 204 });
   });
   const store = createEngineAccountsStore("claude", { fetcher });
   store.subscribe(() => {});
   await advance();
   const preview = await store.preview("work");
-  expect(preview).toMatchObject({ targetId: "work", counts: { total: 4, idle: 3, busy: 1 }, rootWarning: true, previewRevision: 9 });
+  expect(preview).toMatchObject({ targetId: "work", counts: { total: 4, idle: 3, busy: 1 }, previewRevision: 9 });
   expect(store.active).toBe("main");
 });
 
@@ -98,7 +98,7 @@ test("preview canonicalises the flat coordinator DTO using the known target acco
   await advance();
   const preview = await store.preview("work");
   // The client fills the target identity/label from the account it asked about.
-  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, rootWarning: false, previewRevision: 9 });
+  expect(preview).toEqual({ targetId: "work", targetLabel: "Work", counts: { total: 4, idle: 3, busy: 1 }, previewRevision: 9 });
   expect(store.active).toBe("main");
 });
 
@@ -141,6 +141,94 @@ test("setAutoBalance PATCHes the frozen policy route with automaticSwitching", a
   // The old POST …/auto-balance {enabled} route must never be called.
 });
 
+test("the store exposes no bare select, and every write to /active carries a mode", async () => {
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    if ((body as { mode?: string })?.mode === "preview") return { total: 2, idle: 2, busy: 0, revision: 4 };
+    return new Response(null, { status: 202 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  // The bare instant-switch method is gone — the only account-switch path is
+  // preview → migrate (issue #40).
+  expect((store as unknown as { select?: unknown }).select).toBeUndefined();
+  await store.preview("work");
+  await store.selectAndMigrate("work", 4);
+  const activeWrites = calls.filter((call) => call.url === "/api/accounts/claude/active");
+  expect(activeWrites.length).toBeGreaterThan(0);
+  // Not one mode-less write exists: an unscoped switch with no durable intent is
+  // exactly the hazard the unified UX removes.
+  for (const write of activeWrites) expect((write.body as { mode?: string }).mode).toBeDefined();
+});
+
+test("retryNotice re-fences a failed migrate against a fresh preview revision before migrating", async () => {
+  let previewRevision = 4;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    const mode = (body as { mode?: string })?.mode;
+    if (mode === "preview") return { total: 1, idle: 1, busy: 0, revision: previewRevision };
+    if (mode === "migrate") {
+      // The first migrate (stale revision 1) fails; that seeds the retryable notice.
+      if ((body as { previewRevision?: number }).previewRevision === 1) return new Response(null, { status: 409 });
+      return new Response(null, { status: 202 });
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  const failed = await store.selectAndMigrate("work", 1);
+  expect(failed).toBeFalse();
+  // A switch failure retains the account target id and retries through the
+  // preview → migrate path.
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "migrate", accountId: "work" });
+  // The retry must fetch a fresh revision first, then migrate with it — never
+  // replay the stale one.
+  previewRevision = 9;
+  calls.length = 0;
+  const recovered = await store.retryNotice();
+  expect(recovered).toBeTrue();
+  const previewIdx = calls.findIndex((call) => (call.body as { mode?: string })?.mode === "preview");
+  const migrateCall = calls.find((call) => (call.body as { mode?: string })?.mode === "migrate");
+  expect(previewIdx).toBeGreaterThanOrEqual(0);
+  expect(calls.indexOf(migrateCall!)).toBeGreaterThan(previewIdx); // preview precedes migrate
+  expect(migrateCall?.body).toMatchObject({ previewRevision: 9 });
+  expect(store.notice).toBeNull(); // the recovered retry clears the stale failure
+});
+
+test("retryNotice fails closed when a migrate retry can't obtain a fresh preview", async () => {
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload();
+    const mode = (body as { mode?: string })?.mode;
+    if (mode === "preview") return new Response(null, { status: 500 }); // preview unreachable
+    if (mode === "migrate") return new Response(null, { status: 409 });
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  await store.selectAndMigrate("work", 1);
+  calls.length = 0;
+  const recovered = await store.retryNotice();
+  expect(recovered).toBeFalse();
+  // No migrate is attempted with a stale revision when the fresh preview fails.
+  expect(calls.some((call) => (call.body as { mode?: string })?.mode === "migrate")).toBeFalse();
+});
+
+test("retryFailedMigration posts action:retry-failed fenced by the intent revision", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-9", targetId: "work", state: "draining", revision: 3, counts: { done: 1, total: 4, waitingTurn: 0, inFlight: 1, failed: 2 } } });
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  await store.retryFailedMigration();
+  const retry = calls.find((call) => call.url === "/api/account-migrations/intent-9" && call.method === "POST");
+  expect(retry?.body).toMatchObject({ action: "retry-failed", expectedRevision: 3 });
+});
+
 test("stopMigration targets the frozen account-migrations route by intent id", async () => {
   const { calls, fetcher } = scripted((url) => {
     if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-7", targetId: "work", state: "draining" } });
@@ -153,4 +241,54 @@ test("stopMigration targets the frozen account-migrations route by intent id", a
   expect(calls.some((call) => call.url === "/api/account-migrations/intent-7" && call.method === "POST" && (call.body as { action?: string }).action === "stop")).toBeTrue();
   // The old /api/accounts/migration/{id} route never existed.
   expect(calls.some((call) => call.url.includes("/api/accounts/migration/"))).toBeFalse();
+});
+
+test("a failed stop retries against the intent stop endpoint with the current revision and stays off the account route", async () => {
+  let failNextStop = true;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-42", targetId: "work", state: "draining", revision: 5, counts: { done: 1, total: 4, waitingTurn: 0, inFlight: 1, failed: 2 } } });
+    if (url === "/api/account-migrations/intent-42" && (body as { action?: string }).action === "stop") {
+      if (failNextStop) { failNextStop = false; return new Response(null, { status: 500 }); }
+      return new Response(null, { status: 200 });
+    }
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  const failed = await store.stopMigration();
+  expect(failed).toBeFalse();
+  // The retry retains the intent id and routes to the intent endpoint.
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "stop", intentId: "intent-42" });
+  calls.length = 0;
+  const recovered = await store.retryNotice();
+  expect(recovered).toBeTrue();
+  const stopRetry = calls.find((call) => call.url === "/api/account-migrations/intent-42" && (call.body as { action?: string }).action === "stop");
+  expect(stopRetry?.body).toMatchObject({ action: "stop", expectedRevision: 5 });
+  // No account preview/active route is ever touched by a stop retry.
+  expect(calls.some((call) => call.url === "/api/accounts/claude/active")).toBeFalse();
+});
+
+test("a failed retry-failed retries against the intent retry-failed endpoint with the current revision", async () => {
+  let failNext = true;
+  const { calls, fetcher } = scripted((url, body) => {
+    if (url === "/api/accounts") return claudePayload({ migration: { intentId: "intent-99", targetId: "work", state: "draining", revision: 8, counts: { done: 1, total: 4, waitingTurn: 0, inFlight: 1, failed: 2 } } });
+    if (url === "/api/account-migrations/intent-99" && (body as { action?: string }).action === "retry-failed") {
+      if (failNext) { failNext = false; return new Response(null, { status: 500 }); }
+      return new Response(null, { status: 200 });
+    }
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+  const failed = await store.retryFailedMigration();
+  expect(failed).toBeFalse();
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "retryFailed", intentId: "intent-99" });
+  calls.length = 0;
+  const recovered = await store.retryNotice();
+  expect(recovered).toBeTrue();
+  const retry = calls.find((call) => call.url === "/api/account-migrations/intent-99" && (call.body as { action?: string }).action === "retry-failed");
+  expect(retry?.body).toMatchObject({ action: "retry-failed", expectedRevision: 8 });
+  expect(calls.some((call) => call.url === "/api/accounts/claude/active")).toBeFalse();
 });

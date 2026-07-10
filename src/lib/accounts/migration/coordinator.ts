@@ -10,7 +10,6 @@ import { tailRecords } from "@/lib/scanner/activity";
 import type { FileEntry } from "@/lib/types";
 
 import {
-  DisabledSuccessorProviderPort,
   emptyLaunchProfile,
   type HistoryCopyPort,
   type HeldDelivery,
@@ -21,7 +20,7 @@ import {
   type SuccessorProviderPort,
   type ViewerConversationId,
 } from "./contracts";
-import { accountMigrationActivationEnabled, RegisteredSuccessorProvider } from "./provider";
+import { RegisteredSuccessorProvider } from "./provider";
 import { sanitizeProviderError } from "./safeHistoryCopy";
 import { turnStateFromRecords } from "./turnState";
 import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
@@ -29,9 +28,7 @@ import { AUTO_BALANCE_COOLDOWN_MS } from "./quotaPolicy";
 export interface MigrationPreview {
   targetId: string;
   targetLabel: string;
-  counts: { total: number; idle: number; busy: number; alreadyTarget: number; excludedRoots: number };
-  excludedRoots: Array<{ conversationId: ViewerConversationId; title: string | null }>;
-  rootWarning: boolean;
+  counts: { total: number; idle: number; busy: number; alreadyTarget: number };
   previewRevision: number;
 }
 
@@ -93,15 +90,10 @@ function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry
   let idle = 0;
   let busy = 0;
   let alreadyTarget = 0;
-  const excludedRoots: MigrationPreview["excludedRoots"] = [];
   for (const conversation of Object.values(snapshot.conversations)) {
     if (conversation.engine !== engine) continue;
     const generation = conversation.generations.at(-1);
     if (!generation) continue;
-    if (generation.launchProfile.role === "root") {
-      excludedRoots.push({ conversationId: conversation.id, title: generation.launchProfile.title });
-      continue;
-    }
     if (generation.accountId === targetId) { alreadyTarget += 1; continue; }
     if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") busy += 1;
     else idle += 1;
@@ -109,9 +101,7 @@ function previewFromSnapshot(engine: MigrationEngine, targetId: string, registry
   return {
     targetId,
     targetLabel,
-    counts: { total: idle + busy, idle, busy, alreadyTarget, excludedRoots: excludedRoots.length },
-    excludedRoots,
-    rootWarning: excludedRoots.length > 0,
+    counts: { total: idle + busy, idle, busy, alreadyTarget },
     previewRevision: snapshot.engineRouting[engine].revision,
   };
 }
@@ -175,7 +165,23 @@ function copyAdapter(copy: HistoryCopyPort): SuccessorProviderPort {
 }
 
 function productionProvider(): SuccessorProviderPort {
-  return accountMigrationActivationEnabled() ? new RegisteredSuccessorProvider() : new DisabledSuccessorProviderPort();
+  return new RegisteredSuccessorProvider();
+}
+
+function terminalMigrationPhase(phase: string): boolean {
+  return phase === "committed" || phase === "rolled-back" || phase === "failed-recoverable";
+}
+
+async function cleanupDiscardedSuccessor(
+  provider: SuccessorProviderPort,
+  receipt: ProviderReceipt | null,
+  latest: RegistryConversation,
+): Promise<void> {
+  if (!receipt) return;
+  const committed = latest.migration?.phase === "committed";
+  const current = latest.generations.at(-1);
+  if (committed && current?.id === receipt.nativeId && current.path === receipt.path) return;
+  try { await provider.cleanup?.(receipt); } catch { /* cleanup is best effort after a fenced result */ }
 }
 
 export async function advanceConversationMigration(
@@ -196,8 +202,8 @@ export async function advanceConversationMigration(
     ?? conversation.generations.at(-1);
   if (!source) throw new Error("conversation has no source generation");
   const successorProvider = isCopyOnly(provider) ? copyAdapter(provider) : provider;
+  let receipt: ProviderReceipt | null = migration.providerReceipt;
   try {
-    let receipt: ProviderReceipt;
     if (migration.providerReceipt) {
       receipt = migration.providerReceipt;
     } else {
@@ -220,7 +226,7 @@ export async function advanceConversationMigration(
       conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["successor-starting"], { phase: "verifying", providerReceipt: receipt });
       migration = conversation.migration!;
     }
-    if (receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
+    if (!receipt || receipt.operationId !== migration.operationId) throw new Error("persisted successor receipt operation does not match");
     await successorProvider.verify(receipt, { engine: conversation.engine, targetAccountId: migration.targetId, launchProfile: source.launchProfile });
     return registry.commitSuccessor(conversation.id, {
       id: receipt.nativeId,
@@ -232,15 +238,22 @@ export async function advanceConversationMigration(
     }, migration.revision);
   } catch (error) {
     const latest = registry.conversation(conversation.id);
-    if (latest?.migration && (latest.migration.revision !== migration.revision || latest.migration.operationId !== migration.operationId)) {
+    if (latest?.migration && (
+      latest.migration.revision !== migration.revision
+      || latest.migration.operationId !== migration.operationId
+      || terminalMigrationPhase(latest.migration.phase)
+    )) {
+      await cleanupDiscardedSuccessor(successorProvider, receipt, latest);
       return latest;
     }
     const safe = sanitizeProviderError(error);
-    return registry.transitionConversationMigration(conversation.id, migration.revision, ["requested", "preparing", "successor-starting", "verifying"], {
+    const failed = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested", "preparing", "successor-starting", "verifying"], {
       phase: "failed-recoverable",
       error: safe.message,
       errorCode: safe.code,
     });
+    await cleanupDiscardedSuccessor(successorProvider, receipt, failed);
+    return failed;
   }
 }
 

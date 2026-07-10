@@ -164,24 +164,10 @@ export interface SuccessorProviderPort {
     targetAccountId: string;
   }): Promise<ProviderReceipt>;
   verify(receipt: ProviderReceipt, input: { engine: MigrationEngine; targetAccountId: string; launchProfile: LaunchProfile }): Promise<void>;
+  cleanup?(receipt: ProviderReceipt): Promise<void>;
 }
 
 /** Transitional copy-only fake supported by the legacy coordinator wrapper. */
 export interface HistoryCopyPort {
   copy(input: { engine: MigrationEngine; sourcePath: string; targetHome: string; conversationId: ViewerConversationId }): Promise<{ nativeId: string; path: string }>;
 }
-
-/** Native cross-home copying is deliberately gated. Production enables a
-    provider port only after an explicit authentication preflight succeeds. */
-export class DisabledSuccessorProviderPort implements SuccessorProviderPort {
-  async create(): Promise<ProviderReceipt> {
-    throw new Error("account migration activation requires an explicit operator preflight");
-  }
-  async verify(): Promise<void> {
-    throw new Error("account migration activation requires an explicit operator preflight");
-  }
-}
-
-/** Compatibility name retained for older imports while provider callers move
-    to the full successor contract. */
-export class DisabledHistoryCopyPort extends DisabledSuccessorProviderPort {}

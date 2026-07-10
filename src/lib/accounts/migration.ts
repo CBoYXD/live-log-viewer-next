@@ -112,9 +112,6 @@ export interface MigrationPreview {
   targetId: string;
   targetLabel: string;
   counts: PreviewCounts;
-  /** At least one `role:"root"` session in scope needs separate operator
-      authorization (Sol invariant 21); the confirm step warns and excludes it. */
-  rootWarning: boolean;
   /** Optimistic-concurrency token echoed back on confirm. */
   previewRevision: number;
 }
@@ -151,19 +148,14 @@ export function migrationHoldsSends(state: CardMigrationState | null): boolean {
   return state === "switching";
 }
 
-/** What selecting an account should do, given whether the migration coordinator
-    is available and (when it is) the preview result. `recoverable-error` is the
-    finding-3 guard: a present coordinator whose preview failed must NOT fall
-    through to an instant switch — an unscoped switch with no durable intent is
-    exactly the hazard — so the caller surfaces a retryable error instead. */
-export type AccountSelectOutcome = "instant" | "confirm" | "recoverable-error";
-export function accountSelectOutcome(
-  migrationCapable: boolean,
-  preview: MigrationPreview | null,
-): AccountSelectOutcome {
-  if (!migrationCapable) return "instant";
+/** What selecting an account should do, given the preview result. Every switch
+    surface starts with a preview and continues through a durable migration intent.
+    `recoverable-error` keeps preview failures visible for retry. Empty scope uses
+    the revision-fenced migration intent path and adopts the target durably. */
+export type AccountSelectOutcome = "migrate" | "confirm" | "recoverable-error";
+export function accountSelectOutcome(preview: MigrationPreview | null): AccountSelectOutcome {
   if (preview === null) return "recoverable-error";
-  return preview.counts.total > 0 ? "confirm" : "instant";
+  return preview.counts.total > 0 ? "confirm" : "migrate";
 }
 
 // ── Banner projection ─────────────────────────────────────────────────────────
@@ -414,14 +406,12 @@ export async function postConversationMigration(
  * Parses a preview response from POST …/active `mode:"preview"`.
  *
  * The route is the canonical migration seam; whether the coordinator echoes a
- * rich target-aware DTO (`{ targetId, targetLabel, counts, rootWarning,
+ * rich target-aware DTO (`{ targetId, targetLabel, counts,
  * previewRevision }`) or the leaner counts-and-revision shape, the client
  * already knows which account it asked to preview, so `fallback` supplies the
  * target identity/label the response may omit. That is what lets the confirm
- * step render without ever collapsing a valid preview to `null` merely because
- * the server left `targetId` implicit — a `null` here means the preview genuinely
- * failed (non-OK / unparseable), which the caller surfaces instead of silently
- * switching accounts (finding 3).
+ * step render with the requested target identity. `null` represents a genuinely
+ * failed preview and the caller presents a recoverable retry.
  */
 export function parseMigrationPreview(
   raw: unknown,
@@ -437,7 +427,6 @@ export function parseMigrationPreview(
     targetId,
     targetLabel: str(record.targetLabel ?? intent?.targetLabel) ?? fallback?.targetLabel ?? targetId,
     counts: { total: num(counts.total), idle: num(counts.idle), busy: num(counts.busy) },
-    rootWarning: record.rootWarning === true,
     previewRevision: num(record.previewRevision ?? record.revision ?? intent?.revision),
   };
 }

@@ -30,14 +30,26 @@ export type AccountOption = {
   effective?: AccountEffective | null;
 };
 export type AccountLoadState = "loading" | "ready" | "error";
-export type AccountOperation = "refresh" | "select" | "add" | "migrate" | "policy";
+export type AccountOperation = "refresh" | "add" | "migrate" | "policy";
+
+/** A retry action carries exactly the identifier its endpoint needs. The account
+    target id drives the preview → migrate path; the durable intent id drives the
+    stop and retry-failed endpoints. Each operation retries through its own path,
+    so an intent id can never reach the account preview route (the recovery-retry
+    bug where a `"migrate"` action fed an intent uuid to `/accounts/{engine}/active`). */
+export type AccountRetryAction =
+  | { type: "retry"; kind: "refresh" }
+  | { type: "retry"; kind: "add"; label: string }
+  | { type: "retry"; kind: "migrate"; accountId: string }
+  | { type: "retry"; kind: "stop"; intentId: string }
+  | { type: "retry"; kind: "retryFailed"; intentId: string };
 
 export interface AccountNotice {
   kind: "error" | "success";
   operation: AccountOperation;
   messageKey: "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened";
   target?: string;
-  action: { type: "retry"; operation: AccountOperation; id?: string; label?: string } | null;
+  action: AccountRetryAction | null;
 }
 
 export function accountNoticeText(t: TFunction, notice: AccountNotice): string {
@@ -83,15 +95,18 @@ export interface EngineAccountsSnapshot {
 export interface EngineAccountsState extends EngineAccountsSnapshot {
   engine: Engine;
   refresh: () => Promise<boolean>;
-  select: (id: string) => Promise<boolean>;
   add: (label: string) => Promise<boolean>;
   retryNotice: () => Promise<boolean>;
-  /** Non-mutating scope preview for the confirm step; null when unsupported. */
+  /** Non-mutating scope preview for the confirm step; null when it fails. Every
+      switch surface previews first — there is no mode-less bare switch anymore. */
   preview: (id: string) => Promise<MigrationPreview | null>;
-  /** Confirmed engine-wide migration to `id`; coalesces to the latest target. */
+  /** Confirmed engine-wide migration to `id`; coalesces to the latest target.
+      Also the zero-scope path when a preview finds nothing live to move. */
   selectAndMigrate: (id: string, previewRevision?: number) => Promise<boolean>;
   /** Halts a draining intent (idempotent). */
   stopMigration: () => Promise<boolean>;
+  /** Re-runs the failed sessions of the current intent (idempotent). */
+  retryFailedMigration: () => Promise<boolean>;
   /** Toggles the per-engine auto-balancer. */
   setAutoBalance: (enabled: boolean) => Promise<boolean>;
 }
@@ -143,16 +158,27 @@ function accountResponse(body: unknown, engine: Engine): EngineResponse {
 }
 
 function refreshFailure(): AccountNotice {
-  return { kind: "error", operation: "refresh", messageKey: "accounts.refreshFailed", action: { type: "retry", operation: "refresh" } };
+  return { kind: "error", operation: "refresh", messageKey: "accounts.refreshFailed", action: { type: "retry", kind: "refresh" } };
 }
 
-function mutationFailure(operation: "select" | "add" | "migrate", value: string): AccountNotice {
-  return {
-    kind: "error",
-    operation,
-    messageKey: operation === "add" ? "accounts.addFailed" : "accounts.switchFailed",
-    action: operation === "add" ? { type: "retry", operation, label: value } : { type: "retry", operation, id: value },
-  };
+function addFailure(label: string): AccountNotice {
+  return { kind: "error", operation: "add", messageKey: "accounts.addFailed", action: { type: "retry", kind: "add", label } };
+}
+
+/** A failed account switch retries by re-previewing the account target and
+    committing a fresh, revision-fenced migration. */
+function migrateFailure(accountId: string): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "migrate", accountId } };
+}
+
+/** Stop and retry-failed retries address the durable intent by its id and read a
+    fresh revision fence when they re-issue, so both route to
+    `/api/account-migrations/{intentId}` and stay off the account preview route. */
+function stopFailure(intentId: string): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "stop", intentId } };
+}
+function retryFailedFailure(intentId: string): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "retryFailed", intentId } };
 }
 
 /** One narrow state store backs every account control of one engine. It owns
@@ -245,31 +271,6 @@ export function createEngineAccountsStore(
     });
   };
 
-  const select = (id: string): Promise<boolean> => {
-    if (!id || id === snapshot.active) return Promise.resolve(false);
-    return runMutation("select", async () => {
-      const previous = snapshot.active;
-      patchSnapshot({ active: id, identityVersion: snapshot.identityVersion + 1 });
-      try {
-        const response = await fetcher(activeUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id }),
-        });
-        if (!response.ok) throw new Error("account selection failed");
-      } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: mutationFailure("select", id) });
-        await refresh();
-        return false;
-      }
-      // The optimistic invalidation may have raced the server-side mutation.
-      // A confirmed version schedules one authoritative limits read for this id.
-      patchSnapshot({ identityVersion: snapshot.identityVersion + 1 });
-      await refresh();
-      return true;
-    });
-  };
-
   const add = (label: string): Promise<boolean> => {
     const trimmed = label.trim();
     if (!trimmed) return Promise.resolve(false);
@@ -297,7 +298,7 @@ export function createEngineAccountsStore(
           notice: { kind: "success", operation: "add", messageKey: "accounts.loginOpened", target: body.target, action: null },
         });
       } catch {
-        patchSnapshot({ notice: mutationFailure("add", trimmed) });
+        patchSnapshot({ notice: addFailure(trimmed) });
         await refresh();
         return false;
       }
@@ -306,15 +307,15 @@ export function createEngineAccountsStore(
     });
   };
 
-  /** Non-mutating scope preview. Sent only when the coordinator is present
-      (guarded by the caller via {@link EngineAccountsSnapshot.autoBalance}) so a
-      legacy `/active` route that ignores `mode` never switches as a side effect. */
+  /** Non-mutating scope preview: every switch surface runs this first, so the
+      only writes to `/active` are `mode:"preview"` and `mode:"migrate"` — never a
+      mode-less bare switch. The route treats `mode:"preview"` as read-only. */
   const preview = async (id: string): Promise<MigrationPreview | null> => {
     if (!id) return null;
     // The client already knows the target it asked to preview, so it canonicalises
     // the response into the target-aware DTO even when the coordinator returns the
     // leaner counts-and-revision shape. A `null` therefore means the preview truly
-    // failed (non-OK / unreachable), which the panel surfaces instead of switching.
+    // failed (non-OK / unreachable), which the panel surfaces as a recoverable error.
     const fallback = { targetId: id, targetLabel: snapshot.accounts.find((account) => account.id === id)?.label ?? id };
     try {
       const response = await fetcher(activeUrl, {
@@ -343,11 +344,13 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("migration request failed");
       } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: mutationFailure("migrate", id) });
+        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: migrateFailure(id) });
         await refresh();
         return false;
       }
-      patchSnapshot({ identityVersion: snapshot.identityVersion + 1 });
+      // A committed migration clears any lingering switch-failure notice so a
+      // recovered retry doesn't leave a stale error behind.
+      patchSnapshot({ identityVersion: snapshot.identityVersion + 1, notice: snapshot.notice?.operation === "migrate" ? null : snapshot.notice });
       await refresh();
       return true;
     });
@@ -367,7 +370,30 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("stop failed");
       } catch {
-        patchSnapshot({ notice: mutationFailure("migrate", intentId) });
+        patchSnapshot({ notice: stopFailure(intentId) });
+        await refresh();
+        return false;
+      }
+      await refresh();
+      return true;
+    });
+  };
+
+  const retryFailedMigration = (): Promise<boolean> => {
+    const intentId = snapshot.migration?.intentId;
+    if (!intentId) return Promise.resolve(false);
+    return runMutation("migrate", async () => {
+      try {
+        // Frozen retry-failed route (Sol contract): re-run only the
+        // failed-recoverable sessions of the intent, fenced by its revision.
+        const response = await fetcher(`/api/account-migrations/${encodeURIComponent(intentId)}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "retry-failed", expectedRevision: snapshot.migration?.revision }),
+        });
+        if (!response.ok) throw new Error("retry-failed failed");
+      } catch {
+        patchSnapshot({ notice: retryFailedFailure(intentId) });
         await refresh();
         return false;
       }
@@ -400,14 +426,31 @@ export function createEngineAccountsStore(
     });
   };
 
-  const retryNotice = (): Promise<boolean> => {
+  const retryNotice = async (): Promise<boolean> => {
     const action = snapshot.notice?.action;
-    if (!action) return Promise.resolve(false);
-    if (action.operation === "refresh") return refresh();
-    if (action.operation === "select" && action.id) return select(action.id);
-    if (action.operation === "migrate" && action.id) return selectAndMigrate(action.id);
-    if (action.operation === "add" && action.label) return add(action.label);
-    return Promise.resolve(false);
+    if (!action) return false;
+    switch (action.kind) {
+      case "refresh":
+        return refresh();
+      case "add":
+        return add(action.label);
+      case "migrate": {
+        // A migrate retry re-fences against a fresh preview revision: the stored
+        // one is stale once the intent moved on or another switch raced, so it
+        // would 409. Fail closed when the preview cannot be obtained.
+        const fresh = await preview(action.accountId);
+        if (!fresh) return false;
+        return selectAndMigrate(action.accountId, fresh.previewRevision);
+      }
+      case "stop":
+        // Re-issues the stop against the durable intent; stopMigration reads the
+        // current revision fence when it runs.
+        return stopMigration();
+      case "retryFailed":
+        // Re-issues retry-failed against the durable intent with the current
+        // revision fence.
+        return retryFailedMigration();
+    }
   };
 
   return {
@@ -437,12 +480,12 @@ export function createEngineAccountsStore(
     get migration() { return snapshot.migration; },
     get autoBalance() { return snapshot.autoBalance; },
     refresh,
-    select,
     add,
     retryNotice,
     preview,
     selectAndMigrate,
     stopMigration,
+    retryFailedMigration,
     setAutoBalance,
   };
 }
@@ -471,12 +514,12 @@ export function useEngineAccounts(engine: Engine): EngineAccountsState {
     ...snapshot,
     engine,
     refresh: store.refresh,
-    select: store.select,
     add: store.add,
     retryNotice: store.retryNotice,
     preview: store.preview,
     selectAndMigrate: store.selectAndMigrate,
     stopMigration: store.stopMigration,
+    retryFailedMigration: store.retryFailedMigration,
     setAutoBalance: store.setAutoBalance,
   };
 }
