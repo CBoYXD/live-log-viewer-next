@@ -33,7 +33,7 @@ export function OrchestrationCard({ orchestration, source }: { orchestration: Or
           ))}
         </div>
       ) : null}
-      {orchestration.source || source ? (
+      {orchestration.source.trim() || source?.trim() ? (
         <details className="overflow-hidden rounded-[10px] border border-line bg-panel-alt">
           <summary className="cursor-pointer list-none px-2.5 py-1 text-[11px] font-semibold text-dim">{tr("tools.source")}</summary>
           <pre className="max-h-[300px] max-w-full overflow-auto whitespace-pre border-t border-line px-3 py-2 font-mono text-[11px]">

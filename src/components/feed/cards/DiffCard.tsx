@@ -8,8 +8,9 @@ import { tr, type ToolBody } from "../parse";
 import { FileRef } from "./shared";
 import type { DiffLine, FileDiff, Hunk } from "../diff";
 
-/** Level-1 visible-line budget per file; "show all" reveals the capped rest. */
-const PREVIEW_LINES = 10;
+/** Level-1 visible-line budget per file: a compact preview of the first lines
+    shown expanded by default; "show all" reveals the capped rest (issue #90). */
+const PREVIEW_LINES = 8;
 
 const OP_TONE: Record<FileDiff["op"], string> = {
   add: "text-diff-add",

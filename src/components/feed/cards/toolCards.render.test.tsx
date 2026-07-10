@@ -77,6 +77,37 @@ test("similar replacement lines render stronger intraline add/remove emphasis", 
   expect(html).toContain("bg-diff-del-strong");
 });
 
+test("an edit card opens its diff preview inline with a full-diff toggle", () => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: src/big.ts",
+    "@@",
+    ...Array.from({ length: 20 }, (_, i) => [`-old${i}`, `+new${i}`]).flat(),
+    "*** End Patch",
+  ].join("\n");
+  const model = diffFromApplyPatch(patch);
+  const total = model.files[0].hunks.flatMap((hunk) => hunk.lines).length;
+  const html = renderToStaticMarkup(
+    <ToolCard
+      event={toolEvent({
+        family: "edit",
+        tool: "apply_patch",
+        icon: "edit",
+        summary: "Edit big.ts",
+        open: true,
+        body: { type: "diff", files: model.files, filesTruncated: model.filesTruncated },
+      })}
+    />,
+  );
+  // The diff renders inline (no click needed) with the structural colors.
+  expect(html).toContain("bg-diff-add-soft");
+  expect(html).toContain("src/big.ts");
+  // Only a compact preview is shown, with a toggle revealing the full diff.
+  expect(html).toContain(en("tools.showAllLines", { count: total }));
+  // A line past the preview budget stays hidden until the toggle is used.
+  expect(html).not.toContain("+new19");
+});
+
 test("output preview shows content with an accessible copy control", () => {
   const html = renderToStaticMarkup(<OutputPreview output={"line1\nline2"} truncated={false} />);
   expect(html).toContain("line1");
