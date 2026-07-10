@@ -77,15 +77,15 @@ function worktreeFromPath(cwd: string): { repo: string; worktree: string } | nul
     dotted `.worktrees/<name>`) puts checkouts under a container dir INSIDE the
     repo, so the parent repo is literally the path prefix before that container.
     Recognizing them by path means a deleted nested worktree still names its
-    repo — no on-disk `.git` needed. `.claude/worktrees` (#1) and
-    `.codex/worktrees` (#3) have dedicated recognizers, so a `worktrees` segment
+    repo — no on-disk `.git` needed. `.claude/worktrees` and
+    `.codex/worktrees` have dedicated recognizers, so a `worktrees` segment
     sitting directly under `.claude`/`.codex` is left to them. The FIRST
     container wins, so a worktree-of-a-worktree groups under the outermost repo. */
 function worktreeFromNested(cwd: string): { repo: string; worktree: string } | null {
   const parts = cwd.split(path.sep);
   for (let i = 1; i < parts.length - 1; i++) {
     if (parts[i] !== "worktrees" && parts[i] !== ".worktrees") continue;
-    if (parts[i - 1] === ".claude" || parts[i - 1] === ".codex") continue;
+    if (parts[i - 1] === ".claude" || parts[i - 1] === ".codex") return null;
     const worktree = parts[i + 1];
     if (!worktree) return null;
     return { repo: parts.slice(0, i).join(path.sep) || path.sep, worktree };
@@ -322,6 +322,8 @@ function persistedProjects(): {
     means a codex session, a claude session, and any worktree of the same repo
     all land in the SAME sidebar group instead of lookalike neighbors. */
 function projectInfoFromCwd(cwd: string): { project: string; worktree?: string } | null {
+  const scratchpad = projectInfoFromClaudeTaskCwd(cwd);
+  if (scratchpad) return scratchpad;
   let worktree =
     worktreeFromPath(cwd) ??
     worktreeFromNested(cwd) ??
@@ -348,16 +350,59 @@ export function projectForCwd(cwd: string): string | null {
 }
 
 function worktreeFromSlug(slug: string): { project: string; worktree: string } | null {
-  const marker = "--claude-worktrees-";
-  const index = slug.indexOf(marker);
-  if (index < 0) return null;
-  const worktree = slug.slice(index + marker.length);
+  const codexMarker = "--codex-worktrees-";
+  const markers = ["--claude-worktrees-", codexMarker, "--worktrees-"];
+  let marker: string | null = null;
+  let index = Number.POSITIVE_INFINITY;
+  for (const candidate of markers) {
+    const candidateIndex = slug.indexOf(candidate);
+    if (candidateIndex >= 0 && candidateIndex < index) {
+      marker = candidate;
+      index = candidateIndex;
+    }
+  }
+  if (!marker || !Number.isFinite(index)) return null;
+  const suffix = slug.slice(index + marker.length);
+  if (marker === codexMarker) {
+    const hashEnd = suffix.indexOf("-");
+    if (hashEnd <= 0) return null;
+    const worktree = suffix.slice(0, hashEnd);
+    const repoAndNested = suffix.slice(hashEnd + 1);
+    const nestedAt = ["--claude-worktrees-", "--codex-worktrees-", "--worktrees-", "-worktrees-"]
+      .map((candidate) => repoAndNested.indexOf(candidate))
+      .filter((candidateIndex) => candidateIndex >= 0)
+      .sort((left, right) => left - right)[0];
+    const repoName = nestedAt === undefined ? repoAndNested : repoAndNested.slice(0, nestedAt);
+    if (!repoName) return null;
+    const project = projectFromSlug(existingRepoPath(repoName).replace(/[^a-zA-Z0-9]/g, "-"));
+    return project ? { project, worktree } : null;
+  }
+  const nextAt = ["--claude-worktrees-", "--codex-worktrees-", "--worktrees-", "-worktrees-"]
+    .map((candidate) => suffix.indexOf(candidate))
+    .filter((candidateIndex) => candidateIndex >= 0)
+    .sort((left, right) => left - right)[0];
+  const worktree = nextAt === undefined ? suffix : suffix.slice(0, nextAt);
   if (!worktree) return null;
   const repoSlug = slug.slice(0, index);
-  const project = repoSlug.split("--").at(-1)?.split("-").filter(Boolean).at(-1);
+  const project = projectFromSlug(repoSlug);
   if (!project) return null;
-  const dashedProject = repoSlug.slice(repoSlug.lastIndexOf("-" + project) + 1) || project;
-  return { project: dashedProject, worktree };
+  return { project, worktree };
+}
+
+/** Claude places nested scratchpad agents under
+    `<tmp>/claude-<uid>/<encoded-cwd>/<session>/scratchpad/...`. The encoded
+    cwd retains dotted worktree containers as `--worktrees-`, which is enough
+    to recover the parent project after the checkout and scratchpad disappear. */
+function projectInfoFromClaudeTaskCwd(cwd: string): { project: string; worktree?: string } | null {
+  const parts = cwd.split(path.sep);
+  const container = parts.findIndex((part) => /^claude-\d+$/.test(part));
+  const slug = container >= 0 ? parts[container + 1] : undefined;
+  const session = container >= 0 ? parts[container + 2] : undefined;
+  if (!slug || !session || parts[container + 3] !== "scratchpad") return null;
+  const worktree = worktreeFromSlug(slug);
+  if (worktree) return worktree;
+  const project = projectFromSlug(slug);
+  return project ? { project } : null;
 }
 
 function cwdFromLines(lines: string[]): string | null {

@@ -3,11 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { migrateBoardProjects } from "@/lib/board/store";
 
 import type { ProjectCatalogEntry } from "../types";
 import { describe } from "./describe";
 import type { RawEntry } from "./discover";
-import { projectResolutionStateKey } from "./projectState";
+import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
 
 type CachedProjectFile = {
   rootName: RawEntry["rootName"];
@@ -23,6 +24,7 @@ type ProjectCatalogFile = CachedProjectFile & { path: string };
 
 type ProjectCatalogState = {
   version: 1;
+  resolutionVersion: number;
   files: Record<string, CachedProjectFile>;
 };
 
@@ -36,7 +38,7 @@ function readState(): ProjectCatalogState {
   try {
     const raw = JSON.parse(fs.readFileSync(catalogPath(), "utf8")) as Partial<ProjectCatalogState>;
     if (raw.version !== 1 || !raw.files || typeof raw.files !== "object" || Array.isArray(raw.files)) {
-      return { version: 1, files: {} };
+      return { version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
     }
     const files: Record<string, CachedProjectFile> = {};
     for (const [pathname, value] of Object.entries(raw.files)) {
@@ -63,9 +65,9 @@ function readState(): ProjectCatalogState {
         session: file.session,
       };
     }
-    return { version: 1, files };
+    return { version: 1, resolutionVersion: raw.resolutionVersion ?? 0, files };
   } catch {
-    return { version: 1, files: {} };
+    return { version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: {} };
   }
 }
 
@@ -87,7 +89,13 @@ function isRootSession(rootName: RawEntry["rootName"], kind: string): boolean {
 
 function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string): ProjectCatalogFile {
   const cached = state.files[raw.path];
-  if (cached && cached.size === raw.st.size && cached.mtimeMs === raw.st.mtimeMs && cached.stateKey === stateKey) {
+  if (
+    state.resolutionVersion === PROJECT_RESOLUTION_VERSION &&
+    cached &&
+    cached.size === raw.st.size &&
+    cached.mtimeMs === raw.st.mtimeMs &&
+    cached.stateKey === stateKey
+  ) {
     return { path: raw.path, ...cached };
   }
   const meta = describe(raw.rootName, raw.root, raw.path, raw.st);
@@ -113,6 +121,36 @@ function cachedFile(raw: RawEntry, state: ProjectCatalogState, stateKey: string)
   return file;
 }
 
+function claudeSlug(raw: RawEntry): string | null {
+  if (raw.rootName !== "claude-projects" && raw.rootName !== "claude-tasks") return null;
+  return path.relative(raw.root, raw.path).split(path.sep)[0] || null;
+}
+
+function unambiguousMigrations(
+  changes: ReadonlyMap<string, ReadonlySet<string>>,
+  groups: ReadonlyMap<string, ProjectCatalogEntry>,
+): Map<string, string> {
+  const migrations = new Map<string, string>();
+  for (const [source, targets] of changes) {
+    if ((groups.get(source)?.conversations ?? 0) > 0) continue;
+    if (targets.size !== 1) continue;
+    let target = targets.values().next().value;
+    const seen = new Set([source]);
+    while (target && (groups.get(target)?.conversations ?? 0) === 0) {
+      if (seen.has(target)) {
+        target = undefined;
+        break;
+      }
+      seen.add(target);
+      const next = changes.get(target);
+      if (next?.size !== 1) break;
+      target = next.values().next().value;
+    }
+    if (target && target !== source && (groups.get(target)?.conversations ?? 0) > 0) migrations.set(source, target);
+  }
+  return migrations;
+}
+
 export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean } = {}): {
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
@@ -122,8 +160,22 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
   const nextFiles: Record<string, CachedProjectFile> = {};
   const groups = new Map<string, ProjectCatalogEntry>();
   const projectByPath = new Map<string, string>();
-  for (const entry of raw) {
-    const file = cachedFile(entry, state, stateKey);
+  const previousProjects = new Map(raw.map((entry) => [entry.path, state.files[entry.path]?.project]));
+  const files = raw.map((entry) => cachedFile(entry, state, stateKey));
+  const claudeSessionProjects = new Map<string, string>();
+  for (let index = 0; index < raw.length; index += 1) {
+    const entry = raw[index]!;
+    const file = files[index]!;
+    const slug = file.rootName === "claude-projects" && file.session ? claudeSlug(entry) : null;
+    if (slug) claudeSessionProjects.set(slug, file.project);
+  }
+  for (let index = 0; index < raw.length; index += 1) {
+    const slug = claudeSlug(raw[index]!);
+    const project = slug ? claudeSessionProjects.get(slug) : undefined;
+    if (project) files[index]!.project = project;
+  }
+  const changes = new Map<string, Set<string>>();
+  for (const file of files) {
     nextFiles[file.path] = {
       rootName: file.rootName,
       size: file.size,
@@ -133,6 +185,12 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       kind: file.kind,
       session: file.session,
     };
+    const previousProject = previousProjects.get(file.path);
+    if (previousProject && previousProject !== file.project) {
+      const targets = changes.get(previousProject) ?? new Set<string>();
+      targets.add(file.project);
+      changes.set(previousProject, targets);
+    }
     const project = file.project || "other";
     projectByPath.set(file.path, project);
     let group = groups.get(project);
@@ -143,9 +201,23 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
     group.smt = Math.max(group.smt, file.mtimeMs / 1000);
     if (file.session) group.conversations += 1;
   }
-  if (options.persist !== false) writeState({ version: 1, files: nextFiles });
+  if (options.persist !== false) {
+    let boardHealed = true;
+    try {
+      boardHealed = migrateBoardProjects(unambiguousMigrations(changes, groups));
+    } catch {
+      boardHealed = false;
+    }
+    if (boardHealed) {
+      writeState({ version: 1, resolutionVersion: PROJECT_RESOLUTION_VERSION, files: nextFiles });
+    } else {
+      console.error("[project catalog] board project migration deferred; a later scan will retry");
+    }
+  }
   return {
-    projectCatalog: [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
+    projectCatalog: [...groups.values()]
+      .filter((entry) => entry.conversations > 0)
+      .sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
     projectByPath,
   };
 }
