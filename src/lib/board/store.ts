@@ -85,3 +85,89 @@ export function patchBoard(project: string, baseRevision: number, patch: BoardPa
 export function mutateBoard(project: string, baseRevision: number, mutations: readonly BoardMutationV1[], filePath = boardFileForTests ?? BOARD_FILE): BoardWriteResult {
   return writeReduced(project, baseRevision, (current) => applyBoardMutations(current, mutations), filePath);
 }
+
+function mergedBoards(states: readonly BoardProjectStateV1[]): BoardProjectStateV1 {
+  const ordered = states
+    .map((state, index) => ({ state, index, timestamp: Date.parse(state.updatedAt) }))
+    .sort((left, right) => {
+      const leftTime = Number.isFinite(left.timestamp) ? left.timestamp : 0;
+      const rightTime = Number.isFinite(right.timestamp) ? right.timestamp : 0;
+      return leftTime - rightTime || left.index - right.index;
+    })
+    .map(({ state }) => state);
+  const aliases = ordered.reduce<Record<string, string>>(
+    (combined, state) => ({ ...combined, ...(state.pathAliases ?? {}) }),
+    {},
+  );
+  const roles = new Map<string, "manual" | "hidden" | "expanded">();
+  let viewMode: BoardProjectStateV1["prefs"]["viewMode"] = null;
+  let taskPanelOpen = false;
+  let normalizedAliases: Record<string, string> = aliases;
+  for (const state of ordered) {
+    const normalized = applyBoardMutations({ ...state, pathAliases: aliases }, []);
+    normalizedAliases = normalized.pathAliases ?? {};
+    for (const role of ["manual", "hidden", "expanded"] as const) {
+      for (const pathname of normalized.prefs[role]) {
+        roles.delete(pathname);
+        roles.set(pathname, role);
+      }
+    }
+    viewMode = normalized.prefs.viewMode;
+    taskPanelOpen = normalized.prefs.taskPanelOpen;
+  }
+  const prefs = {
+    manual: [] as string[],
+    hidden: [] as string[],
+    expanded: [] as string[],
+    viewMode,
+    taskPanelOpen,
+  };
+  for (const [pathname, role] of roles) prefs[role].push(pathname);
+  return { ...ordered.at(-1)!, pathAliases: normalizedAliases, prefs };
+}
+
+/** Move durable board preferences along with catalog project-key repairs.
+    Sources remain intact whenever a merge cannot preserve board invariants. */
+export function migrateBoardProjects(
+  migrations: ReadonlyMap<string, string>,
+  filePath = statePath("board.json"),
+): boolean {
+  if (migrations.size === 0) return true;
+  const value = read(filePath);
+  let changed = false;
+  let complete = true;
+  const sourcesByTarget = new Map<string, string[]>();
+  for (const [sourceProject, targetProject] of migrations) {
+    if (sourceProject === targetProject) continue;
+    sourcesByTarget.set(targetProject, [...(sourcesByTarget.get(targetProject) ?? []), sourceProject]);
+  }
+  for (const [targetProject, sourceProjects] of sourcesByTarget) {
+    const sources = sourceProjects.flatMap((project) => value.projects[project] ? [value.projects[project]!] : []);
+    if (sources.length === 0) continue;
+    const target = value.projects[targetProject];
+    if (!target && sources.length === 1) {
+      value.projects[targetProject] = sources[0]!;
+      for (const sourceProject of sourceProjects) delete value.projects[sourceProject];
+      changed = true;
+      continue;
+    }
+    try {
+      const states = target ? [target, ...sources] : sources;
+      const merged = mergedBoards(states);
+      value.projects[targetProject] = target && sameReduced(target, merged)
+        ? target
+        : {
+            ...merged,
+            revision: Math.max(...states.map((state) => state.revision)) + 1,
+            updatedAt: new Date().toISOString(),
+          };
+      for (const sourceProject of sourceProjects) delete value.projects[sourceProject];
+      changed = true;
+    } catch {
+      complete = false;
+      continue;
+    }
+  }
+  if (changed) write(value, filePath);
+  return complete;
+}
