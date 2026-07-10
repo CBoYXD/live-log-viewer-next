@@ -111,9 +111,9 @@ export async function previewMigration(
   engine: MigrationEngine,
   targetId: string,
   registry: AgentRegistry = agentRegistry(),
-  files?: FileEntry[],
 ): Promise<MigrationPreview> {
-  await reconcileMigrationInventory(registry, files);
+  // AccountMigrationController owns inventory scans. The request path projects
+  // its durable snapshot so preview stays mutation-free and avoids transcript I/O.
   return previewFromSnapshot(engine, targetId, registry);
 }
 
@@ -124,10 +124,10 @@ export async function createMigrationIntent(
   requestId: string = crypto.randomUUID(),
   previewRevision?: number,
   registry: AgentRegistry = agentRegistry(),
-  files?: FileEntry[],
   evidence: MigrationIntent["evidence"] = null,
 ): Promise<{ intent: MigrationIntent; preview: MigrationPreview }> {
-  await reconcileMigrationInventory(registry, files);
+  // The revision fence below detects controller updates after confirmation.
+  // Re-scanning here would add request latency and invalidate its own preview.
   const preview = previewFromSnapshot(engine, targetId, registry);
   const intent = registry.commitMigrationIntent({
     engine,

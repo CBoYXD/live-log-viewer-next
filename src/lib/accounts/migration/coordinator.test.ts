@@ -60,6 +60,18 @@ afterEach(() => {
 });
 
 describe("durable account migration coordinator", () => {
+  test("preview reads the controller inventory without rewriting the registry", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/owned.jsonl", "managed", "idle")]);
+    const before = fs.statSync(store.filename, { bigint: true });
+
+    const preview = await previewMigration("codex", "default", store);
+
+    const after = fs.statSync(store.filename, { bigint: true });
+    expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
+    expect(after.ino).toBe(before.ino);
+  });
+
   test("unowned inventory stays outside previews and committed migration scope", async () => {
     const store = registry();
     store.reconcileConversations([
@@ -67,7 +79,7 @@ describe("durable account migration coordinator", () => {
       observation("/scanner-artifact.log", null, "busy"),
     ]);
 
-    const preview = await previewMigration("codex", "default", store, []);
+    const preview = await previewMigration("codex", "default", store);
     expect(preview.counts).toEqual({ total: 1, idle: 1, busy: 0, alreadyTarget: 0 });
     store.commitMigrationIntent({
       engine: "codex",
