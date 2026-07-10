@@ -121,7 +121,7 @@ export type AccountOperation = "refresh" | "add" | "migrate" | "policy" | "login
 export type AccountRetryAction =
   | { type: "retry"; kind: "refresh" }
   | { type: "retry"; kind: "add"; label: string }
-  | { type: "retry"; kind: "migrate"; accountId: string }
+  | { type: "retry"; kind: "migrate"; accountId: string; scope: AccountMigrationScope }
   | { type: "retry"; kind: "stop"; intentId: string }
   | { type: "retry"; kind: "retryFailed"; intentId: string }
   | { type: "retry"; kind: "loginRetry"; accountId: string }
@@ -286,8 +286,8 @@ function claudeAddFailure(code: string | null | undefined, label: string): Accou
 
 /** A failed account switch retries by re-previewing the account target and
     committing a fresh, revision-fenced migration. */
-function migrateFailure(accountId: string): AccountNotice {
-  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "migrate", accountId } };
+function migrateFailure(accountId: string, scope: AccountMigrationScope): AccountNotice {
+  return { kind: "error", operation: "migrate", messageKey: "accounts.switchFailed", action: { type: "retry", kind: "migrate", accountId, scope } };
 }
 
 /** Stop and retry-failed retries address the durable intent by its id and read a
@@ -519,7 +519,7 @@ export function createEngineAccountsStore(
         });
         if (!response.ok) throw new Error("migration request failed");
       } catch {
-        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: migrateFailure(id) });
+        patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: migrateFailure(id, scope) });
         await refresh();
         return false;
       }
@@ -771,7 +771,7 @@ export function createEngineAccountsStore(
         // would 409. Fail closed when the preview cannot be obtained.
         const fresh = await preview(action.accountId);
         if (!fresh) return false;
-        return selectAndMigrate(action.accountId, fresh.previewRevision);
+        return selectAndMigrate(action.accountId, fresh.previewRevision, action.scope);
       }
       case "stop":
         // Re-issues the stop against the durable intent; stopMigration reads the

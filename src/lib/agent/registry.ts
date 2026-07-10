@@ -1304,7 +1304,28 @@ export class AgentRegistry {
         if (input.origin === "auto" && conversation.migrationOptOut?.targetId === input.targetId) continue;
         const source = conversation.generations.at(-1);
         if (!source || source.accountId === null || source.accountId === input.targetId) {
-          if (conversation.migration && conversation.migration.phase !== "committed") conversation.migration = null;
+          if (source && conversation.migration && conversation.migration.phase !== "committed") {
+            const receipt = conversation.migration.providerReceipt;
+            if (receipt) {
+              file.pendingSuccessorCleanups[receipt.operationId] ??= {
+                conversationId: conversation.id,
+                receipt,
+                createdAt: changedAt,
+                lastError: null,
+              };
+            }
+            for (const delivery of Object.values(file.heldDeliveries)) {
+              if (delivery.conversationId !== conversation.id
+                || delivery.state === "delivered"
+                || delivery.state === "delivery-uncertain") continue;
+              delivery.state = "assigned";
+              delivery.generationId = source.id;
+              delivery.assignedAt = changedAt;
+              delivery.error = null;
+            }
+            conversation.migration = null;
+            conversation.updatedAt = changedAt;
+          }
           continue;
         }
         const readiness = migrationReadiness(file, conversation);

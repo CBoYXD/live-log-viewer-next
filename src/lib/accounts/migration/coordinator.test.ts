@@ -1062,6 +1062,45 @@ describe("durable account migration coordinator", () => {
       .toThrow(MigrationRevisionError);
   });
 
+  test("returning to the source before commit drains held input once after restart", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/return-source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/return-source.jsonl")!;
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "leave-source",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+    store.holdDelivery(conversation.id, "stay with source", "return-source-message");
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "a",
+      origin: "manual",
+      requestId: "return-to-source",
+      expectedRevision: store.engineRouting("codex").revision,
+    });
+
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.conversation(conversation.id)?.migration).toBeNull();
+    expect(restarted.pendingDeliveries(conversation.id)).toMatchObject([{
+      clientMessageId: "return-source-message",
+      state: "assigned",
+      generationId: conversation.generations[0]?.id,
+    }]);
+    const delivered: string[] = [];
+    await reconcileMigrations(provider([]), {
+      async deliver({ clientMessageId }) {
+        delivered.push(clientMessageId);
+        return "delivered";
+      },
+    }, restarted);
+
+    expect(delivered).toEqual(["return-source-message"]);
+    expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
+  });
+
   test("A to B to A preserves one owner, the full profile, and drains held input once", async () => {
     const store = registry();
     store.reconcileConversations([observation("/a.jsonl", "a", "idle")]);

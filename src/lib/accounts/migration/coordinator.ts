@@ -447,7 +447,10 @@ export async function reconcileMigrations(
     .filter((item) => item.state !== "delivered" && item.state !== "delivery-uncertain")
     .map((item) => item.conversationId));
   for (const conversation of Object.values(before.conversations)) {
-    if (!conversation.migration || conversation.migration.phase === "rolled-back") continue;
+    if (!conversation.migration || conversation.migration.phase === "rolled-back") {
+      if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
+      continue;
+    }
     if (conversation.migration.phase === "committed") {
       if (pendingDeliveries.has(conversation.id)) await drainHeldDeliveries(conversation.id, delivery, registry);
       continue;

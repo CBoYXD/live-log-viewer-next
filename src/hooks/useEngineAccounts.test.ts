@@ -177,7 +177,7 @@ test("the store exposes no bare select, and every write to /active carries a mod
   for (const write of activeWrites) expect((write.body as { mode?: string }).mode).toBeDefined();
 });
 
-test("retryNotice re-fences a failed migrate against a fresh preview revision before migrating", async () => {
+test("retryNotice re-fences a failed full-history migration and preserves its scope", async () => {
   let previewRevision = 4;
   const { calls, fetcher } = scripted((url, body) => {
     if (url === "/api/accounts") return claudePayload();
@@ -193,11 +193,11 @@ test("retryNotice re-fences a failed migrate against a fresh preview revision be
   const store = createEngineAccountsStore("claude", { fetcher });
   store.subscribe(() => {});
   await advance();
-  const failed = await store.selectAndMigrate("work", 1);
+  const failed = await store.selectAndMigrate("work", 1, "all");
   expect(failed).toBeFalse();
   // A switch failure retains the account target id and retries through the
   // preview → migrate path.
-  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "migrate", accountId: "work" });
+  expect(store.notice?.action).toMatchObject({ type: "retry", kind: "migrate", accountId: "work", scope: "all" });
   // The retry must fetch a fresh revision first, then migrate with it — never
   // replay the stale one.
   previewRevision = 9;
@@ -208,7 +208,7 @@ test("retryNotice re-fences a failed migrate against a fresh preview revision be
   const migrateCall = calls.find((call) => (call.body as { mode?: string })?.mode === "migrate");
   expect(previewIdx).toBeGreaterThanOrEqual(0);
   expect(calls.indexOf(migrateCall!)).toBeGreaterThan(previewIdx); // preview precedes migrate
-  expect(migrateCall?.body).toMatchObject({ previewRevision: 9 });
+  expect(migrateCall?.body).toMatchObject({ previewRevision: 9, scope: "all" });
   expect(store.notice).toBeNull(); // the recovered retry clears the stale failure
 });
 
