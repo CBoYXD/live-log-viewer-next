@@ -10,10 +10,11 @@ import { UnknownClaudeAccountError } from "@/lib/accounts/claude";
 import { accountManager } from "@/lib/accounts/manager";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
-import { agentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
+import { agentRegistry } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
+import { spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { persistHandoffLineage, rememberHandoffChild, rememberHandoffPane } from "@/lib/handoffLineage";
@@ -38,19 +39,6 @@ interface SuggestResponse {
   dirs: string[];
   /** Working directory of the `src` transcript when one was requested. */
   cwd: string | null;
-}
-
-interface SpawnResponse {
-  ok: true;
-  target: string | null;
-  /** Transcript path the fresh session will write, when knowable (claude);
-      the draft pane waits for exactly this file to appear in the scanner. */
-  path: string | null;
-  launchId: string;
-  conversationId: string;
-  launched: boolean;
-  retrySafe: boolean;
-  state: "settled" | "path-pending" | "starting" | "conflict";
 }
 
 /** Security gate for `?src=`: the resolved real path must be a regular .jsonl
@@ -144,21 +132,6 @@ function conversationForTranscript(transcript: string): `conversation_${string}`
 
 function spawnDigest(input: Record<string, unknown>): string {
   return crypto.createHash("sha256").update(JSON.stringify(input)).digest("hex");
-}
-
-export function spawnResponseForReceipt(receipt: SpawnReceipt, path = receipt.artifactPath): SpawnResponse {
-  const conflict = receipt.state === "conflicted";
-  const pending = receipt.state === "starting" || receipt.state === "pane-bound" || receipt.state === "prompt-delivered" || receipt.state === "path-pending";
-  return {
-    ok: true,
-    target: receipt.target ?? receipt.pane?.target ?? null,
-    path,
-    launchId: receipt.launchId,
-    conversationId: receipt.conversationId,
-    launched: receipt.pane !== null,
-    retrySafe: receipt.state === "failed",
-    state: conflict ? "conflict" : pending ? (receipt.state === "path-pending" || receipt.state === "prompt-delivered" ? "path-pending" : "starting") : "settled",
-  };
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse<SpawnResponse | ApiError>> {
