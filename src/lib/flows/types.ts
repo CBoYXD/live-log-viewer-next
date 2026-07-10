@@ -72,6 +72,8 @@ export type Flow = {
   implementerConversationId?: string | null;
   roles: Record<FlowRoleKey, RoleConfig>;
   baseRef: string; // resolved git SHA captured at creation
+  /** Pinned task specification and acceptance criteria shown to every reviewer. */
+  spec?: string;
   baseMode: "head" | "merge-base";
   mode: "auto" | "manual";
   reviewerMode: "headless" | "pane";
@@ -100,6 +102,8 @@ export type CreateFlowRequest = {
       workflow branch start here so every round reviews the whole workflow
       diff; when absent the base resolves from baseMode in the session cwd. */
   baseRef?: string;
+  /** Optional pinned task specification and acceptance criteria for the flow. */
+  spec?: string;
   mode: "auto" | "manual";
   reviewerMode: "headless" | "pane";
   roundLimit: number;

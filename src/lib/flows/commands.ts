@@ -44,11 +44,22 @@ export function rolesFromRequest(req: CreateFlowRequest): Record<"implementer" |
   return { implementer, reviewer };
 }
 
+export function normalizeFlowSpec(value: unknown): { ok: true; spec?: string } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (typeof value !== "string") return { ok: false };
+  const spec = value.trim();
+  return spec ? { ok: true, spec } : { ok: true };
+}
+
 export async function createFlowFromRequest(req: CreateFlowRequest, entries: FileEntry[]): Promise<{ flow?: Flow; error?: string; status?: number }> {
   const entry = entries.find((item) => item.path === req.implementerPath);
   if (!entry) return { error: "implementer transcript is unknown", status: 404 };
   if (entry.root !== "claude-projects" && entry.root !== "codex-sessions") {
     return { error: "implementer must be a Claude or Codex session", status: 400 };
+  }
+  const normalizedSpec = normalizeFlowSpec(req.spec);
+  if (!normalizedSpec.ok) {
+    return { error: "spec must be a string", status: 400 };
   }
   const roles = rolesFromRequest(req);
   if (!roles) return { error: "invalid flow roles or preset", status: 400 };
@@ -72,6 +83,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     implementerConversationId: entry.conversationId ?? null,
     roles,
     baseRef: base.sha,
+    ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,
     mode: req.mode === "manual" ? "manual" : "auto",
     reviewerMode: req.reviewerMode === "pane" ? "pane" : "headless",
@@ -86,7 +98,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   flows.push(flow);
   saveFlows(flows);
   try {
-    await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt());
+    await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
   } catch (error) {
     flow.state = "paused";
     flow.pausedState = "waiting_ready";

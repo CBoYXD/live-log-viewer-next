@@ -472,6 +472,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "flowDialog.preset": "пресет",
   "flowDialog.rolesManualOpen": "▾ ролі вручну",
   "flowDialog.rolesManual": "▸ ролі вручну (модель / effort)",
+  "flowDialog.spec": "специфікація та критерії приймання",
+  "flowDialog.specPlaceholder": "Опис задачі\nAC1: …\nAC2: …",
   "flowDialog.implementer": "виконавець",
   "flowDialog.reviewer": "ревʼюер",
   "flowDialog.diffBase": "база діфу",

@@ -68,7 +68,9 @@ export const SEEDED_PRESETS: FlowPreset[] = [
   },
 ];
 
-type FlowFile = { flows?: unknown };
+export const FLOWS_SCHEMA_VERSION = 2;
+
+type FlowFile = { schemaVersion?: unknown; flows?: unknown };
 type PresetFile = { presets?: unknown };
 
 function atomicWriteJson(filePath: string, value: unknown): void {
@@ -102,6 +104,7 @@ function isFlow(value: unknown): value is Flow {
     typeof flow.cwd === "string" &&
     typeof flow.implementerPath === "string" &&
     typeof flow.baseRef === "string" &&
+    (flow.spec === undefined || typeof flow.spec === "string") &&
     Array.isArray(flow.rounds)
   );
 }
@@ -182,7 +185,7 @@ export function reconcileFlowConversationOwnership(registry: AgentRegistry = age
 }
 
 export function saveFlows(flows: Flow[]): void {
-  atomicWriteJson(flowsFile(), { flows });
+  atomicWriteJson(flowsFile(), { schemaVersion: FLOWS_SCHEMA_VERSION, flows });
 }
 
 export function loadPresets(): FlowPreset[] {

@@ -81,6 +81,7 @@ export function FlowDialog({ file, onClose }: { file: FileEntry; onClose: () => 
   const [mode, setMode] = useState<"auto" | "manual">("auto");
   const [reviewerMode, setReviewerMode] = useState<"headless" | "pane">("headless");
   const [roundLimit, setRoundLimit] = useState(5);
+  const [spec, setSpec] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -121,6 +122,7 @@ export function FlowDialog({ file, onClose }: { file: FileEntry; onClose: () => 
           mode,
           reviewerMode,
           roundLimit,
+          ...(spec.trim() ? { spec: spec.trim() } : {}),
         }),
       });
       if (!res.ok) {
@@ -179,6 +181,17 @@ export function FlowDialog({ file, onClose }: { file: FileEntry; onClose: () => 
           <RoleEditor label={t("flowDialog.reviewer")} role={roles.reviewer} onChange={(next) => setRoles((prev) => ({ ...prev, reviewer: next }))} />
         </div>
       ) : null}
+
+      <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
+        {t("flowDialog.spec")}
+        <textarea
+          value={spec}
+          rows={4}
+          placeholder={t("flowDialog.specPlaceholder")}
+          className="resize-y rounded-[8px] border border-line bg-bg px-2 py-1.5 text-[11.5px] font-normal text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          onChange={(event) => setSpec(event.target.value)}
+        />
+      </label>
 
       <div className="grid grid-cols-2 gap-2">
         <label className="flex flex-col gap-1 text-[10.5px] font-semibold text-dim">
