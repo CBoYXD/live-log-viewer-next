@@ -377,6 +377,7 @@ const ORCH_METHOD_TOOL: Record<string, string> = {
   bash: "Bash",
   read_file: "Read",
   read: "Read",
+  view_image: "Read",
   write_file: "Write",
   write: "Write",
   apply_patch: "apply_patch",
@@ -394,13 +395,147 @@ const ORCH_CALL_RE = /\btools\.([A-Za-z_]\w*)\s*\(/g;
 const ORCH_HELPER_RE = /(?:^|[^.\w])(text|image|generatedImage|store|notify)\s*\(/g;
 const ORCH_MAX_CALLS = 16;
 
-function orchArgFor(tool: string, arg: string): Record<string, unknown> {
-  const family = familyOf(tool);
-  if (family === "shell") return { command: arg };
-  if (family === "read" || family === "write") return { file_path: arg };
-  if (family === "search") return { pattern: arg };
-  if (family === "web") return { url: arg };
-  return { value: arg };
+/* Reads a JS string/template literal that opens at `start` (its quote char) and
+   returns the index of the matching close quote. Backslash escapes are skipped;
+   a template literal's ${…} body is scanned as plain text, which is enough for
+   the machine-generated argument literals Codex emits (no nested backticks). */
+function skipStringLiteral(src: string, start: number): number {
+  const quote = src[start];
+  for (let i = start + 1; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === "\\") {
+      i += 1;
+      continue;
+    }
+    if (ch === quote) return i;
+  }
+  return src.length - 1;
+}
+
+/* Slices the argument source of a `tools.method(` call — the text between the
+   opening paren at `open` and its balanced close — skipping nested brackets and
+   string/template literals so a `)` inside a command never ends it early. */
+function sliceCallArgs(src: string, open: number): string {
+  let depth = 0;
+  for (let i = open; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      i = skipStringLiteral(src, i);
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      depth -= 1;
+      if (depth === 0) return src.slice(open + 1, i);
+    }
+  }
+  return src.slice(open + 1);
+}
+
+/* Value of a named field in an object-literal argument source
+   (`{cmd: "…", workdir: "…"}`). Returns "" when the key is absent or its value
+   is not a string/template literal (e.g. a bare variable or a number). */
+function objFieldValue(argsSrc: string, keys: readonly string[]): string {
+  for (const key of keys) {
+    const re = new RegExp(`(?:^|[{,([\\s])${key}\\s*:\\s*`);
+    const m = re.exec(argsSrc);
+    if (!m) continue;
+    const start = (m.index ?? 0) + m[0].length;
+    const ch = argsSrc[start];
+    if (ch === '"' || ch === "'" || ch === "`") return argsSrc.slice(start + 1, skipStringLiteral(argsSrc, start));
+  }
+  return "";
+}
+
+/* The first string/template literal in an argument source. */
+function firstLiteral(argsSrc: string): string {
+  for (let i = 0; i < argsSrc.length; i += 1) {
+    const ch = argsSrc[i];
+    if (ch === '"' || ch === "'" || ch === "`") return argsSrc.slice(i + 1, skipStringLiteral(argsSrc, i));
+  }
+  return "";
+}
+
+/* Only meaningful for a positional call (`tools.exec_command(cmd)`); an object
+   literal is skipped so a non-target field (workdir, encoding) never
+   masquerades as the value. */
+function positionalLiteral(argsSrc: string): string {
+  return /^\s*\{/.test(argsSrc) ? "" : firstLiteral(argsSrc);
+}
+
+/* Resolves the string a nested-call field points at, in order: an inline
+   literal (`cmd: "git status"`), a shorthand (`{cmd}`), or an identifier
+   (`cmd: c`) chased back to the `const c = <literal>` that defined it in the
+   block. Returns "" when the value is built at runtime (a loop/destructured
+   variable, a call expression), which is genuinely unrecoverable statically. */
+function resolveField(argsSrc: string, fullInput: string, keys: readonly string[]): string {
+  for (const key of keys) {
+    const literal = objFieldValue(argsSrc, [key]);
+    if (literal) return literal;
+    const ref = new RegExp(`(?:^|[{,\\s])${key}\\s*(?::\\s*([A-Za-z_$][\\w$]*)\\s*[,}]|[,}])`).exec(argsSrc);
+    if (!ref) continue;
+    const ident = ref[1] ?? key;
+    const def = new RegExp(`\\b(?:const|let|var)\\s+${ident}\\s*=\\s*`).exec(fullInput);
+    if (!def) continue;
+    const start = def.index + def[0].length;
+    const ch = fullInput[start];
+    if (ch === '"' || ch === "'" || ch === "`") return fullInput.slice(start + 1, skipStringLiteral(fullInput, start));
+  }
+  return "";
+}
+
+/* Builds canonical summarizer args for one nested `tools.method(argsSrc)` call,
+   pulling the meaningful field (command, path, pattern, url) out of the argument
+   source so the nested row summarizes like a first-class tool call rather than
+   grabbing whatever substring happened to be quoted first. */
+function orchCallArgs(tool: string, argsSrc: string, fullInput: string): Record<string, unknown> {
+  switch (familyOf(tool)) {
+    case "shell":
+      return { command: resolveField(argsSrc, fullInput, ["cmd", "command"]) || positionalLiteral(argsSrc) };
+    case "read":
+    case "write":
+      return { file_path: resolveField(argsSrc, fullInput, ["path", "file_path", "filePath"]) || positionalLiteral(argsSrc) };
+    case "search":
+      return {
+        pattern: resolveField(argsSrc, fullInput, ["pattern", "query", "regex", "q"]) || positionalLiteral(argsSrc),
+        path: objFieldValue(argsSrc, ["path", "glob", "include"]),
+      };
+    case "web":
+      return { url: resolveField(argsSrc, fullInput, ["url"]) || positionalLiteral(argsSrc) };
+    case "edit": {
+      /* apply_patch's argument is usually a `patch` variable, so recover the
+         patch body from the surrounding source (the `\n` escapes of a
+         double-quoted literal are unfolded) to keep the file names in view. */
+      const raw = fullInput.match(/\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch/)?.[0] ?? "";
+      return { input: raw.replace(/\\n/g, "\n") };
+    }
+    default:
+      /* Codex helper methods (create_goal, update_plan, view_image, …) carry no
+         canonical field, so name them by their first string argument. */
+      return { value: objFieldValue(argsSrc, ["cmd", "path", "url", "query", "pattern", "goal", "step", "title", "name"]) || firstLiteral(argsSrc) };
+  }
+}
+
+/* A `const cmds = [[label, command, …], …]` batch mapped into a single
+   `tools.exec_command({cmd})` call: the runtime `cmd` is a destructured loop
+   variable, but every command is a static string element of the array. Recovers
+   those command heads so the batch reads as a real multi-command record instead
+   of one blank shell row. Returns [] when no such array of tuples is present. */
+function batchCommands(fullInput: string): string[] {
+  const tuples = fullInput.match(/=\s*\[\s*\[[\s\S]*?\]\s*,?\s*\]/)?.[0];
+  if (!tuples) return [];
+  const commands: string[] = [];
+  for (let i = 0; i < tuples.length && commands.length < ORCH_MAX_CALLS; i += 1) {
+    const ch = tuples[i];
+    if (ch !== '"' && ch !== "'" && ch !== "`") continue;
+    const end = skipStringLiteral(tuples, i);
+    const value = tuples.slice(i + 1, end);
+    i = end;
+    /* A command carries a space and a bareword head; the tuple's label and
+       path/url elements (no space, or a leading `/`/`http`/`#`) are skipped. */
+    if (/\s/.test(value.trim()) && !/^\s*(?:[/#]|https?:)/.test(value)) commands.push(value);
+  }
+  return commands;
 }
 
 /**
@@ -419,10 +554,10 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body:
   let match: RegExpExecArray | null;
   while ((match = ORCH_CALL_RE.exec(input)) && calls.length < ORCH_MAX_CALLS) {
     const method = match[1];
-    const tail = input.slice(match.index + match[0].length, match.index + match[0].length + 400);
-    const arg = tail.match(/(['"`])([^'"`]*)\1/)?.[2] ?? "";
+    const open = match.index + match[0].length - 1; // the '(' at the end of the match
+    const argsSrc = sliceCallArgs(input, open);
     const tool = ORCH_METHOD_TOOL[method] ?? method;
-    const s = summarizeTool(tool, orchArgFor(tool, arg), "codex");
+    const s = summarizeTool(tool, orchCallArgs(tool, argsSrc, input), "codex");
     calls.push({ id: `${method}#${calls.length}`, tool: method, family: s.family, icon: s.icon, summary: s.summary });
   }
   ORCH_HELPER_RE.lastIndex = 0;
@@ -433,11 +568,33 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body:
   }
   const toolCalls = calls.filter((call) => call.icon !== "note");
   if (!toolCalls.length) return null;
+  /* A single shell op whose command didn't resolve (summary is the bare tool
+     name, no space) but which maps over a static command-tuple array expands
+     into one nested row per command — the batch it actually runs. */
+  let nested = calls;
+  let ops = toolCalls;
+  if (toolCalls.length === 1 && toolCalls[0].family === "shell" && !/\s/.test(toolCalls[0].summary)) {
+    const batch = batchCommands(input);
+    if (batch.length >= 2) {
+      nested = batch.map((cmd, i) => {
+        const s = summarizeTool("Bash", { command: cmd }, "codex");
+        return { id: `exec_command#${i}`, tool: "exec_command", family: s.family, icon: s.icon, summary: s.summary };
+      });
+      ops = nested;
+    }
+  }
   const source = redactSecrets(input).slice(0, COMMAND_MAX);
-  const summary = toolCalls.length === 1 ? toolCalls[0].summary : tr("tools.orchestration", { count: toolCalls.length });
+  const lead = ops[0];
+  /* A lone operation reads as its own card — same summary, icon, and family a
+     first-class shell/read/edit call would get. A multi-op record leads with
+     the first command's head and tags the remaining count. */
+  const overlay: Partial<ToolEvent> =
+    ops.length === 1
+      ? { summary: lead.summary, icon: lead.icon, family: lead.family }
+      : { summary: `${lead.summary} · ${tr("tools.orchestration", { count: ops.length })}`.slice(0, 160), icon: "cmd-group" };
   return {
-    overlay: { summary, icon: "cmd-group" },
-    body: { source, sourceTruncated: input.length > COMMAND_MAX, calls },
+    overlay,
+    body: { source, sourceTruncated: input.length > COMMAND_MAX, calls: nested },
   };
 }
 
