@@ -484,6 +484,55 @@ function resolveField(argsSrc: string, fullInput: string, keys: readonly string[
   return "";
 }
 
+/* Decodes the escape sequences of a JavaScript string literal's body. The
+   apply_patch payload usually lives inside a `const patch = "…"` double-quoted
+   literal, so its newlines arrive as a two-char `\n` and its quotes as `\"`;
+   left raw they would render as one escaped line rather than a diff. A template
+   literal (backticks) carries real newlines and needs no decode — its body has
+   no escapes to match, so this is a no-op there. */
+function decodeJsString(raw: string): string {
+  return raw.replace(/\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (whole, seq: string) => {
+    switch (seq[0]) {
+      case "n":
+        return "\n";
+      case "t":
+        return "\t";
+      case "r":
+        return "\r";
+      case "b":
+        return "\b";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      case "0":
+        return seq.length === 1 ? "\0" : whole;
+      case "u":
+      case "x":
+        return String.fromCodePoint(parseInt(seq.slice(1), 16));
+      case "\n":
+        return ""; // escaped line continuation
+      case '"':
+      case "'":
+      case "`":
+      case "\\":
+        return seq;
+      default:
+        return seq; // unknown escape: keep the char, drop the backslash
+    }
+  });
+}
+
+/* Pulls every apply_patch payload out of a Codex exec's JS source and decodes
+   the surrounding literal, so a `const patch = "*** Begin Patch\n…"` assignment
+   (or an inline string argument) becomes real multi-line patch text ready for
+   {@link diffFromApplyPatch}. Empty when no `*** Begin Patch` block is present
+   or the patch is built at runtime. */
+function applyPatchBody(input: string): string {
+  const blocks = input.match(/\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch/g);
+  return blocks ? blocks.map(decodeJsString).join("\n") : "";
+}
+
 /* Builds canonical summarizer args for one nested `tools.method(argsSrc)` call,
    pulling the meaningful field (command, path, pattern, url) out of the argument
    source so the nested row summarizes like a first-class tool call rather than
@@ -504,10 +553,9 @@ function orchCallArgs(tool: string, argsSrc: string, fullInput: string): Record<
       return { url: resolveField(argsSrc, fullInput, ["url"]) || positionalLiteral(argsSrc) };
     case "edit": {
       /* apply_patch's argument is usually a `patch` variable, so recover the
-         patch body from the surrounding source (the `\n` escapes of a
-         double-quoted literal are unfolded) to keep the file names in view. */
-      const raw = fullInput.match(/\*\*\* Begin Patch[\s\S]*?\*\*\* End Patch/)?.[0] ?? "";
-      return { input: raw.replace(/\\n/g, "\n") };
+         patch body from the surrounding source (the literal's `\n`, `\"`, … are
+         decoded) to keep the file names — and the real diff — in view. */
+      return { input: applyPatchBody(fullInput) };
     }
     default:
       /* Codex helper methods (create_goal, update_plan, view_image, …) carry no
@@ -547,7 +595,7 @@ function batchCommands(fullInput: string): string[] {
  * the full source and raw record expose the ground truth at level 2. Returns
  * null for a plain custom tool, which keeps rendering as one generic row.
  */
-function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body: Orchestration } | null {
+function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body?: Orchestration; diff?: DiffModel } | null {
   if (!input || !/\btools\.[A-Za-z_]\w*\s*\(/.test(input)) return null;
   const calls: NestedCall[] = [];
   ORCH_CALL_RE.lastIndex = 0;
@@ -568,6 +616,38 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body:
   }
   const toolCalls = calls.filter((call) => call.icon !== "note");
   if (!toolCalls.length) return null;
+  const source = redactSecrets(input).slice(0, COMMAND_MAX);
+  const sourceTruncated = input.length > COMMAND_MAX;
+
+  /* An apply_patch payload embedded in the JS source parses into the same diff
+     model a first-class apply_patch gets, so the card renders the structured
+     DiffCard instead of dumping the escaped `const patch = "…"` string. The edit
+     op is represented by the diff itself, so it is dropped from the nested rows
+     to avoid showing the same change twice (issue #90). */
+  const patchText = applyPatchBody(input);
+  const patchDiff = patchText ? diffFromApplyPatch(patchText) : undefined;
+  if (patchDiff && patchDiff.files.length) {
+    const editView = summarizeTool("apply_patch", { input: patchText }, "codex", patchDiff);
+    const others = toolCalls.filter((call) => call.family !== "edit");
+    if (others.length === 0) {
+      /* Pure apply_patch: a clean diff card. The JS source stays reachable
+         through the level-2 raw record, never dumped into the body. */
+      return { overlay: { summary: editView.summary, icon: editView.icon, family: "edit", chips: editView.chips }, diff: patchDiff };
+    }
+    /* Mixed record: the diff plus the remaining (non-edit) nested operations. */
+    const nested = calls.filter((call) => call.family !== "edit");
+    return {
+      overlay: {
+        summary: `${editView.summary} · ${tr("tools.orchestration", { count: others.length })}`.slice(0, 160),
+        icon: "cmd-group",
+        family: "edit",
+        chips: editView.chips,
+      },
+      body: { source, sourceTruncated, calls: nested },
+      diff: patchDiff,
+    };
+  }
+
   /* A single shell op whose command didn't resolve (summary is the bare tool
      name, no space) but which maps over a static command-tuple array expands
      into one nested row per command — the batch it actually runs. */
@@ -583,19 +663,16 @@ function parseOrchestration(input: string): { overlay: Partial<ToolEvent>; body:
       ops = nested;
     }
   }
-  const source = redactSecrets(input).slice(0, COMMAND_MAX);
   const lead = ops[0];
   /* A lone operation reads as its own card — same summary, icon, and family a
      first-class shell/read/edit call would get. A multi-op record leads with
-     the first command's head and tags the remaining count. */
+     the first command's head and tags the remaining count. The raw JS source is
+     carried by the orchestration body, so the card never needs an argument chip. */
   const overlay: Partial<ToolEvent> =
     ops.length === 1
-      ? { summary: lead.summary, icon: lead.icon, family: lead.family }
-      : { summary: `${lead.summary} · ${tr("tools.orchestration", { count: ops.length })}`.slice(0, 160), icon: "cmd-group" };
-  return {
-    overlay,
-    body: { source, sourceTruncated: input.length > COMMAND_MAX, calls: nested },
-  };
+      ? { summary: lead.summary, icon: lead.icon, family: lead.family, chips: [] }
+      : { summary: `${lead.summary} · ${tr("tools.orchestration", { count: ops.length })}`.slice(0, 160), icon: "cmd-group", chips: [] };
+  return { overlay, body: { source, sourceTruncated, calls: nested } };
 }
 
 interface StoredEntry {
@@ -882,7 +959,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
       statusLabel: tr("render.executing"),
       outputPreview: "",
       outputTruncated: false,
-      open: false,
+      /* An edit/write card opens its structured diff inline by default — a
+         compact preview of the first lines, with a toggle for the rest — so the
+         change is visible without a click (issue #90). */
+      open: Boolean(body),
     };
   };
   const registerCall = (event: ToolEvent): CallRec => {
@@ -914,9 +994,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
      get their meaningful outer summary and structured nested children. */
   const emitCustomTool = (ts: unknown, name: string, input: string, callId?: string): ToolEvent => {
     const id = callId || "plain-" + pushSeq + "-" + String(ts ?? "");
-    const orchestration = parseOrchestration(input);
-    const base = newToolEvent({ ts, id, tool: name, args: { input }, engine: "codex" });
-    const event = orchestration ? { ...base, ...orchestration.overlay, orchestration: orchestration.body } : base;
+    const orch = parseOrchestration(input);
+    const base = newToolEvent({ ts, id, tool: name, args: { input }, engine: "codex", diff: orch?.diff });
+    const event = orch ? { ...base, ...orch.overlay, ...(orch.body ? { orchestration: orch.body } : {}) } : base;
     registerCall(event);
     return event;
   };
@@ -925,11 +1005,19 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean) => {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
-    const body = output
+    /* Codex wraps every custom-tool result in a `Script completed / Wall time N
+       seconds / Output:` preamble; strip it, and treat a bare `{}` (a script
+       that returned nothing) as no output at all, so an apply_patch card is not
+       trailed by a signal-free block (issue #90). */
+    const cleaned = output
       .replace(/^Chunk ID:[^\n]*\n/, "")
       .replace(/Wall time:[^\n]*\n/, "")
       .replace(/Original token count:[^\n]*\n?/, "")
+      .replace(/^Script completed[ \t]*\r?\n/, "")
+      .replace(/^Wall time [\d.]+ seconds?[ \t]*\r?\n/, "")
+      .replace(/^Output:[ \t]*\r?\n/, "")
       .trim();
+    const body = cleaned === "{}" ? "" : cleaned;
     const isErr = errFlag === true || (code !== undefined && code !== "0");
     const prev = callRec.event;
     let outputPreview = prev.outputPreview;

@@ -701,6 +701,62 @@ describe("Codex functions.exec orchestration", () => {
     expect(event.family).toBe("shell");
     expect(event.summary).not.toContain("/home/user/repo");
   });
+
+  /* Issue #90: a `const patch = "*** Begin Patch\n…"` assignment driving
+     tools.apply_patch is the common Codex edit shape. Its escaped JS string must
+     parse into the structured diff model — never a raw source dump. */
+  test("a buried apply_patch payload parses into a structured diff, not a raw source dump", () => {
+    const src =
+      'const patch = "*** Begin Patch\\n*** Update File: src/limit.ts\\n@@\\n-const limit = 10;\\n+const limit = 20;\\n*** End Patch";\ntext(await tools.apply_patch(patch));';
+    const event = single(src);
+    expect(event.family).toBe("edit");
+    expect(event.summary).toContain("limit.ts");
+    expect(event.body?.type).toBe("diff");
+    if (event.body?.type !== "diff") throw new Error("expected a diff body");
+    expect(event.body.files).toHaveLength(1);
+    const lines = event.body.files[0].hunks.flatMap((hunk) => hunk.lines.map((line) => line.t + line.text));
+    expect(lines).toContain("-const limit = 10;");
+    expect(lines).toContain("+const limit = 20;");
+    // The escaped JS source is never dumped as an orchestration body, and the
+    // edit row is represented by the diff (not duplicated as a nested call).
+    expect(event.orchestration).toBeUndefined();
+    // The diff is expanded inline by default.
+    expect(event.open).toBe(true);
+  });
+
+  test("apply_patch string escapes (\\n, \\\") decode into real diff lines", () => {
+    const src =
+      'const patch = "*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-const s = \\"old\\";\\n+const s = \\"new\\";\\n*** End Patch";\nawait tools.apply_patch(patch);';
+    const event = single(src);
+    if (event.body?.type !== "diff") throw new Error("expected a diff body");
+    const texts = event.body.files[0].hunks.flatMap((hunk) => hunk.lines.map((line) => line.text));
+    // The `\"` decoded to a real quote and each `\n` became a line boundary.
+    expect(texts).toContain('const s = "old";');
+    expect(texts).toContain('const s = "new";');
+    // No raw escape residue (a literal backslash-n) survives inside any line.
+    expect(texts.every((line) => !line.includes("\\n"))).toBe(true);
+  });
+
+  test("a record mixing apply_patch with another op keeps the diff and the non-edit nested row", () => {
+    const src =
+      'const patch = "*** Begin Patch\\n*** Update File: src/a.ts\\n@@\\n-a\\n+b\\n*** End Patch";\nawait tools.exec_command({cmd:"bun test src/a.test.ts"});\nawait tools.apply_patch(patch);';
+    const event = single(src);
+    expect(event.body?.type).toBe("diff");
+    const nested = event.orchestration?.calls ?? [];
+    // The edit op is carried by the diff, so it is not duplicated as a row.
+    expect(nested.every((call) => call.family !== "edit")).toBe(true);
+    expect(nested.some((call) => call.summary.includes("bun test"))).toBe(true);
+  });
+
+  test("the Script completed / Wall time / Output {} preamble is suppressed as no-signal output", () => {
+    const src = 'const patch = "*** Begin Patch\\n*** Add File: src/new.ts\\n+export const x = 1;\\n*** End Patch";\ntext(await tools.apply_patch(patch));';
+    const feed = buildFeed(codexFile, [orch(src, "p"), orchOutput("p", "Script completed\nWall time 0.1 seconds\nOutput:\n\n{}")], false, "");
+    const event = feed.items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected a tool item");
+    expect(event.status).toBe("ok");
+    expect(event.outputPreview).toBe("");
+    expect(event.body?.type).toBe("diff");
+  });
 });
 
 describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
