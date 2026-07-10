@@ -48,6 +48,77 @@ test("a deleted codex worktree still groups under its parent repo project", () =
   expect(projectForCwd(dead)).toBe(projectForCwd(liveRepo));
 });
 
+test("a deleted nested checkout inside a Codex worktree groups under the main repo", () => {
+  const dead = path.join(
+    os.homedir(),
+    ".codex",
+    "worktrees",
+    "deleted-catalog-fixture",
+    "CelestiaCompose",
+    "worktrees",
+    "deleted-child",
+  );
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe("CelestiaCompose");
+});
+
+test("a deleted worktree scratchpad cwd groups under the encoded parent repo", () => {
+  const repo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  const worktree = path.join(repo, ".worktrees", "runtime-host-spike");
+  const slug = worktree.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+});
+
+test("a main-checkout scratchpad cwd groups under its encoded project", () => {
+  const repo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  const slug = repo.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad", "probes");
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+});
+
+test("the outer nested worktree wins over a later specialized container", () => {
+  const repo = path.join(SANDBOX, "outer-repo");
+  const dead = path.join(repo, "worktrees", "outer", ".codex", "worktrees", "inner-hash", "InnerRepo");
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+});
+
+test("a scratchpad encoded from nested worktrees keeps the outer project", () => {
+  const repo = path.join(os.homedir(), ".agents", "tools", "live-log-viewer-next");
+  const nested = path.join(repo, ".worktrees", "outer", ".claude", "worktrees", "inner");
+  const slug = nested.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad");
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe(projectForCwd(repo));
+  const root = path.join(SANDBOX, "nested-scratchpad-transcripts");
+  const transcript = path.join(root, "nested-scratchpad", "session.jsonl");
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ type: "user", cwd: dead, message: { content: "Nested scratchpad" } }) + "\n");
+  expect(describe("claude-projects", root, transcript, fs.statSync(transcript))).toMatchObject({
+    project: projectForCwd(repo),
+    worktree: "outer",
+  });
+});
+
+test("a scratchpad encoded from a deleted Codex worktree keeps the repo project", () => {
+  const codexWorktree = path.join(
+    os.homedir(),
+    ".codex",
+    "worktrees",
+    "2d25",
+    "CelestiaCompose",
+    "worktrees",
+    "inner",
+  );
+  const slug = codexWorktree.replace(/[^a-zA-Z0-9]/g, "-");
+  const dead = path.join(os.tmpdir(), `claude-${process.getuid?.() ?? 1000}`, slug, "deleted-session", "scratchpad");
+  expect(fs.existsSync(dead)).toBe(false);
+  expect(projectForCwd(dead)).toBe("CelestiaCompose");
+});
+
 test("a deleted nested worktree (repo/worktrees/<name>) still groups under its parent repo", () => {
   /* `git worktree add worktrees/foo` and the dotted `.worktrees/foo` nest the
      checkout inside the repo, so the repo is the path prefix — recognizable by
