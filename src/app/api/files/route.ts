@@ -21,15 +21,36 @@ export async function GET(request: Request): Promise<NextResponse> {
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const { files, projectCatalog } = await listFilesWithProjectCatalog(selectedProject);
   const registry = agentRegistry();
+  const registrySnapshot = registry.snapshot();
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     const conversation = registry.ensureConversation(file.engine, file.path, registry.conversationForPath(file.path)?.generations.at(-1)?.accountId ?? null);
     const generation = conversation.generations.find((item) => item.path === file.path);
+    const generationIndex = conversation.generations.findIndex((item) => item.path === file.path);
     const latest = conversation.generations.at(-1);
     file.conversationId = conversation.id;
+    if (generationIndex >= 0) file.generation = generationIndex + 1;
     if (generation && latest && generation.path !== latest.path) file.migratedTo = latest.path;
-    if (latest?.path === file.path && conversation.generations.length > 1) file.predecessorPath = conversation.generations.at(-2)?.path;
-    if (conversation.migration && conversation.migration.phase !== "committed") file.migration = { phase: conversation.migration.phase, targetId: conversation.migration.targetId, revision: conversation.migration.revision, error: conversation.migration.error };
+    if (latest?.path === file.path && conversation.generations.length > 1) {
+      const predecessor = conversation.generations.at(-2);
+      file.predecessorPath = predecessor?.path;
+      file.predecessorLabel = predecessor?.accountId ?? undefined;
+    }
+    if (conversation.migration && conversation.migration.phase !== "committed") {
+      const intent = registrySnapshot.migrationIntents[conversation.migration.intentId];
+      const source = conversation.generations.at(-1);
+      file.migration = {
+        intentId: conversation.migration.intentId,
+        trigger: intent?.origin === "auto" ? "quota" : "manual",
+        phase: conversation.migration.phase,
+        targetAccountId: conversation.migration.targetId,
+        targetLabel: conversation.migration.targetId,
+        sourceLabel: source?.accountId ?? undefined,
+        heldDeliveries: Object.values(registrySnapshot.heldDeliveries).filter((delivery) => delivery.conversationId === conversation.id).length,
+        failure: conversation.migration.error,
+        revision: conversation.migration.revision,
+      };
+    }
   }
   /* This is the scanner-refresh reconciliation point. A failed tmux probe is
      represented by the resolver and preserves durable rows for a later retry. */
