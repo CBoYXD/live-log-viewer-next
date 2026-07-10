@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { procBackend } from "@/lib/proc";
 
 import type { AgentEngine } from "./cli";
 import { sessionKeyId, type SessionKey } from "./sessionKey";
@@ -56,10 +57,12 @@ interface RegistryFile {
   importedResumePanes: boolean;
   /** Compatibility evidence only. It never authorizes a pane until the live
       resolver proves server, process, engine, and transcript ownership. */
-  legacyResumePanes: Record<string, ResumePaneRecord>;
+  legacyResumePanes: { serverPid: number | null; panes: Record<string, ResumePaneRecord> };
 }
 
-const EMPTY: RegistryFile = { version: 1, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: {} };
+const EMPTY: RegistryFile = { version: 1, entries: {}, receipts: {}, importedResumePanes: false, legacyResumePanes: { serverPid: null, panes: {} } };
+
+export class RegistryReadError extends Error {}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -72,16 +75,23 @@ function now(): string {
 function readFile(filename: string): RegistryFile {
   try {
     const parsed = JSON.parse(fs.readFileSync(filename, "utf8")) as Partial<RegistryFile>;
-    if (parsed.version !== 1 || !parsed.entries || !parsed.receipts) return clone(EMPTY);
+    if (parsed.version !== 1 || !parsed.entries || !parsed.receipts || typeof parsed.entries !== "object" || typeof parsed.receipts !== "object") {
+      throw new RegistryReadError("agent registry schema is unsupported");
+    }
+    const legacy = parsed.legacyResumePanes;
     return {
       version: 1,
       entries: parsed.entries,
       receipts: parsed.receipts,
       importedResumePanes: parsed.importedResumePanes === true,
-      legacyResumePanes: parsed.legacyResumePanes && typeof parsed.legacyResumePanes === "object" ? parsed.legacyResumePanes : {},
+      legacyResumePanes: legacy && typeof legacy === "object" && "panes" in legacy
+        ? { serverPid: typeof (legacy as { serverPid?: unknown }).serverPid === "number" ? (legacy as { serverPid: number }).serverPid : null, panes: ((legacy as { panes?: unknown }).panes as Record<string, ResumePaneRecord>) ?? {} }
+        : { serverPid: null, panes: {} },
     };
-  } catch {
-    return clone(EMPTY);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return clone(EMPTY);
+    if (error instanceof RegistryReadError) throw error;
+    throw new RegistryReadError(`agent registry cannot be read: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -109,23 +119,41 @@ function writeAtomic(filename: string, value: RegistryFile): void {
     intentionally separate from in-memory promises, so a Viewer replacement
     cannot leave an imaginary owner behind. */
 export class AgentRegistry {
-  constructor(readonly filename = statePath("agent-registry.json")) {}
+  constructor(
+    readonly filename = statePath("agent-registry.json"),
+    private readonly ownerAlive: (owner: ProcessIdentity) => boolean = (owner) =>
+      procBackend.pidAlive(owner.pid) && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity),
+  ) {}
 
-  private mutate<T>(fn: (file: RegistryFile) => T): T {
-    const lock = `${this.filename}.write-lock`;
+  private acquireLock(lock: string, owner: ProcessIdentity): void {
     fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
-    let acquired = false;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
         fs.mkdirSync(lock, 0o700);
-        acquired = true;
-        break;
+        fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+        return;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        let stale = false;
+        try {
+          const previous = JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8")) as ProcessIdentity;
+          stale = Number.isInteger(previous.pid) && previous.pid > 0 && !this.ownerAlive(previous);
+        } catch {
+          /* A creator may still be writing owner.json. Preserve unknown locks. */
+        }
+        if (stale) {
+          fs.rmSync(lock, { recursive: true, force: true });
+          continue;
+        }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
       }
     }
-    if (!acquired) throw new Error("agent registry is busy");
+    throw new Error("agent registry is busy");
+  }
+
+  private mutate<T>(fn: (file: RegistryFile) => T): T {
+    const lock = `${this.filename}.write-lock`;
+    this.acquireLock(lock, { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) });
     try {
       const file = readFile(this.filename);
       const result = fn(file);
@@ -212,26 +240,57 @@ export class AgentRegistry {
       identity and may be recovered by an explicit caller after verification. */
   async withOperationLock<T>(key: SessionKey, owner: ProcessIdentity, fn: () => Promise<T>): Promise<T> {
     const lock = `${this.filename}.locks/${encodeURIComponent(sessionKeyId(key))}`;
-    fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+    this.acquireLock(lock, owner);
     try {
-      fs.mkdirSync(lock, 0o700);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("agent operation is already in progress");
-      throw error;
-    }
-    try {
-      fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
       return await fn();
     } finally {
       fs.rmSync(lock, { recursive: true, force: true });
     }
   }
 
-  importResumePanes(records: Map<string, ResumePaneRecord>): void {
+  importResumePanes(serverPid: number, records: Map<string, ResumePaneRecord>): void {
     this.mutate((file) => {
-      if (file.importedResumePanes) return;
-      file.legacyResumePanes = Object.fromEntries(records);
+      if (file.importedResumePanes && file.legacyResumePanes.serverPid === serverPid) return;
+      file.legacyResumePanes = { serverPid, panes: Object.fromEntries(records) };
       file.importedResumePanes = true;
+    });
+  }
+
+  resumePanes(serverPid: number): Map<string, ResumePaneRecord> {
+    const saved = this.snapshot().legacyResumePanes;
+    return saved.serverPid === serverPid ? new Map(Object.entries(saved.panes)) : new Map();
+  }
+
+  rememberResumePane(serverPid: number, pathname: string, record: ResumePaneRecord): void {
+    this.mutate((file) => {
+      if (file.legacyResumePanes.serverPid !== serverPid) file.legacyResumePanes = { serverPid, panes: {} };
+      file.legacyResumePanes.panes[pathname] = record;
+      file.importedResumePanes = true;
+    });
+  }
+
+  reconcileSpawnReceipts(live: Iterable<SessionKey>): void {
+    const liveIds = new Set([...live].map(sessionKeyId));
+    this.mutate((file) => {
+      for (const entry of Object.values(file.entries)) {
+        if (liveIds.has(sessionKeyId(entry.key))) entry.pendingAction = null;
+      }
+      for (const receipt of Object.values(file.receipts)) {
+        if (receipt.state !== "starting" || !receipt.artifactPath) continue;
+        const key = Object.values(file.entries).find((entry) => entry.artifactPath === receipt.artifactPath)?.key;
+        if (key && liveIds.has(sessionKeyId(key))) receipt.state = "completed";
+      }
+    });
+  }
+
+  completeObservedSpawn(key: SessionKey, artifactPath: string, cwd: string): void {
+    this.mutate((file) => {
+      for (const receipt of Object.values(file.receipts)) {
+        if (receipt.state === "starting" && receipt.engine === key.engine && receipt.cwd === cwd) {
+          receipt.state = "completed";
+          receipt.artifactPath = artifactPath;
+        }
+      }
     });
   }
 }

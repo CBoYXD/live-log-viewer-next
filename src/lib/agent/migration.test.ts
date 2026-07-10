@@ -24,4 +24,13 @@ describe("legacy migration phase machine", () => {
     expect(result.phase).toBe("rolled-back");
     expect(rolledBack).toBe(true);
   });
+
+  test("recovers an interrupted root-ready migration and records rollback failure", async () => {
+    const migration = { ...createLegacyMigration(ROOT, "/root.jsonl"), phase: "root-ready" as const };
+    const resumed = await runLegacyCutover(migration, migration.approvalToken, actions(), () => {});
+    expect(resumed.phase).toBe("successor-confirmed");
+    const failed = await runLegacyCutover(migration, migration.approvalToken, actions({ startSuccessor: async () => false, rollback: async () => { throw new Error("network unavailable"); } }), () => {});
+    expect(failed.phase).toBe("failed");
+    expect(failed.error).toContain("rollback failed");
+  });
 });

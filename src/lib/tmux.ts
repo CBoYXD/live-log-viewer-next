@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ResumeSpec } from "@/lib/agent/cli";
+import { agentRegistry, type SpawnReceipt } from "@/lib/agent/registry";
 import { statePath } from "@/lib/configDir";
 import { logEvent } from "@/lib/events";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
@@ -86,6 +87,7 @@ export type TmuxTarget = string;
 export interface PaneRef {
   target: TmuxTarget;
   paneId: string;
+  windowName?: string;
 }
 
 /** A pane listing has three meaningful states. A missing tmux server is an
@@ -143,7 +145,7 @@ export async function panePidMap(fresh = false): Promise<PaneObservation> {
       "list-panes",
       "-a",
       "-F",
-      "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}",
+      "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}\t#{window_name}",
     ]);
   } catch (error) {
     return { kind: "failure", error: error instanceof Error ? error.message : String(error) };
@@ -154,10 +156,10 @@ export async function panePidMap(fresh = false): Promise<PaneObservation> {
     return { kind: "failure", error };
   }
   for (const line of result.stdout.split("\n")) {
-    const [target = "", paneId = "", pidRaw = ""] = line.split("\t");
+    const [target = "", paneId = "", pidRaw = "", windowName = ""] = line.split("\t");
     const panePid = Number(pidRaw.trim());
     if (target.trim() && paneId.startsWith("%") && Number.isInteger(panePid) && panePid > 0) {
-      map.set(panePid, { target: target.trim(), paneId: paneId.trim() });
+      map.set(panePid, { target: target.trim(), paneId: paneId.trim(), windowName: windowName.trim() });
     }
   }
   const observation: PaneObservation = { kind: "available", panes: map };
@@ -507,6 +509,7 @@ export interface SpawnedPane {
   /** Shell pid of the pane, set on freshly spawned windows: handoff lineage
       matches a later-born conversation to its source through this pid. */
   panePid?: number;
+  receipt?: SpawnReceipt;
 }
 
 /** Resume records scoped to the current tmux server. Callers still have to
@@ -604,7 +607,7 @@ export async function sendKeys(target: TmuxTarget, keys: string[]): Promise<void
  * the agent CLI — a pane that fell back to the shell would otherwise execute
  * the prompt text as a shell command.
  */
-export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
+async function spawnAgentWithPromptUnchecked(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
   const session = await activeTmuxSession();
   const spawned = await runTmux([
     "new-window",
@@ -696,6 +699,18 @@ export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Prom
     display: display || target,
     ...(Number.isInteger(panePid) && panePid > 0 ? { panePid } : {}),
   };
+}
+
+/** Every visible legacy launch receives a durable receipt before tmux creates
+    its window. Callers may later attach the engine-native transcript identity. */
+export async function spawnAgentWithPrompt(spec: ResumeSpec, text: string): Promise<SpawnedPane> {
+  const receipt = agentRegistry().beginSpawn(spec.engine, spec.cwd);
+  try {
+    return { ...(await spawnAgentWithPromptUnchecked(spec, text)), receipt };
+  } catch (error) {
+    agentRegistry().failSpawn(receipt.launchId, error instanceof Error ? error.message : String(error));
+    throw error;
+  }
 }
 
 /** Opens a visible shell window and types one command without agent readiness or paste handling. */

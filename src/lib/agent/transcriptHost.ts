@@ -8,6 +8,7 @@ import { agentProcesses, argvEngine, pidAlive, readArgv, readPpid, type AgentPro
 import {
   panePidMap,
   panePidOf,
+  paneInfo,
   rememberResumePane,
   resumePaneRecords,
   sendText,
@@ -37,6 +38,7 @@ export interface TranscriptHost {
   panePid: number;
   agentPid: number;
   display: string;
+  windowName?: string;
   engine: "claude" | "codex";
   cwd: string;
   /** argv observed with this pid; detects a pid that was recycled between
@@ -84,6 +86,7 @@ interface HostDependencies {
   serverPid: () => Promise<number | null>;
   resumeRecords: () => ReturnType<typeof resumePaneRecords>;
   panePid: (paneId: string) => Promise<number | null>;
+  paneWindowName?: (paneId: string) => Promise<string | null>;
   alive: (pid: number) => boolean;
   argv: (pid: number) => string[];
   parentPid: (pid: number) => number | null;
@@ -221,15 +224,16 @@ export function createTranscriptHostResolver(
 
   async function observe(fresh: boolean): Promise<TranscriptHostSnapshot> {
     const [entries, paneObservation, records] = await Promise.all([dependencies.listFiles(), dependencies.panes(fresh), dependencies.resumeRecords()]);
-    if (records) agentRegistry().importResumePanes(records.records);
     const serverPid = records?.serverPid ?? (await dependencies.serverPid());
     if (paneObservation.kind === "failure" && serverPid !== null) {
       return { hosts: [], observation: "failure", observationError: paneObservation.error, canonicalFor: () => null };
     }
     if (serverPid === null || paneObservation.kind === "no-server") {
+      dependencies.reconcile?.([]);
       return { hosts: [], observation: "no-server", canonicalFor: () => null };
     }
     if (paneObservation.kind !== "available" || paneObservation.panes.size === 0) {
+      dependencies.reconcile?.([]);
       return { hosts: [], observation: "available", canonicalFor: () => null };
     }
     const { panes } = paneObservation;
@@ -252,6 +256,7 @@ export function createTranscriptHostResolver(
           panePid,
           agentPid: agent.pid,
           display: pane.target,
+          windowName: pane.windowName ?? "",
           engine: agent.engine,
           cwd: agent.cwd,
           agentArgv: [...agent.argv],
@@ -275,6 +280,7 @@ export function createTranscriptHostResolver(
   async function revalidate(host: TranscriptHost, entry: FileEntry): Promise<boolean> {
     if (host.engine !== entry.engine || (await dependencies.serverPid()) !== host.tmuxServerPid) return false;
     if ((await dependencies.panePid(host.paneId)) !== host.panePid || !dependencies.alive(host.agentPid)) return false;
+    if (host.windowName && dependencies.paneWindowName && (await dependencies.paneWindowName(host.paneId)) !== host.windowName) return false;
     if (!isDescendantOf(host.agentPid, host.panePid, dependencies.parentPid)) return false;
     const argv = dependencies.argv(host.agentPid);
     if (argv.length !== host.agentArgv.length || argv.some((value, index) => value !== host.agentArgv[index])) return false;
@@ -402,11 +408,12 @@ function reconcileRegistry(hosts: TranscriptHost[]): void {
       server: { pid: host.tmuxServerPid, startIdentity: serverStart },
       paneId: host.paneId,
       panePid: { pid: host.panePid, startIdentity: procBackend.processIdentity(host.panePid) },
-      windowName: host.display.slice(0, host.display.indexOf(":")) || "agents",
+      windowName: host.windowName ?? "",
       agent: { pid: host.agentPid, startIdentity: host.agentIdentity },
       argv: host.agentArgv,
     };
     const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
+    registry.completeObservedSpawn(key, host.primaryPath, host.cwd);
     registry.upsert({
       key,
       artifactPath: host.primaryPath,
@@ -416,13 +423,36 @@ function reconcileRegistry(hosts: TranscriptHost[]): void {
       host: evidence,
       claimEpoch: existing?.claimEpoch ?? 0,
       claimOwner: existing?.claimOwner ?? null,
-      pendingAction: existing?.pendingAction ?? null,
+      pendingAction: null,
     });
     seen.add(`${key.engine}:${key.sessionId}`);
   }
   for (const [id, entry] of Object.entries(registry.snapshot().entries)) {
     if (entry.host?.kind === "tmux" && !seen.has(id)) registry.markUnhosted(entry.key);
   }
+  registry.reconcileSpawnReceipts([...seen].map((id) => {
+    const [engine, sessionId] = id.split(":");
+    return { engine: engine as "claude" | "codex", sessionId };
+  }));
+}
+
+async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
+  const serverPid = await tmuxServerPid();
+  if (serverPid === null) return null;
+  const registry = agentRegistry();
+  const snapshot = registry.snapshot();
+  if (!snapshot.importedResumePanes) {
+    const legacy = await resumePaneRecords();
+    if (legacy) registry.importResumePanes(legacy.serverPid, legacy.records);
+  }
+  return { serverPid, records: registry.resumePanes(serverPid) };
+}
+
+async function rememberRegistryResume(pathname: string, spec: ResumeSpec, pane: SpawnedPane): Promise<void> {
+  await rememberResumePane(pathname, spec, pane);
+  if (!pane.panePid) return;
+  const serverPid = await tmuxServerPid();
+  if (serverPid !== null) agentRegistry().rememberResumePane(serverPid, pathname, { paneId: pane.paneId, panePid: pane.panePid, windowName: spec.windowName, engine: spec.engine });
 }
 
 async function serializeRegistryDelivery(entry: FileEntry, task: () => Promise<HostDeliveryOutcome>): Promise<HostDeliveryOutcome> {
@@ -443,14 +473,15 @@ const runtimeResolver = createTranscriptHostResolver({
   ppidMap: () => procBackend.ppidMap(),
   agents: agentProcesses,
   serverPid: tmuxServerPid,
-  resumeRecords: resumePaneRecords,
+  resumeRecords: registryResumeRecords,
   panePid: panePidOf,
+  paneWindowName: async (paneId) => (await paneInfo(paneId))?.windowName ?? null,
   alive: pidAlive,
   argv: readArgv,
   parentPid: readPpid,
   identity: procBackend.processIdentity,
   spawn: spawnAgentWithPrompt,
-  remember: rememberResumePane,
+  remember: rememberRegistryResume,
   deliver: sendText,
   reconcile: reconcileRegistry,
   serializeDelivery: serializeRegistryDelivery,
