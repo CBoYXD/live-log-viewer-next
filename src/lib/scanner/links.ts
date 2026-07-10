@@ -308,7 +308,7 @@ function attachNativeCodexSubagentParents(entries: FileEntry[], persist: boolean
     const parent = parentThreadId ? (pathByThreadId.get(parentThreadId) ?? null) : null;
     if (parent && parent !== entry.path) {
       entry.parent = parent;
-      rememberLineage(entry.path, parent);
+      if (persist) rememberLineage(entry.path, parent);
     }
   }
   if (persist) persistLineage();
@@ -344,7 +344,7 @@ function attachLiveCodexParents(entries: FileEntry[], persist: boolean): void {
     }
     if (resolved) {
       rollout.parent = resolved;
-      rememberLineage(rollout.path, resolved);
+      if (persist) rememberLineage(rollout.path, resolved);
     } else {
       // pid is gone or ancestry dead-ended: reuse the parent proven while live.
       const remembered = lineageCache.get(rollout.path);
@@ -377,7 +377,7 @@ function attachHandoffParents(entries: FileEntry[], persist: boolean): void {
         parent = handoffParentForPid(pid);
         if (parent) break;
       }
-      if (parent && parent !== entry.path) rememberHandoffChild(entry.path, parent);
+      if (persist && parent && parent !== entry.path) rememberHandoffChild(entry.path, parent);
     }
     if (parent && parent !== entry.path && byPath.has(parent)) {
       entry.parent = parent;
