@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import path from "node:path";
+import path, { join } from "node:path";
 
 import type { FileEntry } from "@/lib/types";
 
@@ -645,6 +645,93 @@ describe("Codex functions.exec orchestration", () => {
     const event = feed.items.find((item) => item.kind === "tool");
     if (event?.kind !== "tool") throw new Error("expected tool");
     expect(event.orchestration).toBeUndefined();
+  });
+
+  /* Issue #83: the collapsed row must carry the actual command/target, whatever
+     shape the `tools.exec_command` argument takes in the generated JS. */
+  const single = (input: string) => {
+    const feed = buildFeed(codexFile, [orch(input, "s")], false, "");
+    const event = feed.items.find((item) => item.kind === "tool");
+    if (event?.kind !== "tool") throw new Error("expected tool");
+    return event;
+  };
+
+  test("inline template-literal command keeps its full head, not an inner fragment", () => {
+    // The old first-quote heuristic grabbed the `'1,240p'` inside the template.
+    const event = single("const r = await tools.exec_command({cmd: `sed -n '1,240p' '${f}'`, workdir: \"/repo\"}); text(r.output);");
+    expect(event.family).toBe("shell");
+    expect(event.icon).toBe("shell");
+    expect(event.summary).toBe("sed -n '1,240p' '${f}'");
+  });
+
+  test("a workdir path never masquerades as the command", () => {
+    const event = single("await tools.exec_command({cmd: `git status --short`, workdir: \"/home/user/repo\"});");
+    expect(event.summary).toContain("git status");
+    expect(event.summary).not.toContain("/home/user/repo");
+  });
+
+  test("shorthand {cmd} resolves the command from its const definition", () => {
+    const event = single("const cmd = `rtk gh issue create --title x`;\nconst r = await tools.exec_command({cmd, workdir: \"/repo\"});\ntext(r.output);");
+    expect(event.family).toBe("shell");
+    expect(event.summary).toContain("rtk gh issue create");
+  });
+
+  test("an identifier value (cmd: c) resolves through its const", () => {
+    const event = single("const c = 'bun test src';\nconst r = await tools.exec_command({cmd:c, workdir:\"/repo\"});");
+    expect(event.summary).toContain("bun test src");
+  });
+
+  test("a const cmds=[[label, command]] batch expands to one row per command", () => {
+    const input =
+      'const cmds = [["A", "git fetch origin", "/repo"], ["B", "git status --short", "/repo"], ["C", "git log -1", "/repo"]];\n' +
+      "const rs = await Promise.all(cmds.map(([name, cmd, wd]) => tools.exec_command({cmd, workdir: wd})));\n" +
+      "rs.forEach((r, i) => text(`${cmds[i][0]}: ${r.output}`));";
+    const event = single(input);
+    expect(event.icon).toBe("cmd-group");
+    const nested = event.orchestration?.calls ?? [];
+    expect(nested.map((call) => call.summary)).toEqual(["git fetch origin", "git status --short", "git log -1"]);
+    // the collapsed row leads with the first command and tags the batch size
+    expect(event.summary).toContain("git fetch origin");
+    expect(event.summary).toContain("3");
+  });
+
+  test("a truly runtime-computed command degrades to a clean shell label, not a stray path", () => {
+    // cmd is destructured in the map with no static tuple array to recover from.
+    const event = single("const rs = await Promise.all(items.map(c => tools.exec_command({cmd:c, workdir:\"/home/user/repo\"})));");
+    expect(event.family).toBe("shell");
+    expect(event.summary).not.toContain("/home/user/repo");
+  });
+});
+
+describe("Codex orchestration over a real rollout fixture (issue #83)", () => {
+  const fixture = readFileSync(join(import.meta.dir, "__fixtures__", "codex-orchestration.jsonl"), "utf8").split("\n").filter(Boolean);
+  const events = buildFeed(codexFile, fixture, false, "").items.filter((item): item is Extract<Item, { kind: "tool" }> => item.kind === "tool");
+
+  test("every native tool card carries a meaningful, non-empty summary", () => {
+    expect(events.length).toBeGreaterThanOrEqual(5);
+    for (const event of events) {
+      expect(event.summary.trim().length).toBeGreaterThan(0);
+      // no card is a bare method placeholder like "cmd"/"exec"/"tool"
+      expect(["cmd", "exec", "tool", "text"]).not.toContain(event.summary.trim());
+      // the orchestration source chip is populated for the expanded view
+      if (event.orchestration) expect(event.orchestration.source.length).toBeGreaterThan(0);
+    }
+  });
+
+  test("real exec_command shapes summarize to their command/target head", () => {
+    const summaries = events.map((event) => event.summary);
+    // inline template read
+    expect(summaries.some((s) => s.startsWith("sed -n '1,240p'"))).toBe(true);
+    // shorthand-const command
+    expect(summaries.some((s) => s.includes("rtk gh issue create"))).toBe(true);
+    // const cmds=[[…]] batch → cmd-group leading with the first command
+    const batch = events.find((event) => event.icon === "cmd-group");
+    expect(batch?.orchestration?.calls.length).toBeGreaterThanOrEqual(3);
+    expect(batch?.summary).toContain("rtk proxy curl");
+    // view_image → a read card naming the file
+    expect(events.some((event) => event.family === "read" && /\.png$/.test(event.summary))).toBe(true);
+    // apply_patch → an edit card naming the file count
+    expect(events.some((event) => event.family === "edit" && event.summary.includes("file"))).toBe(true);
   });
 });
 
