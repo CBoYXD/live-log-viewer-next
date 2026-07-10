@@ -6,17 +6,22 @@ import path from "node:path";
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-cli-account-test-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 const OLD_HOME = process.env.LLV_CODEX_HOME;
+const OLD_CLAUDE_HOME = process.env.LLV_CLAUDE_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
+process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
 
 const { freshSpecFor, resumeSpecFor } = await import("./cli");
 const { createManagedCodexAccount } = await import("@/lib/accounts/codex");
+const { createManagedClaudeAccount } = await import("@/lib/accounts/claude");
 
 afterAll(() => {
   if (OLD_STATE === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = OLD_STATE;
   if (OLD_HOME === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = OLD_HOME;
+  if (OLD_CLAUDE_HOME === undefined) delete process.env.LLV_CLAUDE_HOME;
+  else process.env.LLV_CLAUDE_HOME = OLD_CLAUDE_HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
 
@@ -57,4 +62,18 @@ test("managed Codex commands pin file-backed credential storage", () => {
   expect(fresh.command.indexOf("cli_auth_credentials_store=file")).toBeLessThan(fresh.command.indexOf("gpt-5"));
   const resumed = resumeSpecFor("codex-sessions", transcript)?.command ?? "";
   expect(resumed.indexOf("cli_auth_credentials_store=file")).toBeLessThan(resumed.indexOf("resume"));
+});
+
+test("managed Claude fresh and resume commands pin the transcript owner and scrub shadowing env", () => {
+  const account = createManagedClaudeAccount("Claude Work");
+  const fresh = freshSpecFor("claude", "/repo", { claudeConfigDir: account.home, claudeProjectsDir: account.projectsDir });
+  const transcript = fresh.transcript!;
+  fs.mkdirSync(path.dirname(transcript), { recursive: true });
+  fs.writeFileSync(transcript, JSON.stringify({ cwd: SANDBOX }) + "\n");
+  expect(transcript.startsWith(account.projectsDir + path.sep)).toBe(true);
+  expect(fresh.command).toContain("CLAUDE_CONFIG_DIR=");
+  expect(fresh.command).toContain("-u ANTHROPIC_API_KEY");
+  const resumed = resumeSpecFor("claude-projects", transcript)?.command ?? "";
+  expect(resumed).toContain(`CLAUDE_CONFIG_DIR='${account.home}'`);
+  expect(resumed).toContain("--resume");
 });

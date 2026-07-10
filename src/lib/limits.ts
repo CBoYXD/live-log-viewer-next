@@ -1,13 +1,11 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import { accountForSpawn } from "@/lib/accounts/codex";
+import { claudeAccountForSpawn } from "@/lib/accounts/claude";
 import { statePath } from "@/lib/configDir";
 import type { EngineLimits, LimitsPayload, LimitWindow } from "./types";
 
-const HOME = os.homedir();
-const CLAUDE_CREDENTIALS = path.join(HOME, ".claude", ".credentials.json");
 const LIMITS_CACHE_FILE = statePath("limits-cache.json");
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
@@ -29,7 +27,7 @@ function hasLimits(data: LimitsPayload): boolean {
 }
 
 function cleanPayload(data: LimitsPayload): LimitsPayload {
-  return { claude: data.claude, codex: data.codex, staleSince: data.staleSince ?? null };
+  return { claude: data.claude, codex: data.codex, claudeAccountId: data.claudeAccountId ?? null, codexAccountId: data.codexAccountId ?? null, staleSince: data.staleSince ?? null };
 }
 
 function readDiskCache(accountId: string): LimitsCacheEntry | null {
@@ -83,14 +81,18 @@ function logPartialFallback(claude: LimitRead, codex: LimitRead): void {
 
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
 export async function readLimits(): Promise<LimitsPayload> {
-  const accountId = accountForSpawn().id;
+  const claudeAccount = claudeAccountForSpawn();
+  const codexAccount = accountForSpawn();
+  const accountId = `claude:${claudeAccount.id}|codex:${codexAccount.id}`;
   const cached = lastCache(accountId);
   if (cached && Date.now() - cached.at < CACHE_MS) return cached.data;
   const staleSince = new Date().toISOString();
-  const [claude, codex] = await Promise.all([fetchClaudeLimits(), Promise.resolve(readCodexLimits())]);
+  const [claude, codex] = await Promise.all([fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")), Promise.resolve(readCodexLimits(codexAccount.sessionsDir))]);
   const data: LimitsPayload = {
     claude: claude.data ?? cached?.data.claude ?? null,
     codex: codex.data ?? cached?.data.codex ?? null,
+    claudeAccountId: claudeAccount.id,
+    codexAccountId: codexAccount.id,
     staleSince: claude.data && codex.data ? null : staleSince,
   };
   if (hasLimits(data)) {
@@ -113,11 +115,11 @@ interface OauthWindow {
  * from ~/.claude/.credentials.json stays inside the server process; the
  * browser only ever sees percentages.
  */
-async function fetchClaudeLimits(): Promise<LimitRead> {
+export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitRead> {
   let accessToken = "";
   let plan: string | null = null;
   try {
-    const raw = JSON.parse(fs.readFileSync(CLAUDE_CREDENTIALS, "utf8")) as {
+    const raw = JSON.parse(fs.readFileSync(credentialsPath, "utf8")) as {
       claudeAiOauth?: { accessToken?: unknown; subscriptionType?: unknown };
     };
     if (typeof raw.claudeAiOauth?.accessToken === "string") accessToken = raw.claudeAiOauth.accessToken;
@@ -175,9 +177,9 @@ interface CodexRateLimits {
  * session transcript. The last such event in the newest transcript is the
  * freshest number available offline.
  */
-export function readCodexLimits(): LimitRead {
+export function readCodexLimits(sessionsDir = accountForSpawn().sessionsDir): LimitRead {
   let scanned = 0;
-  for (const file of latestSessionFiles()) {
+  for (const file of latestSessionFiles(sessionsDir)) {
     scanned += 1;
     const hit = lastRateLimits(file);
     if (hit) return { data: hit, reason: null };
@@ -194,8 +196,7 @@ function listDesc(dir: string): string[] {
 }
 
 /** Session transcripts for the account a new Codex pane will use, newest first. */
-function* latestSessionFiles(): Generator<string> {
-  const sessionsDir = accountForSpawn().sessionsDir;
+function* latestSessionFiles(sessionsDir: string): Generator<string> {
   let yielded = 0;
   for (const year of listDesc(sessionsDir)) {
     for (const month of listDesc(path.join(sessionsDir, year))) {

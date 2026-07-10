@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { accountForSpawn, codexHomeOwningSessionPath, isManagedCodexHome } from "@/lib/accounts/codex";
+import { claudeHomeOwningTranscript, claudeSettingsPath, isManagedClaudeHome, legacyClaudeHome } from "@/lib/accounts/claude";
 
 import { claudeTranscriptPath, headCwd } from "./transcript";
 
@@ -73,7 +74,13 @@ export interface FreshSpecOptions {
   readOnly?: boolean;
   /** Codex only: explicit account home scoped into the typed host command. */
   codexHome?: string | null;
+  /** Claude only: an already-resolved managed config home. */
+  claudeConfigDir?: string | null;
+  claudeProjectsDir?: string | null;
 }
+
+const CLAUDE_SHADOWED_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "VERTEXAI_PROJECT", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"];
+export function claudeEnvPrefix(home: string): string { return `env ${CLAUDE_SHADOWED_ENV.map((key) => `-u ${key}`).join(" ")} CLAUDE_CONFIG_DIR=${shellQuote(home)}`; }
 
 /** Boot spec for a brand-new agent (no prior conversation) in a chosen directory. */
 export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpecOptions = {}): ResumeSpec {
@@ -93,11 +100,15 @@ export function freshSpecFor(engine: AgentEngine, cwd: string, options: FreshSpe
     args.push("--session-id", sid);
     if (options.model) args.push("--model", options.model);
     if (options.effort) args.push("--effort", options.effort);
+    const managed = Boolean(options.claudeConfigDir && isManagedClaudeHome(options.claudeConfigDir));
+    const settings = managed ? claudeSettingsPath() : null;
+    if (settings) args.push("--settings", settings);
+    const command = args.map(shellQuote).join(" ");
     return {
-      command: args.map(shellQuote).join(" "),
+      command: managed ? `${claudeEnvPrefix(options.claudeConfigDir!)} ${command}` : command,
       cwd,
       windowName: "claude-new",
-      transcript: claudeTranscriptPath(cwd, sid),
+      transcript: claudeTranscriptPath(cwd, sid, options.claudeProjectsDir ?? path.join(legacyClaudeHome(), "projects")),
     };
   }
   const args = [resolveBinary("codex")];
@@ -125,8 +136,13 @@ export function resumeSpecFor(root: string, pathname: string): ResumeSpec | null
   if (root === "claude-projects" && base.endsWith(".jsonl") && !pathname.includes(path.sep + "subagents" + path.sep)) {
     const sid = base.slice(0, -".jsonl".length);
     if (!/^[0-9a-f-]{36}$/.test(sid)) return null;
+    const home = claudeHomeOwningTranscript(pathname);
+    if (!home) return null;
+    const managed = isManagedClaudeHome(home);
+    const settings = managed ? claudeSettingsPath() : null;
+    const command = `${shellQuote(resolveBinary("claude"))} --dangerously-skip-permissions${settings ? ` --settings ${shellQuote(settings)}` : ""} --resume ${shellQuote(sid)}`;
     return {
-      command: `${resolveBinary("claude")} --dangerously-skip-permissions --resume ${sid}`,
+      command: managed ? `${claudeEnvPrefix(home)} ${command}` : command,
       cwd: resumeCwd(pathname),
       windowName: "claude-resume",
     };

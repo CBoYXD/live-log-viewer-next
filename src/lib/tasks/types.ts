@@ -11,6 +11,8 @@ export interface TaskAssignment {
   /** Last delivery error, shown on the ⚠ edge; null when delivered. */
   error: string | null;
   at: string; // ISO of the last attempt
+  /** Account fixed when the agent is first launched; retries keep this owner. */
+  accountId?: string | null;
 }
 
 export interface TaskSource {

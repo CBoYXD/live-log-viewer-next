@@ -163,6 +163,7 @@ export interface AssignmentPatch {
   state: TaskAssignment["state"];
   error: string | null;
   at: string;
+  accountId?: string | null;
 }
 
 export function mergeAssignments(assignments: TaskAssignment[], patches: AssignmentPatch[]): TaskAssignment[] {
@@ -178,6 +179,7 @@ export function mergeAssignments(assignments: TaskAssignment[], patches: Assignm
       state: patch.state,
       error: patch.error,
       at: patch.at,
+      ...(patch.accountId !== undefined ? { accountId: patch.accountId } : {}),
     };
     if (index >= 0) {
       next = [...next.slice(0, index), merged, ...next.slice(index + 1)];

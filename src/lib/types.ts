@@ -213,6 +213,10 @@ export interface EngineLimits {
 export interface LimitsPayload {
   claude: EngineLimits | null;
   codex: EngineLimits | null;
+  /** Account identities stamp cache ownership; clients may retain only an
+      engine's own values while this id remains unchanged. */
+  claudeAccountId?: string | null;
+  codexAccountId?: string | null;
   /** ISO timestamp from the first failed refresh behind this fallback payload. */
   staleSince?: string | null;
 }

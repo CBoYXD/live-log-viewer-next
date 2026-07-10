@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { NextRequest, NextResponse } from "next/server";
 
-import { accountForSpawn } from "@/lib/accounts/codex";
+import { accountManager } from "@/lib/accounts/manager";
 import { freshSpecFor, type AgentEngine } from "@/lib/agent/cli";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
@@ -72,8 +72,9 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
   if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
   try {
-    const account = engine === "codex" ? accountForSpawn() : null;
-    const spec = freshSpecFor(engine, cwdResult.cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast, codexHome: account?.home });
+    const previous = task.assignments.find((assignment) => assignment.accountId)?.accountId ?? null;
+    const account = accountManager.resolveSpawn(engine, previous);
+    const spec = freshSpecFor(engine, cwdResult.cwd, { model: selectedModel.model, effort: reasoning.effort, fast: reasoning.fast, codexHome: engine === "codex" ? account.home : null, claudeConfigDir: engine === "claude" ? account.home : null, claudeProjectsDir: engine === "claude" ? account.transcriptRoot : null });
     const startedAtMs = Date.now();
     const pane = await spawnAgentWithPrompt(spec, task.text);
     const transcript = await resolveSpawnedTranscriptPath({
@@ -82,16 +83,16 @@ export async function POST(req: NextRequest, ctx: TaskRouteContext): Promise<Nex
       panePid: pane.panePid ?? null,
       cwd: cwdResult.cwd,
       startedAtMs,
-      codexSessionsDir: account?.sessionsDir,
+      codexSessionsDir: engine === "codex" ? account.transcriptRoot : null,
     });
     const at = isoNow();
     let patch: AssignmentPatch;
     if (transcript) {
-      patch = { path: transcript, panePid: pane.panePid ?? null, state: "delivered", error: null, at };
+      patch = { path: transcript, panePid: pane.panePid ?? null, state: "delivered", error: null, at, accountId: account.accountId };
     } else if (pane.panePid) {
-      patch = { path: null, panePid: pane.panePid, state: "spawning", error: null, at };
+      patch = { path: null, panePid: pane.panePid, state: "spawning", error: null, at, accountId: account.accountId };
     } else {
-      patch = { path: null, panePid: null, state: "failed", error: "tmux did not return the pane pid", at };
+      patch = { path: null, panePid: null, state: "failed", error: "tmux did not return the pane pid", at, accountId: account.accountId };
     }
     const result = mutateTasks((tasks) => {
       const outcome = applyAssignmentPatches(tasks, id, [patch], at);
