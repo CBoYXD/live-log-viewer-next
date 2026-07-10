@@ -68,7 +68,7 @@ function promptWithFences(definition: RoleDefinition, params: RoleParamValues): 
   return `${scaffold}\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`;
 }
 
-function configForParams(definition: RoleDefinition, params: RoleParamValues): RoleConfig {
+export function configForParams(definition: RoleDefinition, params: RoleParamValues): RoleConfig {
   if (definition.id !== "builder") return definition.config;
   if (params.domain === "frontend") return BUILDER_FRONTEND_CONFIG;
   if (params.mode === "apply-fixes") return BUILDER_APPLY_FIXES_CONFIG;

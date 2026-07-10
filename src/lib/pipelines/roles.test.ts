@@ -126,6 +126,21 @@ test("a referenced role with an empty scaffold fails the create instead of persi
     .toContain("empty prompt scaffold");
 });
 
+test("the deployer role is refused in pipelines (no interactive confirm gate)", () => {
+  expect(resolvePipelineRole({ role: { roleId: "deployer" } }, "run", pipelineRoleLookup).error)
+    .toContain("not allowed in a pipeline");
+});
+
+test("Builder domain=frontend resolves to the Claude/Opus config, not base Sol", () => {
+  const resolved = resolvePipelineRole({ role: { roleId: "builder", params: { domain: "frontend" } } }, "run", pipelineRoleLookup).role;
+  expect(resolved).toMatchObject({ roleId: "builder", engine: "claude", model: "opus" });
+});
+
+test("Builder mode=apply-fixes resolves to the Terra config", () => {
+  const resolved = resolvePipelineRole({ role: { roleId: "builder", params: { mode: "apply-fixes" } } }, "run", pipelineRoleLookup).role;
+  expect(resolved).toMatchObject({ roleId: "builder", engine: "codex", model: "gpt-5.6-terra" });
+});
+
 test("validatePipelineRoleParams enforces canonical value rules, not required-when-absent", () => {
   /* Absent required params are fine — a pipeline reviewer reviews its branch. */
   expect(validatePipelineRoleParams("reviewer", {})).toBeNull();

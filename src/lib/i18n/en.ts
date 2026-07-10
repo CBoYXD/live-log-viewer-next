@@ -723,6 +723,7 @@ export const en = {
   "pipelineDialog.errors.promptRequired": "every run stage needs a prompt",
   "pipelineDialog.errors.tooLong": "{field} exceeds {max} characters",
   "pipelineDialog.errors.paramInvalid": "{label} has an invalid value",
+  "pipelineDialog.errors.modelEngineMismatch": "pick a model supported by {engine}",
 
   "dash.pipeline": "Pipeline",
   "dash.newPipeline": "New pipeline",

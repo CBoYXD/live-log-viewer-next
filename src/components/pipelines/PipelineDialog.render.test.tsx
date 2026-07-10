@@ -3,11 +3,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type { RoleConfig } from "@/lib/roles/types";
 
+import type { TFunction } from "@/lib/i18n";
 import type { RoleParameter } from "@/lib/roles/types";
 
-import { PipelineDialog, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
-import { PIPELINE_TEMPLATES } from "./pipelineModel";
+import { PipelineDialog, pipelineValidationError, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
+import { PIPELINE_TEMPLATES, type DraftStage } from "./pipelineModel";
 import type { RoleCatalogItem } from "./StageRow";
+
+const fakeT = ((key: string, vars?: Record<string, unknown>) => (vars ? `${key}:${JSON.stringify(vars)}` : key)) as unknown as TFunction;
+const stage = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "do it", roleParams: {}, ...over });
 
 const FALLBACK: RoleConfig = { engine: "codex", model: "gpt-5.6-sol", effort: "medium" };
 
@@ -82,6 +86,21 @@ test("a template seeds each role's own resolved runtime, not the Builder fallbac
   expect(reviewer).toMatchObject({ roleId: "reviewer", kind: "review-loop", access: "read-only" });
 });
 
+test("pipelineValidationError mirrors the API's cross-engine model check", () => {
+  const base = { task: "t", spec: "", repoDir: "/r", roles: [], defaultRuntime: FALLBACK };
+  /* A Claude stage carrying a codex model would 400 server-side — block it. */
+  const bad = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "claude", model: "gpt-5.6-sol" }), stage({ key: "k2" })] });
+  expect(bad).toContain("modelEngineMismatch");
+  /* A Claude stage with a Claude model, and codex with a gpt model, both pass. */
+  const ok = pipelineValidationError(fakeT, { ...base, stages: [stage({ engine: "claude", model: "opus" }), stage({ key: "k2", engine: "codex", model: "gpt-5.6-terra" })] });
+  expect(ok).toBeNull();
+});
+
+test("pipelineValidationError enforces the API task-length cap", () => {
+  const err = pipelineValidationError(fakeT, { task: "x".repeat(4_001), spec: "", repoDir: "/r", roles: [], defaultRuntime: FALLBACK, stages: [stage({}), stage({ key: "k2" })] });
+  expect(err).toContain("tooLong");
+});
+
 test("roleParamError mirrors the API: values checked, absent allowed", () => {
   const select: RoleParameter = { key: "lens", label: "Lens", description: "", kind: "select", options: ["correctness", "scope"] };
   const integer: RoleParameter = { key: "parallelN", label: "Parallel passes", description: "", kind: "integer", min: 1, max: 8 };
@@ -95,6 +114,9 @@ test("roleParamError mirrors the API: values checked, absent allowed", () => {
   expect(roleParamError(integer, 999)).toBe("pipelineDialog.errors.paramInvalid");
   expect(roleParamError(integer, 4)).toBeNull();
   expect(roleParamError(text, "x".repeat(2_001))).toBe("pipelineDialog.errors.paramInvalid");
+  /* Whitespace-only text trims to empty → treated as absent (serializer drops
+     it), matching the server rather than sneaking a value it would reject. */
+  expect(roleParamError(text, "   ")).toBeNull();
 });
 
 test("role-seeded templates wait for the catalog; role-less ones are always ready", () => {

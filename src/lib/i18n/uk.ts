@@ -696,6 +696,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.errors.promptRequired": "кожен етап запуску потребує промпт",
   "pipelineDialog.errors.tooLong": "{field} перевищує {max} символів",
   "pipelineDialog.errors.paramInvalid": "{label} має недопустиме значення",
+  "pipelineDialog.errors.modelEngineMismatch": "виберіть модель, сумісну з {engine}",
 
   "dash.pipeline": "Пайплайн",
   "dash.newPipeline": "Новий пайплайн",

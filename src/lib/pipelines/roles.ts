@@ -1,9 +1,9 @@
-import { listRoles, validateRoleParams } from "@/lib/roles/registry";
+import { configForParams, listRoles, validateRoleParams } from "@/lib/roles/registry";
 import { MAX_SCAFFOLD_LENGTH } from "@/lib/roles/store";
 import { isEngineEffort } from "@/lib/agent/efforts";
 import { normalizeClaudeLaunchModel } from "@/lib/agent/models";
 
-import type { EffectivePipelineRole, PipelineRoleId, PipelineStage, PipelineStageKind } from "./types";
+import { PIPELINE_DISALLOWED_ROLE_IDS, type EffectivePipelineRole, type PipelineRoleId, type PipelineStage, type PipelineStageKind } from "./types";
 
 export const PIPELINE_ROLE_IDS: readonly PipelineRoleId[] = [
   "orchestrator",
@@ -58,7 +58,10 @@ export const pipelineRoleLookup: PipelineRoleLookup = (roleId, params) => {
     ? `\n\nSafety fences:\n${definition.safetyFences.map((fence) => `- ${fence}`).join("\n")}`
     : "";
   return {
-    ...definition.config,
+    /* Parameter-aware runtime: Builder domain=frontend → Claude/Opus,
+       mode=apply-fixes → Terra, matching the registry so an omitted override
+       does not silently fall back to the base Sol config. */
+    ...configForParams(definition, parameters),
     access: definition.capabilities.includes("read-only") ? "read-only" : "read-write",
     promptScaffold: `${scaffold.slice(0, MAX_SCAFFOLD_LENGTH - fences.length)}${fences}`,
   };
@@ -97,6 +100,9 @@ export function resolvePipelineRole(
   const rawRoleId = ref && typeof ref.roleId === "string" ? ref.roleId.trim() : "";
   if (ref && !rawRoleId) return { error: "stage roleId is required when role is present" };
   if (rawRoleId && !PIPELINE_ROLE_IDS.includes(rawRoleId as PipelineRoleId)) return { error: `unknown pipeline role: ${rawRoleId}` };
+  if (rawRoleId && PIPELINE_DISALLOWED_ROLE_IDS.includes(rawRoleId as PipelineRoleId)) {
+    return { error: `role ${rawRoleId} is not allowed in a pipeline (it requires interactive deploy confirmation)` };
+  }
   const roleParams = ref && ref.params && typeof ref.params === "object" && !Array.isArray(ref.params) ? ref.params : undefined;
   if (stage.engine !== undefined && stage.engine !== "claude" && stage.engine !== "codex") {
     return { error: "stage engine must be claude or codex" };

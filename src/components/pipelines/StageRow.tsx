@@ -107,7 +107,10 @@ export function StageRow({
   };
 
   const setEngine = (engine: FlowEngine) => {
-    patch({ engine, model: "", effort: ENGINE_EFFORTS[engine].includes(stage.effort) ? stage.effort : "" });
+    /* Switch to a model the new engine actually accepts. Clearing it to "" would
+       serialize no override and let the server fall back to the role/Builder
+       default — a codex model (gpt-5.6-sol) under a Claude stage, i.e. a 400. */
+    patch({ engine, model: ENGINE_MODELS[engine][0]?.id ?? "", effort: ENGINE_EFFORTS[engine].includes(stage.effort) ? stage.effort : "" });
   };
 
   const insertPlaceholder = (token: string) => {

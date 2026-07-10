@@ -135,6 +135,17 @@ test("role params are accepted, persisted on the stage, and type-checked", async
   expect(bad.error).toContain("params must be strings or numbers");
 });
 
+test("a deployer stage is rejected at create with a 400", async () => {
+  const { ports } = harness();
+  savePipelines([]);
+  const result = await createPipelineFromRequest({ task: "x", spec: "AC", repoDir: "/repo", stages: [
+    { id: "build", kind: "run", role: { roleId: "builder" }, engine: "codex", prompt: "a", next: "ship" },
+    { id: "ship", kind: "run", role: { roleId: "deployer" }, engine: "codex", prompt: "b", next: null },
+  ] as never }, ports);
+  expect(result.status).toBe(400);
+  expect(result.error).toContain("not allowed in a pipeline");
+});
+
 test("invalid role param values fail canonical validation with a 400", async () => {
   const { ports } = harness();
   savePipelines([]);

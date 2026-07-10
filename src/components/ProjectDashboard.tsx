@@ -661,7 +661,10 @@ export function ProjectDashboard({
       </div>
 
       {pipelineDialogOpen ? (
-        <PipelineDialog project={project} onClose={() => setPipelineDialogOpen(false)} />
+        /* Keyed by project: this dashboard survives project switches, so a
+           key remount drops project A's task/repo/stages instead of writing
+           them into project B's draft (or submitting A's repo from B). */
+        <PipelineDialog key={project} project={project} onClose={() => setPipelineDialogOpen(false)} />
       ) : null}
 
       {pipelinesError ? (

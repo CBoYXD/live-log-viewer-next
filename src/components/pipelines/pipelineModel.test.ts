@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import type { FileEntry } from "@/lib/types";
 import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
 
 import type { TFunction } from "@/lib/i18n";
@@ -7,6 +8,7 @@ import type { TFunction } from "@/lib/i18n";
 import {
   PIPELINE_TEMPLATES,
   type DraftStage,
+  canSourcePipeline,
   deriveStageId,
   draftStagesToInput,
   normalizeStageOrder,
@@ -138,6 +140,19 @@ describe("normalizeStageOrder", () => {
   });
 });
 
+describe("canSourcePipeline", () => {
+  const file = (over: Partial<FileEntry>): FileEntry => ({ path: "/p", root: "codex-sessions", engine: "codex", kind: "session", parent: null, ...over } as FileEntry);
+  test("accepts codex sessions and both Claude roots and children", () => {
+    expect(canSourcePipeline(file({ root: "codex-sessions", engine: "codex" }))).toBe(true);
+    expect(canSourcePipeline(file({ root: "claude-projects", engine: "claude", kind: "session" }))).toBe(true);
+    /* Claude children scan as kind "subagent" — AC3 must still reach them. */
+    expect(canSourcePipeline(file({ root: "claude-projects", engine: "claude", kind: "subagent" }))).toBe(true);
+  });
+  test("rejects non-claude/codex engines", () => {
+    expect(canSourcePipeline(file({ engine: "gemini" as never }))).toBe(false);
+  });
+});
+
 describe("deriveStageId", () => {
   test("slugs the role id and dedupes with numeric suffixes", () => {
     const taken = new Set<string>();
@@ -199,6 +214,15 @@ describe("draftStagesToInput", () => {
     expect(blank!.role).toEqual({ roleId: "builder" });
     /* Params without a chosen role are never serialized. */
     expect(noRole!.role).toBeUndefined();
+  });
+
+  test("trims string params and drops whitespace-only ones the server would reject", () => {
+    const [stage] = draftStagesToInput([
+      draft({ roleId: "reviewer", prompt: "review", roleParams: { diffSource: "  PR#7  ", lens: "   " } }),
+      draft({ roleId: "builder", prompt: "build" }),
+    ]);
+    /* diffSource trimmed; whitespace-only lens dropped (server boundedText would 400). */
+    expect(stage!.role).toEqual({ roleId: "reviewer", params: { diffSource: "PR#7" } });
   });
 
   test("only sends model/effort overrides when set", () => {

@@ -26,7 +26,10 @@ export const PIPELINES_CHANGED_EVENT = "llv:pipelines-changed";
  */
 export function canSourcePipeline(file: FileEntry): boolean {
   if (file.engine !== "claude" && file.engine !== "codex") return false;
-  return file.root === "claude-projects" ? file.kind === "session" : file.root === "codex-sessions";
+  /* Claude children scan as kind "subagent" (agent-*.jsonl); they seed pipelines
+     just like a root "session" does, so AC3 reaches every Claude child too. */
+  if (file.root === "claude-projects") return file.kind === "session" || file.kind === "subagent";
+  return file.root === "codex-sessions";
 }
 
 /** Stable DOM id for a pipeline's dashboard strip, so the on-board hub can
@@ -257,29 +260,42 @@ export function deriveStageId(kind: PipelineStageKind, roleId: string, taken: Se
   return id;
 }
 
-/** Any parameter with a non-empty value is worth sending; blanks fall back to
-    the role's registry default server-side, so an all-blank map is omitted. */
-function hasParams(params: Record<string, string | number>): boolean {
-  return Object.values(params).some((value) => value !== "" && value !== undefined && value !== null);
+/** Trims string params and drops the blank ones. Whitespace-only text would be
+    rejected by the server's boundedText, so it is normalized to absent here
+    (resolving to the registry default), keeping client and API in agreement. */
+function sanitizeRoleParams(params: Record<string, string | number>): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) out[key] = trimmed;
+    } else if (value !== undefined && value !== null) {
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 /** Folds the builder's draft stages into the ordered, id/next-derived POST body. */
 export function draftStagesToInput(drafts: DraftStage[]): PipelineStageInput[] {
   const taken = new Set<string>();
   const ids = drafts.map((draft) => deriveStageId(draft.kind, draft.roleId, taken));
-  return drafts.map((draft, index) => ({
-    id: ids[index]!,
-    kind: draft.kind,
-    ...(draft.roleId
-      ? { role: { roleId: draft.roleId as PipelineRoleId, ...(hasParams(draft.roleParams) ? { params: draft.roleParams } : {}) } }
-      : {}),
-    engine: draft.engine,
-    ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
-    ...(draft.effort ? { effort: draft.effort } : {}),
-    ...(draft.kind === "review-loop" ? {} : { access: draft.access }),
-    prompt: draft.prompt,
-    next: ids[index + 1] ?? null,
-  }));
+  return drafts.map((draft, index) => {
+    const params = sanitizeRoleParams(draft.roleParams);
+    return {
+      id: ids[index]!,
+      kind: draft.kind,
+      ...(draft.roleId
+        ? { role: { roleId: draft.roleId as PipelineRoleId, ...(Object.keys(params).length ? { params } : {}) } }
+        : {}),
+      engine: draft.engine,
+      ...(draft.model.trim() ? { model: draft.model.trim() } : {}),
+      ...(draft.effort ? { effort: draft.effort } : {}),
+      ...(draft.kind === "review-loop" ? {} : { access: draft.access }),
+      prompt: draft.prompt,
+      next: ids[index + 1] ?? null,
+    };
+  });
 }
 
 export async function createPipeline(req: CreatePipelineRequest): Promise<{ pipeline?: Pipeline; error?: string }> {

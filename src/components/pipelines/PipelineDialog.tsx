@@ -1,11 +1,13 @@
 "use client";
 
 import { Plus, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 
-import { CODEX_SOL_MODEL } from "@/lib/agent/models";
-import { useLocale, type MessageKey } from "@/lib/i18n";
+import { CODEX_SOL_MODEL, normalizeClaudeLaunchModel } from "@/lib/agent/models";
+import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import { MAX_ROLE_PARAM_TEXT_LENGTH, MAX_SPEC_LENGTH, MAX_STAGE_PROMPT_LENGTH, MAX_TASK_LENGTH } from "@/lib/pipelines/limits";
+import { PIPELINE_DISALLOWED_ROLE_IDS, type PipelineRoleId } from "@/lib/pipelines/types";
 import type { RoleConfig, RoleParameter } from "@/lib/roles/types";
 
 import {
@@ -49,23 +51,34 @@ function blankStage(runtime: RoleConfig): DraftStage {
   return { key: nextStageKey(), kind: "run", roleId: "", engine: runtime.engine, model: "", effort: "", access: "read-write", prompt: "", roleParams: {} };
 }
 
+/* Client detection without a setState-in-effect: the server snapshot is false
+   (so SSR / static-render tests render the overlay inline, where portals are
+   unsupported), the client snapshot is true (so the modal portals to body). */
+const noopSubscribe = () => () => {};
+const clientSnapshot = () => true;
+const serverSnapshot = () => false;
+
 /** Client mirror of the registry's per-parameter value checks. Absent/blank
     resolves to a registry default (not required here, matching the API), so only
     supplied values are checked. Returns an i18n key on failure, else null. */
 export function roleParamError(parameter: RoleParameter, value: string | number | undefined): MessageKey | null {
-  const raw = value ?? "";
-  if (raw === "") return null;
   if (parameter.kind === "integer") {
-    const n = Number(raw);
+    if (value === "" || value === undefined) return null;
+    const n = Number(value);
     if (!Number.isInteger(n) || (parameter.min !== undefined && n < parameter.min) || (parameter.max !== undefined && n > parameter.max)) {
       return "pipelineDialog.errors.paramInvalid";
     }
     return null;
   }
+  /* Trim before every check: the server's boundedText trims too, so a
+     whitespace-only value resolves to the registry default (absent), and a
+     real value is length-checked on its trimmed form. */
+  const text = String(value ?? "").trim();
+  if (text === "") return null;
   if (parameter.kind === "select") {
-    return parameter.options?.includes(String(raw)) ? null : "pipelineDialog.errors.paramInvalid";
+    return parameter.options?.includes(text) ? null : "pipelineDialog.errors.paramInvalid";
   }
-  return String(raw).length > MAX_ROLE_PARAM_TEXT_LENGTH ? "pipelineDialog.errors.paramInvalid" : null;
+  return text.length > MAX_ROLE_PARAM_TEXT_LENGTH ? "pipelineDialog.errors.paramInvalid" : null;
 }
 
 /** Turns a client template into draft stages, resolving each role's runtime from
@@ -97,6 +110,42 @@ export function stagesFromTemplate(template: PipelineTemplate, roles: RoleCatalo
     loaded — otherwise every seeded roleId would strip to a raw stage. */
 export function templateReady(template: PipelineTemplate, roles: RoleCatalogItem[]): boolean {
   return roles.length > 0 || template.stages.every((seed) => !seed.roleId);
+}
+
+/** Inline validation that mirrors the create API, so a completed dialog does not
+    bounce off a 400: required fields, size limits, cross-engine model
+    compatibility, and canonical role-param value checks. A module function (not
+    an inline useMemo) so the React compiler can memoize it. Returns the first
+    error message, or null when the request would be accepted. */
+export function pipelineValidationError(
+  t: TFunction,
+  { task, spec, repoDir, stages, roles, defaultRuntime }: { task: string; spec: string; repoDir: string; stages: DraftStage[]; roles: RoleCatalogItem[]; defaultRuntime: RoleConfig },
+): string | null {
+  if (!task.trim()) return t("pipelineDialog.errors.taskRequired");
+  if (!repoDir.trim()) return t("pipelineDialog.errors.repoRequired");
+  if (stages.some((stage) => !stage.prompt.trim())) return t("pipelineDialog.errors.promptRequired");
+  if (task.trim().length > MAX_TASK_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.task"), max: MAX_TASK_LENGTH });
+  if (spec.trim().length > MAX_SPEC_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.spec"), max: MAX_SPEC_LENGTH });
+  if (stages.some((stage) => stage.prompt.trim().length > MAX_STAGE_PROMPT_LENGTH)) {
+    return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.prompt"), max: MAX_STAGE_PROMPT_LENGTH });
+  }
+  for (const stage of stages) {
+    const role = stage.roleId ? roles.find((item) => item.id === stage.roleId) ?? null : null;
+    /* The model that will actually resolve server-side: an explicit override,
+       else the role's runtime, else the Builder default. Mirror the API's
+       cross-engine check so a Claude stage never ships a codex model (400). */
+    const effModel = stage.model.trim() || (role ? roleRuntime(role, stage.roleParams).model : "") || defaultRuntime.model;
+    if (stage.engine === "claude" && effModel && !normalizeClaudeLaunchModel(effModel)) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Claude" });
+    if (stage.engine === "codex" && effModel && !effModel.startsWith("gpt-")) return t("pipelineDialog.errors.modelEngineMismatch", { engine: "Codex" });
+    if (!role) continue;
+    /* Absent/blank params resolve to registry defaults server-side, so — like
+       the API — they are not required; only supplied values are checked. */
+    for (const parameter of role.parameters) {
+      const invalid = roleParamError(parameter, stage.roleParams[parameter.key]);
+      if (invalid) return t(invalid, { label: parameter.label });
+    }
+  }
+  return null;
 }
 
 /**
@@ -133,6 +182,7 @@ export function PipelineDialog({
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isClient = useSyncExternalStore(noopSubscribe, clientSnapshot, serverSnapshot);
   const taskRef = useRef<HTMLInputElement>(null);
 
   const defaultRuntime = useMemo<RoleConfig>(() => roles.find((role) => role.id === "builder")?.config ?? FALLBACK_RUNTIME, [roles]);
@@ -146,7 +196,9 @@ export function PipelineDialog({
     void fetch("/api/roles").then(async (res) => {
       if (!res.ok) return;
       const body = (await res.json()) as { roles?: RoleCatalogItem[] };
-      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles);
+      /* Deployer needs an interactive deploy confirmation a pipeline can't give,
+         so it never enters the picker (the API rejects it too). */
+      if (!cancelled && Array.isArray(body.roles)) setRoles(body.roles.filter((role) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(role.id as PipelineRoleId)));
     }).catch(() => {});
     void fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
       .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null }>)
@@ -183,30 +235,7 @@ export function PipelineDialog({
   const addStage = () => setStages((prev) => (prev.length >= 4 ? prev : [...prev, blankStage(defaultRuntime)]));
   const applyTemplate = (template: PipelineTemplate) => setStages(stagesFromTemplate(template, roles, defaultRuntime));
 
-  const validationError = useMemo<string | null>(() => {
-    if (!task.trim()) return t("pipelineDialog.errors.taskRequired");
-    if (!repoDir.trim()) return t("pipelineDialog.errors.repoRequired");
-    if (stages.some((stage) => !stage.prompt.trim())) return t("pipelineDialog.errors.promptRequired");
-    /* Mirror the API's create-time size limits so a full dialog does not bounce
-       off a server 400 (AC1). */
-    if (task.trim().length > MAX_TASK_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.task"), max: MAX_TASK_LENGTH });
-    if (spec.trim().length > MAX_SPEC_LENGTH) return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.spec"), max: MAX_SPEC_LENGTH });
-    if (stages.some((stage) => stage.prompt.trim().length > MAX_STAGE_PROMPT_LENGTH)) {
-      return t("pipelineDialog.errors.tooLong", { field: t("pipelineDialog.prompt"), max: MAX_STAGE_PROMPT_LENGTH });
-    }
-    /* Mirror the canonical role-param value checks (options, integer bounds,
-       text length). Absent/blank params resolve to registry defaults server-
-       side, so — like the API — they are not required here. */
-    for (const stage of stages) {
-      const role = stage.roleId ? roles.find((item) => item.id === stage.roleId) ?? null : null;
-      if (!role) continue;
-      for (const parameter of role.parameters) {
-        const invalid = roleParamError(parameter, stage.roleParams[parameter.key]);
-        if (invalid) return t(invalid, { label: parameter.label });
-      }
-    }
-    return null;
-  }, [task, spec, repoDir, stages, roles, t]);
+  const validationError = pipelineValidationError(t, { task, spec, repoDir, stages, roles, defaultRuntime });
 
   const submit = async () => {
     if (busy) return;
@@ -234,7 +263,7 @@ export function PipelineDialog({
     setError(result.error ?? t("pipelineModel.failed", { status: 0 }));
   };
 
-  return (
+  const overlay = (
     <div
       className="fixed inset-0 z-[60] flex items-start justify-center overflow-y-auto bg-black/30 p-4 sm:p-8"
       role="presentation"
@@ -380,4 +409,10 @@ export function PipelineDialog({
       </div>
     </div>
   );
+
+  /* Portal to the body: node-launched dialogs otherwise mount inside the board's
+     scaled/translated world, which becomes the containing block for the fixed
+     backdrop and makes the modal pan and clip with the canvas. Before mount (SSR
+     / static render) there are no portals, so render inline. */
+  return isClient && typeof document !== "undefined" ? createPortal(overlay, document.body) : overlay;
 }
