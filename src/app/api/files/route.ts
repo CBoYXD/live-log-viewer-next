@@ -14,6 +14,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
 
 export const runtime = "nodejs";
@@ -109,6 +110,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     pipelines,
     workflows,
     tasks: tasks.tasks,
+    systemHealth: { tmux: tmuxEndpointHealth() },
     ...(pipelinesError ? { pipelinesError } : {}),
   } satisfies FilesResponse);
   /* The client re-polls every 10 s and this ~410 KB payload is usually

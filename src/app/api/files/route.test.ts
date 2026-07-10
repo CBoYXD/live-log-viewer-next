@@ -12,6 +12,7 @@ let scans = 0;
 let scanOptions: unknown;
 let scannedFiles: FileEntry[] = [];
 let registryRoot = "";
+let tmuxHealth: unknown = { status: "healthy" };
 
 beforeEach(() => {
   registryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "llv-files-route-"));
@@ -42,6 +43,7 @@ mock.module("@/lib/tasks/store", () => ({
 }));
 mock.module("@/lib/workflows/store", () => ({ loadWorkflows: () => [] }));
 mock.module("@/lib/workflows/visibility", () => ({ filterWorkflowsForFileScan: () => [] }));
+mock.module("@/lib/tmux", () => ({ tmuxEndpointHealth: () => tmuxHealth }));
 
 const { GET } = await import("./route");
 
@@ -52,10 +54,27 @@ test("repeated files reads execute only pure read ports and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [] });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } });
   expect(second.status).toBe(304);
   expect(scans).toBe(2);
   expect(scanOptions).toEqual({ persist: false });
+});
+
+test("files API surfaces degraded tmux endpoint health", async () => {
+  tmuxHealth = {
+    status: "degraded",
+    code: "migration-marker-endpoint-mismatch",
+    configuredTmpdir: "/tmp",
+    expectedTmpdir: "/run/user/1000/agent-log-viewer",
+    message: "stale migration marker",
+  };
+  try {
+    const response = await GET(new Request("http://127.0.0.1/api/files"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).systemHealth.tmux).toEqual(tmuxHealth);
+  } finally {
+    tmuxHealth = { status: "healthy" };
+  }
 });
 
 function file(path: string): FileEntry {
