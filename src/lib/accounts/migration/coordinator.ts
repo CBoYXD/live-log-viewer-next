@@ -373,8 +373,9 @@ export async function advanceConversationMigration(
     const durableReceipt = latest?.migration?.providerReceipt;
     const fencedByDurableReceipt = receipt !== null && durableReceipt !== null && durableReceipt !== undefined
       && !sameProviderReceiptOutcome(durableReceipt, receipt);
-    if (latest?.migration && (
-      latest.migration.revision !== migration.revision
+    if (latest && (
+      !latest.migration
+      || latest.migration.revision !== migration.revision
       || latest.migration.operationId !== migration.operationId
       || terminalMigrationPhase(latest.migration.phase)
       || fencedByDurableReceipt

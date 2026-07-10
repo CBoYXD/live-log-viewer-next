@@ -291,7 +291,11 @@ test("Claude create cancels the live host when continuity persistence fails", as
     accounts: { resolveSpawn: () => target, resolveTranscriptOwner: () => source },
     startCodex: async () => { throw new Error("unexpected Codex client"); },
     claudeStatus: async () => ({ loggedIn: true }),
-    spawnClaude: async () => ({ paneId: "%25", panePid: 2525, host: claudeHost("%25", 2525) }),
+    spawnClaude: async (spec) => {
+      fs.mkdirSync(path.dirname(spec.transcript!), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(spec.transcript!, JSON.stringify({ sessionId: path.basename(spec.transcript!, ".jsonl") }) + "\n", { mode: 0o600 });
+      return { paneId: "%25", panePid: 2525, host: claudeHost("%25", 2525) };
+    },
     cancelClaude: async (host) => { cancelled.push(host.paneId); return true; },
     registry,
     claudeJournalRoot: path.join(base, "claude-operations"),
@@ -308,7 +312,18 @@ test("Claude create cancels the live host when continuity persistence fails", as
   })).rejects.toThrow("registry unavailable");
 
   expect(cancelled).toEqual(["%25"]);
-  expect(Object.values(registry.snapshot().receipts)[0]).toMatchObject({ state: "conflicted", error: "migration continuity persistence failed" });
+  const spawnReceipt = Object.values(registry.snapshot().receipts)[0]!;
+  expect(spawnReceipt).toMatchObject({ state: "path-pending", error: "migration continuity persistence failed" });
+  registry.reconcileConversations([{
+    engine: "claude",
+    path: spawnReceipt.artifactPath!,
+    accountId: "target",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-10T12:01:00.000Z",
+  }]);
+  expect(registry.conversationForPath(spawnReceipt.artifactPath!)?.id).toBe(conversation.id);
+  expect(Object.values(registry.snapshot().conversations)).toHaveLength(1);
 });
 
 test("Claude replay cancels its verified host when continuity persistence fails", async () => {
@@ -348,7 +363,7 @@ test("Claude replay cancels its verified host when continuity persistence fails"
   })).rejects.toThrow("registry unavailable on replay");
 
   expect(cancelled).toEqual(["%26"]);
-  expect(Object.values(registry.snapshot().receipts)[0]).toMatchObject({ state: "conflicted", error: "migration continuity persistence failed" });
+  expect(Object.values(registry.snapshot().receipts)[0]).toMatchObject({ state: "path-pending", error: "migration continuity persistence failed" });
 });
 
 test("Claude replay resumes a pane-free birth receipt and fences terminal spawn state", async () => {

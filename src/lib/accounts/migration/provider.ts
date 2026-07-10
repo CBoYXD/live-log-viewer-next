@@ -508,10 +508,10 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       try {
         recordContinuityPath(successorPath);
       } catch (error) {
-        registry.failSpawn(launchId, "migration continuity persistence failed");
+        registry.preserveSpawnArtifactOwnership(launchId, "migration continuity persistence failed");
         try {
           if (await this.dependencies.cancelClaude?.(host)) await forgetResumePaneIfMatches(successorPath, host);
-        } catch { /* the durable terminal receipt prevents this host from being reused */ }
+        } catch { /* durable artifact ownership remains available to inventory recovery */ }
         throw error;
       }
     };

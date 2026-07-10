@@ -1064,6 +1064,39 @@ describe("durable account migration coordinator", () => {
     expect(latest.generations).toHaveLength(1);
   });
 
+  test("a return-to-source retarget cleans a stale successor after clearing migration state", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/source.jsonl")!;
+    store.commitMigrationIntent({ engine: "codex", targetId: "b", origin: "manual", requestId: "to-b-before-return", expectedRevision: store.engineRouting("codex").revision });
+    const cleaned: string[] = [];
+    let verified = false;
+    const staleProvider: SuccessorProviderPort = {
+      async create(input) {
+        input.recordContinuityPath("/stale-b.jsonl");
+        store.commitMigrationIntent({ engine: "codex", targetId: "a", origin: "manual", requestId: "return-to-a", expectedRevision: store.engineRouting("codex").revision });
+        return {
+          operationId: input.operationId,
+          nativeId: "stale-b",
+          path: "/stale-b.jsonl",
+          continuityPaths: ["/stale-b.jsonl"],
+          historyHash: "stale",
+          host: { kind: "codex-app-server", identity: "stale", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+        };
+      },
+      async verify() { verified = true; },
+      async cleanup(receipt) { cleaned.push(receipt.nativeId); },
+    };
+
+    const latest = await advanceConversationMigration(conversation.id, store, staleProvider);
+
+    expect(latest.migration).toBeNull();
+    expect(latest.generations).toHaveLength(1);
+    expect(verified).toBeFalse();
+    expect(cleaned).toEqual(["stale-b"]);
+    expect(store.conversationForPath("/stale-b.jsonl")?.id).toBe(conversation.id);
+  });
+
   test("stopping during successor startup fences the stale completion and cleans the discarded successor", async () => {
     const store = registry();
     store.reconcileConversations([observation("/source.jsonl", "a", "idle")]);

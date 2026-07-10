@@ -666,6 +666,17 @@ export class AgentRegistry {
     });
   }
 
+  preserveSpawnArtifactOwnership(launchId: string, error: string): void {
+    this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt || receipt.state === "completed" || receipt.state === "failed") return;
+      receipt.state = "path-pending";
+      receipt.error = error;
+      receipt.verifiedHost = null;
+      receipt.target = null;
+    });
+  }
+
   private settleSpawnInFile(file: RegistryFile, launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]>): SpawnSettlement {
     const receipt = file.receipts[launchId];
     if (!receipt) throw new Error("unknown spawn receipt");
