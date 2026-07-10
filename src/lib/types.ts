@@ -225,6 +225,8 @@ export interface LimitsProvenance {
 export interface LimitsPayload {
   claude: EngineLimits | null;
   codex: EngineLimits | null;
+  /** The Claude account whose values appear in this payload. */
+  claudeAccountId: string | null;
   /** The account whose Codex values appear in this payload. The server always
       stamps it; null remains accepted while a legacy cached/browser payload is
       being replaced after an upgrade. */
