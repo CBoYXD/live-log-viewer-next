@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,8 @@ import { expect, test } from "bun:test";
 
 import type { RootKey } from "../types";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
+import { projectForCwd } from "./describe";
+import { projectResolutionStateKey } from "./projectState";
 import { FILE_CAP } from "./roots";
 
 async function writeFixture(pathname: string, content: string, mtimeSeconds: number): Promise<void> {
@@ -28,6 +30,31 @@ test("pure project-catalog discovery leaves the state directory unchanged", asyn
     await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
     await discoverFilesWithProjectCatalog(roots, undefined, { persist: false });
     expect(existsSync(path.join(process.env.LLV_STATE_DIR, "project-catalog.json"))).toBe(false);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("project catalog omits task-only residue from a clean state", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-task-residue-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  process.env.LLV_STATE_DIR = path.join(base, "state");
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+    const taskPath = path.join(roots["claude-tasks"], "orphan-project", "missing-session", "tasks", "task.output");
+    await writeFixture(taskPath, "finished\n", 1_700_000_000);
+
+    const scan = await discoverFilesWithProjectCatalog(roots);
+
+    expect(scan.files.some((entry) => entry.path === taskPath)).toBe(true);
+    expect(scan.projectCatalog).toEqual([]);
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;
@@ -301,6 +328,196 @@ test("discoverFilesWithProjectCatalog refreshes cached projects when flow state 
       conversations: 1,
       smt: startedAt - 10,
     });
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("discoverFilesWithProjectCatalog heals pre-resolver catalog and board project keys", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-heal-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  try {
+    const stateDir = path.join(base, "state");
+    process.env.LLV_STATE_DIR = stateDir;
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all([...Object.values(roots), stateDir].map((root) => mkdir(root, { recursive: true })));
+
+    const repo = path.join(os.homedir(), ".agents", "tools", "catalog-heal-repo");
+    const deletedWorktree = path.join(repo, ".worktrees", "deleted-branch");
+    const slug = deletedWorktree.replace(/[^a-zA-Z0-9]/g, "-");
+    const sessionPath = path.join(roots["claude-projects"], slug, "session-id.jsonl");
+    const taskPath = path.join(roots["claude-tasks"], slug, "session-id", "tasks", "task.output");
+    const codexPath = path.join(roots["codex-sessions"], "codex.jsonl");
+    const deletedCodexCwd = path.join(
+      os.homedir(),
+      ".codex",
+      "worktrees",
+      "deleted-catalog-fixture",
+      "CelestiaCompose",
+      "worktrees",
+      "deleted-child",
+    );
+    await writeFixture(
+      sessionPath,
+      JSON.stringify({ type: "user", cwd: deletedWorktree, message: { content: "Heal catalog" } }) + "\n",
+      1_700_040_000,
+    );
+    await writeFixture(taskPath, "finished\n", 1_700_040_001);
+    await writeFixture(
+      codexPath,
+      JSON.stringify({ type: "session_meta", payload: { cwd: deletedCodexCwd } }) + "\n",
+      1_700_040_002,
+    );
+
+    const canonicalProject = projectForCwd(repo)!;
+    const staleProject = projectForCwd(deletedWorktree.replace(".worktrees", "old-worktrees"))!;
+    const staleCodexProject = "-codex-worktrees-deleted-catalog-fixture-CelestiaCompose";
+    const stateKey = projectResolutionStateKey();
+    const cached = async (rootName: RootKey, pathname: string, project: string, kind: string, session: boolean) => {
+      const fileStat = await stat(pathname);
+      return { rootName, size: fileStat.size, mtimeMs: fileStat.mtimeMs, stateKey, project, kind, session };
+    };
+    await writeFile(
+      path.join(stateDir, "project-catalog.json"),
+      JSON.stringify({
+        version: 1,
+        resolutionVersion: 0,
+        files: {
+          [sessionPath]: await cached("claude-projects", sessionPath, staleProject, "session", true),
+          [taskPath]: await cached("claude-tasks", taskPath, staleProject, "background", false),
+          [codexPath]: await cached("codex-sessions", codexPath, staleCodexProject, "session", true),
+        },
+      }),
+    );
+    const boardState = (manual: string[]) => ({
+      schemaVersion: 1,
+      revision: 1,
+      updatedAt: "2026-07-10T00:00:00.000Z",
+      pathAliases: {},
+      prefs: { manual, hidden: [], expanded: [], viewMode: null, taskPanelOpen: false },
+    });
+    const boardFile = path.join(stateDir, "board.json");
+    const boardValue = { projects: {
+        [canonicalProject]: boardState(["/canonical"]),
+        [staleProject]: boardState(["/stale"]),
+        [staleCodexProject]: boardState([]),
+    } };
+    await writeFile(boardFile, "{ corrupt");
+
+    const preview = await discoverFilesWithProjectCatalog(roots);
+
+    expect(preview.projectCatalog.some((entry) => entry.project === staleProject || entry.project === staleCodexProject)).toBe(false);
+    const deferredCatalog = JSON.parse(await readFile(path.join(stateDir, "project-catalog.json"), "utf8"));
+    expect(deferredCatalog.resolutionVersion).toBe(0);
+    expect(deferredCatalog.files[sessionPath].project).toBe(staleProject);
+
+    await writeFile(boardFile, JSON.stringify(boardValue));
+
+    const scan = await discoverFilesWithProjectCatalog(roots);
+
+    expect(scan.projectCatalog.some((entry) => entry.project === staleProject || entry.project === staleCodexProject)).toBe(false);
+    expect(scan.projectCatalog.find((entry) => entry.project === canonicalProject)).toMatchObject({ conversations: 1 });
+    expect(scan.projectCatalog.find((entry) => entry.project === "CelestiaCompose")).toMatchObject({ conversations: 1 });
+    expect(scan.files.find((entry) => entry.path === taskPath)?.project).toBe(canonicalProject);
+
+    const persistedCatalog = JSON.parse(await readFile(path.join(stateDir, "project-catalog.json"), "utf8"));
+    expect(persistedCatalog.files[sessionPath].project).toBe(canonicalProject);
+    expect(persistedCatalog.files[taskPath].project).toBe(canonicalProject);
+    expect(persistedCatalog.files[codexPath].project).toBe("CelestiaCompose");
+    const persistedBoard = JSON.parse(await readFile(path.join(stateDir, "board.json"), "utf8"));
+    expect(persistedBoard.projects[staleProject]).toBeUndefined();
+    expect(persistedBoard.projects[staleCodexProject]).toBeUndefined();
+    expect(persistedBoard.projects[canonicalProject].prefs.manual).toEqual(["/canonical", "/stale"]);
+  } finally {
+    if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
+    else process.env.LLV_STATE_DIR = previousStateDir;
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("catalog healing preserves board state for a source project with surviving conversations", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-catalog-split-"));
+  const previousStateDir = process.env.LLV_STATE_DIR;
+  try {
+    const stateDir = path.join(base, "state");
+    process.env.LLV_STATE_DIR = stateDir;
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all([...Object.values(roots), stateDir].map((root) => mkdir(root, { recursive: true })));
+
+    const sourceProject = "legacy-shared";
+    const retiredProject = "retired-legacy-project";
+    const retainedPath = path.join(roots["codex-sessions"], "retained.jsonl");
+    const movedPath = path.join(roots["codex-sessions"], "moved.jsonl");
+    const retiredPath = path.join(roots["codex-sessions"], "retired.jsonl");
+    const canonicalRepo = path.join(os.homedir(), ".agents", "tools", "catalog-split-repo");
+    const canonicalProject = projectForCwd(canonicalRepo)!;
+    await writeFixture(
+      retainedPath,
+      JSON.stringify({ type: "session_meta", payload: { cwd: path.join(os.homedir(), "Projects", sourceProject) } }) + "\n",
+      1_700_050_000,
+    );
+    await writeFixture(
+      movedPath,
+      JSON.stringify({ type: "session_meta", payload: { cwd: path.join(canonicalRepo, ".worktrees", "deleted") } }) + "\n",
+      1_700_050_001,
+    );
+    await writeFixture(
+      retiredPath,
+      JSON.stringify({ type: "session_meta", payload: { cwd: path.join(os.homedir(), "Projects", sourceProject) } }) + "\n",
+      1_700_050_002,
+    );
+    const stateKey = projectResolutionStateKey();
+    const cached = async (pathname: string, project = sourceProject) => {
+      const fileStat = await stat(pathname);
+      return {
+        rootName: "codex-sessions",
+        size: fileStat.size,
+        mtimeMs: fileStat.mtimeMs,
+        stateKey,
+        project,
+        kind: "session",
+        session: true,
+      };
+    };
+    await writeFile(path.join(stateDir, "project-catalog.json"), JSON.stringify({
+      version: 1,
+      resolutionVersion: 0,
+      files: {
+        [retainedPath]: await cached(retainedPath),
+        [movedPath]: await cached(movedPath),
+        [retiredPath]: await cached(retiredPath, retiredProject),
+      },
+    }));
+    const sourceBoard = {
+      schemaVersion: 1,
+      revision: 1,
+      updatedAt: "2026-07-10T00:00:00.000Z",
+      pathAliases: {},
+      prefs: { manual: ["/source"], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false },
+    };
+    await writeFile(path.join(stateDir, "board.json"), JSON.stringify({ projects: {
+      [sourceProject]: sourceBoard,
+      [retiredProject]: { ...sourceBoard, prefs: { ...sourceBoard.prefs, manual: ["/retired"] } },
+    } }));
+
+    const scan = await discoverFilesWithProjectCatalog(roots);
+
+    expect(scan.projectCatalog.find((entry) => entry.project === sourceProject)).toMatchObject({ conversations: 2 });
+    expect(scan.projectCatalog.find((entry) => entry.project === canonicalProject)).toMatchObject({ conversations: 1 });
+    const board = JSON.parse(await readFile(path.join(stateDir, "board.json"), "utf8"));
+    expect(board.projects[sourceProject]?.prefs.manual).toEqual(["/source", "/retired"]);
+    expect(board.projects[retiredProject]).toBeUndefined();
+    expect(board.projects[canonicalProject]).toBeUndefined();
   } finally {
     if (previousStateDir === undefined) delete process.env.LLV_STATE_DIR;
     else process.env.LLV_STATE_DIR = previousStateDir;

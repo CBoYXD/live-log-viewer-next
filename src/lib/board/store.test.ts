@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { boardFor, BoardStoreError, mutateBoard, patchBoard } from "./store";
+import { boardFor, BoardStoreError, migrateBoardProjects, mutateBoard, patchBoard } from "./store";
 import { validateBoardPatchRequest } from "./validation";
 
 function temporaryFile(): string { return path.join(fs.mkdtempSync(path.join(os.tmpdir(), "llv-board-")), "board.json"); }
@@ -55,6 +55,42 @@ describe("board store", () => {
     const replay = mutateBoard("viewer", 0, [{ kind: "remap-paths", pairs: [{ from: "/old", to: "/new" }] }], file);
     expect(first).toMatchObject({ ok: true, board: { revision: 1 } });
     expect(replay).toMatchObject({ ok: true, board: { revision: 1 } });
+  });
+  test("many stale projects merge by original timestamp with newer membership roles winning", () => {
+    const run = (migrations: Map<string, string>) => {
+      const file = temporaryFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const state = (
+        updatedAt: string,
+        prefs: Partial<{ manual: string[]; hidden: string[]; expanded: string[]; viewMode: "scheme" | "list" | null; taskPanelOpen: boolean }>,
+        pathAliases: Record<string, string>,
+      ) => ({
+        schemaVersion: 1,
+        revision: 1,
+        updatedAt,
+        pathAliases,
+        prefs: { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false, ...prefs },
+      });
+      fs.writeFileSync(file, JSON.stringify({ projects: {
+        canonical: state("2026-07-10T00:01:00.000Z", { expanded: ["/base"], viewMode: "scheme" }, { "/alias": "/base" }),
+        older: state("2026-07-10T00:00:00.000Z", { hidden: ["/a"] }, { "/alias": "/old" }),
+        newest: state("2026-07-10T00:02:00.000Z", { manual: ["/a"], expanded: ["/b"], viewMode: "list", taskPanelOpen: true }, { "/alias": "/new" }),
+      } }), "utf8");
+      expect(migrateBoardProjects(migrations, file)).toBe(true);
+      return JSON.parse(fs.readFileSync(file, "utf8")).projects;
+    };
+
+    const forward = run(new Map([["older", "canonical"], ["newest", "canonical"]]));
+    const reverse = run(new Map([["newest", "canonical"], ["older", "canonical"]]));
+
+    expect(forward.older).toBeUndefined();
+    expect(forward.newest).toBeUndefined();
+    expect(forward.canonical.prefs).toEqual({
+      manual: ["/a"], hidden: [], expanded: ["/base", "/b"], viewMode: "list", taskPanelOpen: true,
+    });
+    expect(forward.canonical.pathAliases).toEqual({ "/alias": "/new" });
+    expect(reverse.canonical.prefs).toEqual(forward.canonical.prefs);
+    expect(reverse.canonical.pathAliases).toEqual(forward.canonical.pathAliases);
   });
   test("strict bounded PATCH validation rejects unknown and empty changes", async () => {
     const request = (body: unknown) => new Request("http://127.0.0.1:8898/api/board", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
