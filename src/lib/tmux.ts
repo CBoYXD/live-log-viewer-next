@@ -80,6 +80,28 @@ export function collectImagePayloads(body: { image?: unknown; images?: unknown }
 /** A resolved tmux target in `session:window.pane` form (e.g. `0:1.0`). */
 export type TmuxTarget = string;
 
+/** The one server-side description of the tmux endpoint used by the Viewer.
+    Keeping this alongside runTmux prevents command-copy UI from drifting to a
+    different socket than the process-control path. */
+export interface TmuxEndpointDescriptor {
+  kind: "tmux-tmpdir";
+  tmuxTmpdir: string;
+  socketName: "default";
+  socketPath: string;
+}
+
+export interface TmuxAttachReference {
+  tmuxServerPid: number;
+  tmuxServerStartIdentity: string | null;
+  paneId: string;
+  panePid: number;
+  paneStartIdentity: string | null;
+}
+
+export type TmuxAttachResolution =
+  | { ok: true; target: TmuxTarget; endpoint: TmuxEndpointDescriptor; command: string; readOnlyCommand: string }
+  | { ok: false; reason: "stale-pane" | "server-restarted" | "tmux-unavailable" };
+
 /** One pane, addressed two ways: the display coordinates shown in the UI and
     the stable `%N` pane id. Coordinates renumber as windows close (this repo's
     users run `renumber-windows on`), so anything that acts on a pane later —
@@ -116,10 +138,25 @@ export function tmuxEndpoint(): string {
   return process.env.TMUX_TMPDIR || "/tmp";
 }
 
+/** Builds the descriptor from values supplied by the host process. The small
+    pure constructor keeps endpoint and quoting tests independent of /proc. */
+export function createTmuxEndpointDescriptor(tmuxTmpdir: string, uid: number): TmuxEndpointDescriptor {
+  return {
+    kind: "tmux-tmpdir",
+    tmuxTmpdir,
+    socketName: "default",
+    socketPath: path.join(tmuxTmpdir, `tmux-${uid}`, "default"),
+  };
+}
+
+export function tmuxEndpointDescriptor(): TmuxEndpointDescriptor {
+  return createTmuxEndpointDescriptor(tmuxEndpoint(), process.getuid?.() ?? 0);
+}
+
 /** Runs tmux with an explicit argv (no shell) and optional stdin payload. */
-function runTmux(args: string[], input?: Buffer | string): Promise<RunResult> {
+function runTmux(args: string[], input?: Buffer | string, endpoint = tmuxEndpointDescriptor()): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(TMUX, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, TMUX_TMPDIR: tmuxEndpoint() } });
+    const child = spawn(TMUX, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, TMUX_TMPDIR: endpoint.tmuxTmpdir } });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
@@ -365,6 +402,107 @@ export async function panePidOf(target: TmuxTarget): Promise<number | null> {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+/** Captures kernel start identities with the fresh host observation. Linux
+    exposes these through /proc, which closes PID-reuse races; portable hosts
+    retain the PID and stable pane-id checks when no start token is available. */
+export function captureTmuxAttachReference(ref: Pick<TmuxAttachReference, "tmuxServerPid" | "paneId" | "panePid">): TmuxAttachReference {
+  return {
+    ...ref,
+    tmuxServerStartIdentity: procBackend.processIdentity(ref.tmuxServerPid),
+    paneStartIdentity: procBackend.processIdentity(ref.panePid),
+  };
+}
+
+interface TmuxAttachSnapshot {
+  tmuxServerPid: number;
+  paneId: string;
+  panePid: number;
+  target: TmuxTarget;
+}
+
+/** Classifies the identity portion independently from process execution so
+    server restart, pane replacement, and renumbering remain deterministic. */
+export function classifyTmuxAttachSnapshot(
+  expected: TmuxAttachReference,
+  current: TmuxAttachSnapshot & { tmuxServerStartIdentity: string | null; paneStartIdentity: string | null },
+): "ok" | "stale-pane" | "server-restarted" {
+  if (
+    current.tmuxServerPid !== expected.tmuxServerPid ||
+    (expected.tmuxServerStartIdentity !== null && current.tmuxServerStartIdentity !== expected.tmuxServerStartIdentity)
+  ) {
+    return "server-restarted";
+  }
+  if (
+    current.paneId !== expected.paneId ||
+    current.panePid !== expected.panePid ||
+    (expected.paneStartIdentity !== null && current.paneStartIdentity !== expected.paneStartIdentity)
+  ) {
+    return "stale-pane";
+  }
+  return "ok";
+}
+
+function hasUnsafeShellByte(value: string): boolean {
+  return /[\r\n\0]/.test(value);
+}
+
+export function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/** Commands are fully server-composed. Values are rejected before quoting so
+    the compact response is safe to copy through any POSIX shell. */
+export function tmuxAttachCommands(endpoint: TmuxEndpointDescriptor, target: TmuxTarget): { command: string; readOnlyCommand: string } {
+  if (hasUnsafeShellByte(endpoint.tmuxTmpdir) || hasUnsafeShellByte(target)) {
+    throw new Error("tmux attach command contains an unsafe control character");
+  }
+  const prefix = `TMUX_TMPDIR=${shellSingleQuote(endpoint.tmuxTmpdir)} tmux attach-session`;
+  return {
+    command: `${prefix} -t ${shellSingleQuote(target)}`,
+    readOnlyCommand: `${prefix} -r -t ${shellSingleQuote(target)}`,
+  };
+}
+
+/** Revalidates the stable pane id directly against tmux, bypassing pane and
+    resources caches. The newly observed display target intentionally wins so
+    renumbered windows attach to their current coordinate. */
+export async function resolveTmuxAttach(
+  expected: TmuxAttachReference,
+  endpoint = tmuxEndpointDescriptor(),
+): Promise<TmuxAttachResolution> {
+  const res = await runTmux(
+    [
+      "display-message",
+      "-p",
+      "-t",
+      expected.paneId,
+      "#{pid}\t#{pane_id}\t#{pane_pid}\t#{session_name}:#{window_index}.#{pane_index}",
+    ],
+    undefined,
+    endpoint,
+  ).catch(() => null);
+  const [serverRaw = "", paneId = "", paneRaw = "", target = ""] = res && res.code === 0 ? res.stdout.trim().split("\t") : [];
+  const tmuxServerPid = Number(serverRaw);
+  const panePid = Number(paneRaw);
+  if (!res || res.code !== 0 || !Number.isInteger(tmuxServerPid) || tmuxServerPid <= 0 || !paneId || !Number.isInteger(panePid) || panePid <= 0 || !target) {
+    return { ok: false, reason: "tmux-unavailable" };
+  }
+  const state = classifyTmuxAttachSnapshot(expected, {
+    tmuxServerPid,
+    tmuxServerStartIdentity: procBackend.processIdentity(tmuxServerPid),
+    paneId,
+    panePid,
+    paneStartIdentity: procBackend.processIdentity(panePid),
+    target,
+  });
+  if (state !== "ok") return { ok: false, reason: state };
+  try {
+    return { ok: true, target, endpoint, ...tmuxAttachCommands(endpoint, target) };
+  } catch {
+    return { ok: false, reason: "tmux-unavailable" };
+  }
+}
+
 /**
  * Kills the tmux pane hosting a conversation's agent. The window goes with it
  * when this was its only pane — the case for every window the viewer spawns.
@@ -567,10 +705,6 @@ const SPAWN_STABLE_ROUNDS = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 export function cdCommandForCwd(cwd: string): string {

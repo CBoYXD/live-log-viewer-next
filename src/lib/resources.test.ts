@@ -49,6 +49,16 @@ const canonical: TranscriptHost = {
   display: "agents:4.0",
 };
 
+function ref(tmuxServerPid: number, panePid: number, paneId: string) {
+  return {
+    tmuxServerPid,
+    tmuxServerStartIdentity: `${tmuxServerPid}:one`,
+    panePid,
+    paneStartIdentity: `${panePid}:one`,
+    paneId,
+  };
+}
+
 describe("resource observation", () => {
   test("attributes a duplicated transcript only to the shared canonical host", () => {
     const snapshot = { hosts: [duplicate, canonical], observation: "available" as const, canonicalFor: (pathname: string) => (pathname === PATHNAME ? canonical : null) };
@@ -67,29 +77,29 @@ describe("kill-target allowlist", () => {
 
   test("only targets from the last snapshot pass, each with its pane id and pid", () => {
     noteSessionTargets([
-      { target: "agents:1.0", ref: { panePid: 111, paneId: "%11" } },
-      { target: "agents:2.0", ref: { panePid: 222, paneId: "%22" } },
+      { target: "agents:1.0", ref: ref(900, 111, "%11") },
+      { target: "agents:2.0", ref: ref(900, 222, "%22") },
     ]);
-    expect(allowedKillTarget("agents:1.0")).toEqual({ panePid: 111, paneId: "%11" });
-    expect(allowedKillTarget("agents:2.0")).toEqual({ panePid: 222, paneId: "%22" });
+    expect(allowedKillTarget("agents:1.0")).toEqual(ref(900, 111, "%11"));
+    expect(allowedKillTarget("agents:2.0")).toEqual(ref(900, 222, "%22"));
     expect(allowedKillTarget("agents:3.0")).toBeNull();
     expect(allowedKillTarget("main:0.0")).toBeNull();
   });
 
   test("a new snapshot fully replaces the allowlist", () => {
-    noteSessionTargets([{ target: "agents:1.0", ref: { panePid: 111, paneId: "%11" } }]);
-    noteSessionTargets([{ target: "agents:2.0", ref: { panePid: 222, paneId: "%22" } }]);
+    noteSessionTargets([{ target: "agents:1.0", ref: ref(900, 111, "%11") }]);
+    noteSessionTargets([{ target: "agents:2.0", ref: ref(900, 222, "%22") }]);
     expect(allowedKillTarget("agents:1.0")).toBeNull();
-    expect(allowedKillTarget("agents:2.0")).toEqual({ panePid: 222, paneId: "%22" });
+    expect(allowedKillTarget("agents:2.0")).toEqual(ref(900, 222, "%22"));
   });
 
   test("a consumed target no longer passes — tmux may reuse its coordinates", () => {
     noteSessionTargets([
-      { target: "agents:1.0", ref: { panePid: 111, paneId: "%11" } },
-      { target: "agents:2.0", ref: { panePid: 222, paneId: "%22" } },
+      { target: "agents:1.0", ref: ref(900, 111, "%11") },
+      { target: "agents:2.0", ref: ref(900, 222, "%22") },
     ]);
     consumeKillTarget("agents:1.0");
     expect(allowedKillTarget("agents:1.0")).toBeNull();
-    expect(allowedKillTarget("agents:2.0")).toEqual({ panePid: 222, paneId: "%22" });
+    expect(allowedKillTarget("agents:2.0")).toEqual(ref(900, 222, "%22"));
   });
 });
