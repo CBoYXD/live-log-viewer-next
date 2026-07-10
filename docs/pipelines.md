@@ -1,0 +1,105 @@
+# Linear agent pipelines
+
+Pipelines run a user-defined chain of two to four agent stages in one dedicated git worktree. The first slice supports `run` and `review-loop` stages. Every transition is linear and declared through `next`.
+
+## Create and inspect
+
+`GET /api/pipelines` returns `{ "pipelines": [...] }`.
+
+`POST /api/pipelines` accepts:
+
+```json
+{
+  "task": "Implement and verify pipeline support",
+  "spec": "AC1: every run stage ends with structured JSON\nAC2: review uses the existing flow engine",
+  "repoDir": "/absolute/path/to/repository",
+  "src": "/absolute/path/to/the/launching/conversation.jsonl",
+  "stages": [
+    {
+      "id": "plan",
+      "kind": "run",
+      "role": {
+        "roleId": "architect",
+        "engine": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh",
+        "access": "read-only"
+      },
+      "prompt": "Plan {{task}}. Use the pinned specification.",
+      "next": "build"
+    },
+    {
+      "id": "build",
+      "kind": "run",
+      "role": {
+        "roleId": "builder",
+        "engine": "codex",
+        "model": "gpt-5.6-terra",
+        "effort": "high",
+        "access": "read-write"
+      },
+      "prompt": "Implement {{task}} using this prior output:\n{{prev.output}}",
+      "next": "review"
+    },
+    {
+      "id": "review",
+      "kind": "review-loop",
+      "role": {
+        "roleId": "reviewer",
+        "engine": "codex",
+        "model": "gpt-5.6-sol",
+        "effort": "xhigh",
+        "access": "read-only"
+      },
+      "prompt": "Review the full pinned task and acceptance criteria.",
+      "next": null
+    }
+  ]
+}
+```
+
+Stage ids use letters, numbers, `_`, and `-`. They must be unique. Each `next` value names the following array entry; the last stage ends with `null`. A review-loop requires an earlier run session.
+
+### Role references and issue #35
+
+`role.roleId` is the durable identity. Engine, model, effort, and access are per-stage overrides. Current main requires an explicit engine while the shared role registry from issue #35 is unavailable. When that registry is installed, its defaults fill omitted values and stage overrides keep precedence. Every attempt freezes its resolved role so later registry edits cannot change a running stage.
+
+## Structured stage verdicts
+
+A run stage completes only when its finished turn ends with a fenced JSON block matching this contract:
+
+```json
+{
+  "status": "pass",
+  "findings": ["optional bounded finding"],
+  "confidence": 0.9
+}
+```
+
+Valid statuses are `pass`, `fail`, and `needs_decision`. Findings are optional, with at most 50 bounded strings. Confidence is optional and ranges from zero through one. The guard rejects unknown keys, invalid bounds, malformed JSON, and trailing text. Human-readable prose before the block becomes the stage output available through `{{prev.output}}`.
+
+A review-loop stage attaches the latest passed run session to a regular review Flow. The stage role supplies the fresh reviewer. Flow approval becomes a pipeline `pass`; comment, closed, missing, and decision states park the pipeline for an operator. Review rounds, verdict parsing, findings delivery, and fresh-reviewer behavior stay owned by the Flow engine.
+
+## Worktree, lineage, and recovery
+
+Creation provisions a sibling worktree on `pipeline/<task-slug>-<id>`. Passed stages commit pending work and advance the saved `lastPassedCommit`. Retry closes an embedded flow, runs `git reset --hard <lastPassedCommit>` plus `git clean -fd` inside the pipeline-owned worktree, and appends a fresh attempt.
+
+Run stages use Viewer spawn receipts and conversation lineage. Stage zero descends from `src` when supplied. Later stages descend from the latest completed stage session. Each attempt persists its launch id, Viewer conversation id, transcript path, native session id, pane id, output, verdict, and timestamps. Pausing holds coordinator transitions while preserving the active session for inspection and resume.
+
+Pipeline stages cannot create another pipeline. The stage-kind validator and the injected prompt contract enforce this one-level composition limit.
+
+## Control
+
+`PATCH /api/pipelines/<id>` accepts one action:
+
+- `pause` — hold coordinator transitions and pause an embedded review flow.
+- `resume` — return to the saved pipeline phase and resume an embedded flow.
+- `retry-stage` — restore the last passed commit and start a fresh attempt.
+- `skip-stage` — record an operator skip and follow `next`.
+- `close` — close the pipeline and any embedded flow while retaining history and the worktree.
+
+The pipeline tick runs in the same durable scanner-controller pass as the flow tick. `GET /api/files` remains a pure read and includes the current pipeline records for the project UI.
+
+## Deferred composition
+
+Branching, conditional verdict edges, fan-out, parallel stages, voting panels, DAGs, rich visual editing, and runtime-event ownership remain later slices.
