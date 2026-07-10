@@ -1,4 +1,4 @@
-# Live Log Viewer
+# Agent Log Viewer
 
 `agent-log-viewer` is a local web UI that turns raw Codex / Claude Code agent
 logs into a readable, live-updating chat feed. It discovers every session,

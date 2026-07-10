@@ -1,6 +1,6 @@
 # Dictation / voice input
 
-Live Log Viewer can turn speech into text in any composer, so you can dictate a
+Agent Log Viewer can turn speech into text in any composer, so you can dictate a
 message to an agent instead of typing it. Transcription runs through a pluggable
 backend: the default keeps everything on your machine, and two cloud providers
 are available as an explicit per-machine opt-in.
