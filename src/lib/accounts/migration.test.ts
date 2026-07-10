@@ -202,11 +202,11 @@ describe("postConversationMigration (frozen /api/conversations/{id}/migration ro
       return new Response(null, { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      const result = await postConversationMigration("conversation_abc", "retry");
+      const result = await postConversationMigration("conversation_abc", "retry", 7);
       expect(result).toEqual({ ok: true, error: null });
       expect(calls[0]?.url).toBe("/api/conversations/conversation_abc/migration");
       expect(calls[0]?.init?.method).toBe("POST");
-      expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ action: "retry" });
+      expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ action: "retry", expectedRevision: 7 });
     } finally {
       globalThis.fetch = original;
     }
@@ -216,7 +216,7 @@ describe("postConversationMigration (frozen /api/conversations/{id}/migration ro
     const original = globalThis.fetch;
     globalThis.fetch = (async () => new Response(JSON.stringify({ error: "migration retry failed" }), { status: 409 })) as unknown as typeof fetch;
     try {
-      expect(await postConversationMigration("conversation_abc", "rollback")).toEqual({ ok: false, error: "migration retry failed" });
+      expect(await postConversationMigration("conversation_abc", "rollback", 7)).toEqual({ ok: false, error: "migration retry failed" });
     } finally {
       globalThis.fetch = original;
     }
@@ -230,10 +230,25 @@ describe("postConversationMigration (frozen /api/conversations/{id}/migration ro
       throw new Error("offline");
     }) as unknown as typeof fetch;
     try {
-      expect(await postConversationMigration("conversation a/b", "retry")).toEqual({ ok: false, error: null });
-      expect(calls[0]).toBe("/api/conversations/conversation%20a%2Fb/migration");
+      expect(await postConversationMigration("conversation_abc/a", "retry", 7)).toEqual({ ok: false, error: null });
+      expect(calls[0]).toBe("/api/conversations/conversation_abc%2Fa/migration");
     } finally {
       globalThis.fetch = original;
     }
   });
+});
+
+test("session recovery refuses a missing revision before issuing a request", async () => {
+  const original = globalThis.fetch;
+  let called = false;
+  globalThis.fetch = (async () => {
+    called = true;
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  try {
+    expect(await postConversationMigration("conversation_abc", "retry")).toEqual({ ok: false, error: null });
+    expect(called).toBeFalse();
+  } finally {
+    globalThis.fetch = original;
+  }
 });

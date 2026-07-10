@@ -6,7 +6,7 @@ const advance = async () => {
   for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
 };
 
-type Call = { url: string; body: unknown };
+type Call = { url: string; method: string; body: unknown };
 
 /** A fetcher that records every request and replies from a per-URL script. */
 function scripted(reply: (url: string, body: unknown) => unknown) {
@@ -14,7 +14,7 @@ function scripted(reply: (url: string, body: unknown) => unknown) {
   const fetcher = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
-    calls.push({ url, body });
+    calls.push({ url, method: init?.method ?? "GET", body });
     const value = reply(url, body);
     if (value instanceof Response) return value;
     return new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
@@ -136,7 +136,8 @@ test("setAutoBalance PATCHes the frozen policy route with automaticSwitching", a
   await store.setAutoBalance(false);
   expect(seen.length).toBe(1);
   expect(seen[0]?.method).toBe("PATCH");
-  expect(seen[0]?.body).toEqual({ automaticSwitching: false });
+  expect(seen[0]?.body).toMatchObject({ automaticSwitching: false });
+  expect(typeof (seen[0]?.body as { requestId?: unknown }).requestId).toBe("string");
   // The old POST …/auto-balance {enabled} route must never be called.
 });
 
@@ -149,7 +150,7 @@ test("stopMigration targets the frozen account-migrations route by intent id", a
   store.subscribe(() => {});
   await advance();
   await store.stopMigration();
-  expect(calls.some((call) => call.url === "/api/account-migrations/intent-7" && (call.body as { action?: string }).action === "stop")).toBeTrue();
+  expect(calls.some((call) => call.url === "/api/account-migrations/intent-7" && call.method === "POST" && (call.body as { action?: string }).action === "stop")).toBeTrue();
   // The old /api/accounts/migration/{id} route never existed.
   expect(calls.some((call) => call.url.includes("/api/accounts/migration/"))).toBeFalse();
 });

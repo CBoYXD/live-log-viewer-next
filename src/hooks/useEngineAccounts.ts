@@ -359,11 +359,11 @@ export function createEngineAccountsStore(
     return runMutation("migrate", async () => {
       try {
         // Frozen stop route (Sol contract): the durable intent is addressed by
-        // its own id under /api/account-migrations, not under /api/accounts.
+        // its own id under /api/account-migrations.
         const response = await fetcher(`/api/account-migrations/${encodeURIComponent(intentId)}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "stop" }),
+          body: JSON.stringify({ action: "stop", expectedRevision: snapshot.migration?.revision }),
         });
         if (!response.ok) throw new Error("stop failed");
       } catch {
@@ -383,12 +383,11 @@ export function createEngineAccountsStore(
       try {
         // Frozen policy route (Sol contract): PATCH the account policy with the
         // `automaticSwitching` flag. The old POST …/auto-balance {enabled} route
-        // never existed. `expectedRevision` is optional and the projected
-        // AutoBalance DTO carries no revision, so it is left to the server default.
+        // never existed. Mutations carry a request id for idempotent retries.
         const response = await fetcher(`/api/accounts/${engine}/policy`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ automaticSwitching: enabled }),
+          body: JSON.stringify({ automaticSwitching: enabled, requestId: mintRequestId() }),
         });
         if (!response.ok) throw new Error("policy update failed");
       } catch {

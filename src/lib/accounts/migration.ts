@@ -381,7 +381,7 @@ export interface ConversationMigrationResult {
 /**
  * Per-conversation recovery against the frozen route
  * `POST /api/conversations/{conversationId}/migration` (Sol contract): `retry`
- * re-runs the migration for one conversation against the latest intent
+ * re-runs the migration for one conversation against the supplied intent
  * revision; `rollback` (the card's "Keep on «A»") removes the session from the
  * intent and leaves the predecessor authoritative. Keyed by the stable Viewer
  * `conversationId` — never the transcript path, which changes on succession.
@@ -392,12 +392,15 @@ export interface ConversationMigrationResult {
 export async function postConversationMigration(
   conversationId: string,
   action: "retry" | "rollback",
+  expectedRevision?: number,
 ): Promise<ConversationMigrationResult> {
+  if (!conversationId.startsWith("conversation_")) return { ok: false, error: null };
+  if (!Number.isInteger(expectedRevision) || (expectedRevision as number) < 0) return { ok: false, error: null };
   try {
     const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/migration`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, expectedRevision }),
     });
     if (response.ok) return { ok: true, error: null };
     const body = (await response.json().catch(() => null)) as { error?: unknown } | null;

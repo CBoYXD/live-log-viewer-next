@@ -113,10 +113,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
   /* Retry/rollback address the durable conversation by its stable id; without a
      server-assigned conversationId the recovery route can't be targeted, so the
      actions stay hidden until the backend supplies one. */
-  const recover = file.conversationId
+  const recover = file.conversationId && Number.isInteger(file.migration?.revision)
     ? async (action: "retry" | "rollback") => {
         setRecoveryError(null);
-        const result = await postConversationMigration(file.conversationId!, action);
+        const result = await postConversationMigration(file.conversationId!, action, file.migration!.revision);
         if (!result.ok) {
           setRecoveryError(result.error ?? t(action === "retry" ? "migrate.retryFailed" : "migrate.keepFailed"));
         }
