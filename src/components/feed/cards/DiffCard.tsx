@@ -41,11 +41,22 @@ function LineRow({ line }: { line: DiffLine }) {
       : line.t === "-"
         ? "bg-diff-del-soft text-diff-del"
         : "text-ink";
+  const intralineTone = line.t === "+" ? "bg-diff-add-strong" : "bg-diff-del-strong";
   return (
     <div className={`whitespace-pre px-2 ${tone}`}>
       {/* The +/- marker is real text content, so screen readers and copy keep it. */}
       {line.t}
-      {line.text || " "}
+      {line.intraline
+        ? line.intraline.map((span, index) =>
+            span.changed ? (
+              <span key={index} className={intralineTone}>
+                {span.text}
+              </span>
+            ) : (
+              span.text
+            ),
+          )
+        : line.text || " "}
     </div>
   );
 }
