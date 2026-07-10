@@ -150,13 +150,20 @@ export async function readLimits(): Promise<LimitsPayload> {
   const cachedCodex = lastCache("codex", codexAccount.id);
   const claudeFresh = Boolean(cachedClaude && Date.now() - cachedClaude.at < CACHE_MS);
   const codexFresh = Boolean(cachedCodex && Date.now() - cachedCodex.at < CACHE_MS);
-  if (claudeFresh || codexFresh) {
+  if (claudeFresh && codexFresh) {
     return { claude: cachedClaude?.data ?? null, codex: cachedCodex?.data ?? null, claudeAccountId: claudeAccount.id, codexAccountId: codexAccount.id, provenance: { claude: cachedClaude?.provenance ?? { source: "unavailable", reason: "no cached Claude limits", staleSince: null }, codex: cachedCodex?.provenance ?? { source: "unavailable", reason: "no cached Codex limits", staleSince: null } }, staleSince: cachedClaude?.provenance.staleSince ?? cachedCodex?.provenance.staleSince ?? null };
   }
   const staleSince = new Date().toISOString();
-  const [claude, codex] = await Promise.all([fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")), readCodexLimits({ account: codexAccount })]);
-  const resolvedClaude = provenance(claude, cachedClaude, staleSince);
-  const resolvedCodex = provenance(codex, cachedCodex, staleSince);
+  const [claude, codex] = await Promise.all([
+    claudeFresh ? Promise.resolve(null) : fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")),
+    codexFresh ? Promise.resolve(null) : readCodexLimits({ account: codexAccount }),
+  ]);
+  const resolvedClaude = claudeFresh
+    ? { data: cachedClaude!.data, meta: cachedClaude!.provenance }
+    : provenance(claude!, cachedClaude, staleSince);
+  const resolvedCodex = codexFresh
+    ? { data: cachedCodex!.data, meta: cachedCodex!.provenance }
+    : provenance(codex!, cachedCodex, staleSince);
   const data: LimitsPayload = {
     claude: resolvedClaude.data,
     codex: resolvedCodex.data,
@@ -166,8 +173,8 @@ export async function readLimits(): Promise<LimitsPayload> {
     staleSince: resolvedClaude.meta.staleSince ?? resolvedCodex.meta.staleSince,
   };
   logFallbackReasons(data.provenance.claude, data.provenance.codex);
-  remember("claude", claudeAccount.id, resolvedClaude);
-  remember("codex", codexAccount.id, resolvedCodex);
+  if (!claudeFresh) remember("claude", claudeAccount.id, resolvedClaude);
+  if (!codexFresh) remember("codex", codexAccount.id, resolvedCodex);
   return data;
 }
 
