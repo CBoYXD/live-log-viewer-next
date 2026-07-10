@@ -672,6 +672,24 @@ export const en = {
   "resources.killAllNone": "no agent sessions to kill",
   "resources.close": "Close",
 
+  // Attach controls (ResourcesFooter rows) — issue #68
+  "attach.attach": "Attach",
+  "attach.readonly": "Read-only",
+  "attach.copy": "Copy attach command",
+  "attach.copyReadonly": "Copy read-only attach command",
+  "attach.hint": "copy the tmux attach command for this pane — paste it into any shell",
+  "attach.readonlyHint": "copy a read-only (view-only) attach command — you watch without touching the keys",
+  "attach.loading": "resolving…",
+  "attach.copied": "attach command copied",
+  "attach.copiedReadonly": "read-only command copied",
+  "attach.stale": "This pane changed or closed. Refresh and try again.",
+  "attach.restarted": "The tmux server restarted. Refresh and try again.",
+  "attach.unavailable": "The tmux endpoint is unavailable. Refresh and try again.",
+  "attach.badRequest": "Can’t resolve this pane — refresh the list.",
+  "attach.network": "Network error — try again.",
+  "attach.clipboard": "Couldn’t copy — check clipboard permissions.",
+  "attach.refresh": "Refresh",
+
   // useSwitchboardData / status lines
   "status.awaitingPlan": "awaiting plan approval",
   "status.awaitingAnswer": "awaiting an answer to a question",
