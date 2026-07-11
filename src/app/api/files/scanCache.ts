@@ -6,6 +6,7 @@ type FileScanRefresh = {
   promise: Promise<FileScanSnapshot>;
 };
 type FileScanCacheSlot = {
+  schemaVersion: typeof FILE_SCAN_CACHE_SCHEMA_VERSION;
   snapshot?: FileScanSnapshot;
   snapshotGeneration: number;
   requestedGeneration: number;
@@ -21,28 +22,77 @@ export type CachedFileScan = {
 
 const FILE_SCAN_FRESH_MS = 1_000;
 const FILE_SCAN_CACHE_MAX_PROJECTS = 32;
+const FILE_SCAN_CACHE_SCHEMA_VERSION = 2 as const;
 const fileScanCacheStore = globalThis as typeof globalThis & {
-  __llvFilesRouteScans?: Map<string, FileScanCacheSlot>;
+  __llvFilesRouteScans?: Map<string, unknown>;
 };
 
-function fileScanCache(): Map<string, FileScanCacheSlot> {
+function fileScanCache(): Map<string, unknown> {
   fileScanCacheStore.__llvFilesRouteScans ??= new Map();
   return fileScanCacheStore.__llvFilesRouteScans;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function refreshPromise(value: unknown): Promise<FileScanSnapshot> | undefined {
+  if (isRecord(value) && "promise" in value) return refreshPromise(value.promise);
+  if (isRecord(value) && typeof value.then === "function") {
+    return Promise.resolve(value as unknown as PromiseLike<FileScanSnapshot>);
+  }
+  return undefined;
+}
+
+function installFileScanRefresh(slot: FileScanCacheSlot, generation: number, promise: Promise<FileScanSnapshot>): FileScanRefresh {
+  const refresh = { generation, promise };
+  slot.refresh = refresh;
+  const clear = () => {
+    if (slot.refresh === refresh) slot.refresh = undefined;
+  };
+  void promise.then(clear, clear);
+  return refresh;
+}
+
+function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
+  if (
+    isRecord(value)
+    && value.schemaVersion === FILE_SCAN_CACHE_SCHEMA_VERSION
+    && Number.isSafeInteger(value.snapshotGeneration)
+    && Number.isSafeInteger(value.requestedGeneration)
+  ) {
+    return value as FileScanCacheSlot;
+  }
+
+  const legacy = isRecord(value) ? value : {};
+  const slot: FileScanCacheSlot = {
+    schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
+    snapshot: legacy.snapshot as FileScanSnapshot | undefined,
+    snapshotGeneration: 0,
+    requestedGeneration: 0,
+    refreshedAt: typeof legacy.refreshedAt === "number" && Number.isFinite(legacy.refreshedAt) ? legacy.refreshedAt : 0,
+    refreshScheduled: false,
+  };
+  const pending = refreshPromise(legacy.refresh);
+  if (pending) {
+    const promise = pending.then((snapshot) => {
+      slot.snapshot = snapshot;
+      slot.refreshedAt = Date.now();
+      return snapshot;
+    });
+    installFileScanRefresh(slot, 0, promise);
+  }
+  return slot;
+}
+
 function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject: string | undefined, generation: number): FileScanRefresh {
-  let refresh!: FileScanRefresh;
   const promise = listFilesWithProjectCatalog(selectedProject, { persist: false }).then((snapshot) => {
     slot.snapshot = snapshot;
     slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
     return snapshot;
-  }).finally(() => {
-    if (slot.refresh === refresh) slot.refresh = undefined;
   });
-  refresh = { generation, promise };
-  slot.refresh = refresh;
-  return refresh;
+  return installFileScanRefresh(slot, generation, promise);
 }
 
 async function refreshThroughGeneration(
@@ -64,15 +114,22 @@ export async function cachedFileScan(
 ): Promise<CachedFileScan> {
   const key = selectedProject ?? "";
   const cache = fileScanCache();
-  let slot = cache.get(key);
-  if (!slot) {
+  const cachedSlot = cache.get(key);
+  let slot: FileScanCacheSlot;
+  if (cachedSlot === undefined) {
     if (cache.size >= FILE_SCAN_CACHE_MAX_PROJECTS) {
       const oldestKey = cache.keys().next().value;
       if (oldestKey !== undefined) cache.delete(oldestKey);
     }
-    slot = { snapshotGeneration: 0, requestedGeneration: 0, refreshedAt: 0 };
+    slot = {
+      schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
+      snapshotGeneration: 0,
+      requestedGeneration: 0,
+      refreshedAt: 0,
+    };
     cache.set(key, slot);
   } else {
+    slot = normalizeFileScanCacheSlot(cachedSlot);
     cache.delete(key);
     cache.set(key, slot);
   }

@@ -138,6 +138,27 @@ test("a newer revision waits for a follow-up scan when an older scan is in fligh
   expect(scans).toBe(2);
 });
 
+test("a persisted legacy cache slot upgrades before fresh hydration", async () => {
+  const legacySnapshot = {
+    files: [file("/sessions/sentinel-stale.jsonl")],
+    projectCatalog: [],
+  };
+  const cacheStore = globalThis as typeof globalThis & {
+    __llvFilesRouteScans?: Map<string, unknown>;
+  };
+  cacheStore.__llvFilesRouteScans = new Map([["", {
+    snapshot: legacySnapshot,
+    refreshedAt: Date.now(),
+    refresh: Promise.resolve(legacySnapshot),
+  }]]);
+  scannedFiles = [file("/sessions/upgraded-fresh.jsonl")];
+
+  const result = await cachedFileScan(undefined, Date.now(), true);
+
+  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
+  expect(scans).toBe(1);
+});
+
 test("an arbitrary client revision cannot suppress a later revision refresh", async () => {
   scannedFiles = [file("/sessions/untrusted-watermark.jsonl")];
   await GET(new Request("http://127.0.0.1/api/files", {
