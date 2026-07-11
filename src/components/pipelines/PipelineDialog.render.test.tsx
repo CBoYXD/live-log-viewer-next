@@ -114,6 +114,21 @@ test("pipelineValidationError mirrors the API's codex bounds and effort check", 
   expect(ok).toBeNull();
 });
 
+test("pipelineValidationError rejects an unresolved role and unknown role params (AC1)", () => {
+  const base = { task: "t", spec: "", repoDir: "/r", defaultRuntime: FALLBACK };
+  /* A restored draft naming a role the loaded catalog no longer offers would 400
+     with "unknown role" — block it once the catalog is present. */
+  const staleRole = pipelineValidationError(fakeT, { ...base, roles: CATALOG, stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
+  expect(staleRole).toContain("roleUnavailable");
+  /* While the catalog is still loading (empty) the same draft is not false-flagged. */
+  const loading = pipelineValidationError(fakeT, { ...base, roles: [], stages: [stage({ roleId: "ghost" }), stage({ key: "k2" })] });
+  expect(loading).toBeNull();
+  /* A stale param key the role does not declare is rejected like the API does.
+     (architect resolves to Claude/Fable, so the stage engine matches its runtime.) */
+  const staleParam = pipelineValidationError(fakeT, { ...base, roles: CATALOG, stages: [stage({ roleId: "architect", engine: "claude", roleParams: { bogus: "x" } }), stage({ key: "k2" })] });
+  expect(staleParam).toContain("paramUnknown");
+});
+
 test("coerceStage repairs a malformed persisted stage instead of crashing on restore", () => {
   /* A stale draft missing model/roleParams and carrying wrong-typed fields must
      become a well-formed DraftStage, not blow up later on .trim()/property access. */

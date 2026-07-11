@@ -728,6 +728,8 @@ export const en = {
   "pipelineDialog.errors.paramInvalid": "{label} has an invalid value",
   "pipelineDialog.errors.modelEngineMismatch": "pick a model supported by {engine}",
   "pipelineDialog.errors.effortEngineMismatch": "pick an effort supported by {engine}",
+  "pipelineDialog.errors.roleUnavailable": "role \"{role}\" is no longer available — pick another",
+  "pipelineDialog.errors.paramUnknown": "remove the unknown role setting \"{key}\"",
 
   "dash.pipeline": "Pipeline",
   "dash.newPipeline": "New pipeline",

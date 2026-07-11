@@ -186,7 +186,21 @@ export function pipelineValidationError(
        engine doesn't accept (e.g. max on codex) would otherwise 400. */
     const effEffort = stage.effort || (role ? roleRuntime(role, stage.roleParams).effort : "") || defaultRuntime.effort;
     if (effEffort && !isEngineEffort(stage.engine, effEffort)) return t("pipelineDialog.errors.effortEngineMismatch", { engine: stage.engine === "claude" ? "Claude" : "Codex" });
+    if (stage.roleId && !role) {
+      /* A restored draft can carry a roleId (and its params) the current catalog
+         no longer offers; serialization ships them unchanged and the API 400s with
+         "unknown role". Reject once the catalog has loaded — while it is still
+         empty (loading/errored) the picker is unusable anyway, so don't false-flag. */
+      if (roles.length) return t("pipelineDialog.errors.roleUnavailable", { role: stage.roleId });
+      continue;
+    }
     if (!role) continue;
+    /* Reject role params the role does not declare: the API rejects unknown keys,
+       but roleParamError only checks declared params, so a stale key left over
+       from a prior role selection would pass here and 400 there (AC1). */
+    const known = new Set(role.parameters.map((parameter) => parameter.key));
+    const unknown = Object.keys(stage.roleParams).find((key) => !known.has(key));
+    if (unknown) return t("pipelineDialog.errors.paramUnknown", { key: unknown });
     /* Absent/blank params resolve to registry defaults server-side, so — like
        the API — they are not required; only supplied values are checked. */
     for (const parameter of role.parameters) {

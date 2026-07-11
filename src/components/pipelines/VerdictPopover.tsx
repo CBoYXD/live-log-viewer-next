@@ -88,7 +88,10 @@ export function VerdictPopover({
             {verdictStatusLabel(t, verdict.status)}
           </span>
         ) : (
-          <span className="text-[11px] font-semibold text-dim">{pipeline.stateDetail ?? t("pipelineVerdict.noFindings")}</span>
+          /* No verdict: surface the attempt's own error (a spawn/tick failure)
+             first, then the pipeline-level detail, so a verdict-less chip still
+             explains itself. */
+          <span className="text-[11px] font-semibold text-dim">{attempt.error ?? pipeline.stateDetail ?? t("pipelineVerdict.noFindings")}</span>
         )}
         {busy ? <RefreshCw className="ml-auto h-3 w-3 animate-spin text-dim" aria-hidden /> : null}
       </div>

@@ -152,6 +152,12 @@ function StageChip({
     else onOpenPath?.(openTarget.path);
   };
   const chipRef = useRef<HTMLSpanElement>(null);
+  /* The verdict popover also carries verdict-less evidence: a spawn/tick error
+     and, when the pipeline is parked here, inline Retry/Skip. So the trigger
+     appears for a verdict OR an errored/parked attempt — otherwise a failed
+     stage with no parsed verdict would have no way to surface its detail. */
+  const parkedHere = pipeline.state === "needs_decision" && pipeline.cursor?.stageId === stage.id;
+  const evidence = attempt ? (attempt.verdict ? "verdict" : attempt.error || parkedHere ? "issue" : null) : null;
 
   return (
     <span ref={chipRef} className="relative flex shrink-0 items-center gap-1.5">
@@ -161,7 +167,7 @@ function StageChip({
           type="button"
           disabled={!canOpen}
           onClick={openStage}
-          className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-l-full ${attempt?.verdict ? "" : "rounded-r-full"} px-2 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
+          className={`inline-flex h-6 max-w-[180px] items-center gap-1 truncate rounded-l-full ${evidence ? "" : "rounded-r-full"} px-2 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${pulse ? "animate-pulse" : ""}`}
           style={{ backgroundColor: tone.soft, color: tone.color }}
           title={title}
           aria-label={t("pipelineStrip.chipAria", { label, state: chipState })}
@@ -172,7 +178,7 @@ function StageChip({
           {round > 0 ? <span aria-hidden>{t("pipelineStrip.roundShort", { n: round })}</span> : null}
           {attemptCount > 1 ? <span aria-hidden>{t("pipelineStrip.attemptSuffix", { n: attemptCount })}</span> : null}
         </button>
-        {attempt?.verdict ? (
+        {evidence ? (
           <button
             type="button"
             onClick={onToggleVerdict}
@@ -181,7 +187,7 @@ function StageChip({
             className="inline-flex h-6 items-center rounded-r-full border-l border-panel/60 px-1 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             style={{ backgroundColor: tone.soft, color: tone.color }}
           >
-            <span aria-hidden>{attempt.verdict.status === "pass" ? "✓" : attempt.verdict.status === "fail" ? "✕" : "●"}</span>
+            <span aria-hidden>{attempt!.verdict ? (attempt!.verdict.status === "pass" ? "✓" : attempt!.verdict.status === "fail" ? "✕" : "●") : "!"}</span>
           </button>
         ) : null}
       </span>
@@ -231,7 +237,21 @@ export function PipelineStrip({
       className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-panel/95 py-1 shadow-[0_2px_10px_rgb(20_20_30/0.08)] ${compact ? "px-2.5" : "px-4"} ${attention ? "border-[#e0ae45]/70" : "border-line"}`}
     >
       <span className="flex min-w-0 max-w-[42%] shrink-0 items-center gap-2">
-        <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${pipeline.state === "needs_decision" ? "bg-err" : PIPELINE_BUSY_STATES.has(pipeline.state) ? "animate-pulse bg-ok" : pipeline.state === "completed" ? "bg-ok" : "bg-[#9a9aa4]"}`} aria-hidden />
+        {/* Tone matrix (§3), matching the hub + rail: busy → accent (pulse),
+            needs_decision + paused → amber, completed → ok, else neutral. Red is
+            reserved for chip/verdict failures, so the strip never conflicts. */}
+        <span
+          className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+            PIPELINE_BUSY_STATES.has(pipeline.state)
+              ? "animate-pulse bg-accent"
+              : PIPELINE_ATTENTION_STATES.has(pipeline.state)
+                ? "bg-[#e0ae45]"
+                : pipeline.state === "completed"
+                  ? "bg-ok"
+                  : "bg-[#9a9aa4]"
+          }`}
+          aria-hidden
+        />
         {compact ? null : <span className="shrink-0 text-[10.5px] font-bold tracking-[0.08em] text-dim">{t("pipelineStrip.pipeline")}</span>}
         <span className="min-w-0 truncate text-[12px] font-bold" title={pipeline.task}>{pipeline.task}</span>
         <span className="shrink-0 text-[11.5px] font-semibold text-dim">{pipelineStateLabel(t, pipeline.state)}</span>

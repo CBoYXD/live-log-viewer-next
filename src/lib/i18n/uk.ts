@@ -701,6 +701,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineDialog.errors.paramInvalid": "{label} має недопустиме значення",
   "pipelineDialog.errors.modelEngineMismatch": "виберіть модель, сумісну з {engine}",
   "pipelineDialog.errors.effortEngineMismatch": "виберіть зусилля, сумісне з {engine}",
+  "pipelineDialog.errors.roleUnavailable": "роль «{role}» більше недоступна — виберіть іншу",
+  "pipelineDialog.errors.paramUnknown": "приберіть невідоме налаштування ролі «{key}»",
 
   "dash.pipeline": "Пайплайн",
   "dash.newPipeline": "Новий пайплайн",
