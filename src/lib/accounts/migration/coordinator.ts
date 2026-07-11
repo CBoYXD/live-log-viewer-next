@@ -304,6 +304,7 @@ export async function advanceConversationMigration(
   let migration = conversation.migration;
   if (migration.phase === "waiting-turn") {
     if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return conversation;
+    if (registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain")) return conversation;
     conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["waiting-turn"], { phase: "requested" });
     migration = conversation.migration!;
   }

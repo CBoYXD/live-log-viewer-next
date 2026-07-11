@@ -87,18 +87,20 @@ export async function DELETE(req: NextRequest) {
     ...accountRemovalBlockers("claude", account.id),
     ...(login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase) ? ["login_pending"] : []),
   ];
-  if (blockers.length && body.force !== true) {
-    return NextResponse.json({ error: "Claude account has active sessions or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
+  if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
+    return NextResponse.json({ error: "Claude account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
   }
-  const wasActive = agentRegistry().engineRouting("claude").activeAccountId === account.id;
+  const registry = agentRegistry();
+  const beforeRetirement = registry.snapshot();
   try {
     if (login && LIVE_CLAUDE_LOGIN_PHASES.has(login.phase)) await claudeLoginSupervisor.cancel(login.operationId);
-    agentRegistry().retireAccount("claude", account.id, "default");
+    registry.retireAccount("claude", account.id, "default");
+    const retired = registry.snapshot();
     try {
       removeManagedClaudeAccount(account.id);
       requestAccountMigrationTick();
     } catch (error) {
-      if (wasActive) agentRegistry().setEngineRouting("claude", account.id);
+      registry.restoreSnapshot(retired, beforeRetirement);
       throw error;
     }
     return NextResponse.json({ removed: { id: account.id } });

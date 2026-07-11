@@ -23,7 +23,7 @@ const CONTROLLER_INTERVAL_MS = 10_000;
 
 const deliveryPort: HeldDeliveryPort = {
   async deliver({ delivery, path, clientMessageId }) {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId });
+    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
     return migrationDeliveryOutcome(result);
   },
 };

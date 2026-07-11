@@ -7,8 +7,8 @@ import { deliverConversationMessage, migrationDeliveryOutcome } from "@/lib/deli
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 
 const deliveryPort = {
-  async deliver({ delivery, path, clientMessageId }: { delivery: { text: string }; path: string; clientMessageId: string }) {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId });
+  async deliver({ delivery, path, clientMessageId }: { delivery: { id: string; text: string }; path: string; clientMessageId: string }) {
+    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
     return migrationDeliveryOutcome(result);
   },
 };

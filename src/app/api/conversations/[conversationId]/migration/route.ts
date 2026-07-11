@@ -11,8 +11,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const deliveryPort = {
-  async deliver({ delivery, path, clientMessageId }: { delivery: { text: string }; path: string; clientMessageId: string }) {
-    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId });
+  async deliver({ delivery, path, clientMessageId }: { delivery: { id: string; text: string }; path: string; clientMessageId: string }) {
+    const result = await deliverConversationMessage({ pid: null, path, text: delivery.text, images: [], clientMessageId, reservedDeliveryId: delivery.id });
     return migrationDeliveryOutcome(result);
   },
 };

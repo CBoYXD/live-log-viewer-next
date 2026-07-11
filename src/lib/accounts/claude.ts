@@ -184,8 +184,18 @@ export function removeManagedClaudeAccount(id: string): void {
     const home = managedHome(id);
     const exists = fs.existsSync(home);
     if (exists && !managedClaudeHomeIsSafe(id, true)) throw new UnsafeClaudeHomeError();
-    if (exists) fs.rmSync(home, { recursive: true, force: true });
-    write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
+    const quarantine = `${home}.removing.${process.pid}.${Date.now()}`;
+    if (exists) fs.renameSync(home, quarantine);
+    let registryWritten = false;
+    try {
+      write({ ...registry, active: registry.active === id ? DEFAULT_ID : registry.active, accounts: registry.accounts.filter((item) => item.id !== id) });
+      registryWritten = true;
+      if (exists) fs.rmSync(quarantine, { recursive: true, force: true });
+    } catch (error) {
+      if (exists && fs.existsSync(quarantine) && !fs.existsSync(home)) fs.renameSync(quarantine, home);
+      if (registryWritten) write(registry);
+      throw error;
+    }
   });
 }
 

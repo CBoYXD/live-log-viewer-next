@@ -200,6 +200,9 @@ function migrationReadiness(
   conversation: RegistryConversation,
 ): "idle" | "busy" | "deferred" {
   if (conversation.turn.state === "busy" || conversation.turn.state === "unknown") return "busy";
+  const deliveryInFlight = Object.values(file.heldDeliveries).some((delivery) =>
+    delivery.conversationId === conversation.id && delivery.state === "delivery-uncertain");
+  if (deliveryInFlight) return "busy";
   if (conversation.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) return "idle";
   const sourcePath = conversation.generations.at(-1)?.path;
   const hasActiveHost = sourcePath !== undefined && Object.values(file.entries).some((entry) =>
@@ -1242,6 +1245,9 @@ export class AgentRegistry {
 
   retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
     this.mutate((file) => {
+      const currentConversation = Object.values(file.conversations).find((conversation) =>
+        conversation.engine === engine && conversation.generations.at(-1)?.accountId === accountId);
+      if (currentConversation) throw new Error("account has current conversations");
       const changedAt = now();
       const route = file.engineRouting[engine];
       if (route.activeAccountId === accountId) {
@@ -1615,6 +1621,8 @@ export class AgentRegistry {
         delivery.assignedAt = committedAt;
         delivery.error = null;
       }
+      file.conversationRevision[conversation.engine] += 1;
+      file.engineRouting[conversation.engine].revision += 1;
       return clone(conversation);
     });
   }
@@ -1738,7 +1746,31 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
-      if (existing) return clone(existing);
+      const conversation = file.conversations[canonicalId];
+      const migrationBlocksDelivery = conversation?.migration
+        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+      const current = conversation?.generations.at(-1);
+      const place = (delivery: HeldDelivery): HeldDelivery => {
+        if (delivery.state === "delivered" || delivery.state === "delivery-uncertain") return clone(delivery);
+        delivery.deliveredAt = null;
+        delivery.error = null;
+        if (migrationBlocksDelivery) {
+          delivery.state = "held";
+          delivery.generationId = null;
+          delivery.assignedAt = null;
+        } else if (current) {
+          delivery.state = "assigned";
+          delivery.generationId = current.id;
+          delivery.assignedAt = now();
+        } else {
+          delivery.state = "failed";
+          delivery.generationId = null;
+          delivery.assignedAt = null;
+          delivery.error = "delivery target is unavailable and remains recoverable";
+        }
+        return clone(delivery);
+      };
+      if (existing) return place(existing);
       const held: HeldDelivery = {
         id: crypto.randomUUID(),
         conversationId: canonicalId,
@@ -1755,7 +1787,7 @@ export class AgentRegistry {
       const count = Object.values(file.heldDeliveries).filter((item) => item.conversationId === canonicalId && item.state !== "delivered").length;
       if (count >= 100) throw new Error("held delivery limit reached for conversation");
       file.heldDeliveries[held.id] = held;
-      return clone(held);
+      return place(held);
     });
   }
 
@@ -1791,10 +1823,21 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
       if (!delivery || delivery.state !== "assigned" || delivery.generationId !== generationId) return null;
+      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const migrationBlocksDelivery = conversation?.migration
+        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+      if (migrationBlocksDelivery || conversation?.generations.at(-1)?.id !== generationId) return null;
       delivery.state = "delivery-uncertain";
       delivery.attempts += 1;
       delivery.error = "delivery started; recovery requires an explicit outcome";
       return clone(delivery);
+    });
+  }
+
+  restoreSnapshot(expectedCurrent: RegistryFile, replacement: RegistryFile): void {
+    this.mutate((file) => {
+      if (JSON.stringify(file) !== JSON.stringify(expectedCurrent)) throw new Error("agent registry changed during account retirement");
+      Object.assign(file, clone(replacement));
     });
   }
 
@@ -1814,6 +1857,10 @@ export class AgentRegistry {
     });
   }
 
+  discardDelivery(id: string): void {
+    this.mutate((file) => { delete file.heldDeliveries[id]; });
+  }
+
   requeueHeldDelivery(id: string): HeldDelivery {
     return this.mutate((file) => {
       const delivery = file.heldDeliveries[id];
@@ -1821,7 +1868,7 @@ export class AgentRegistry {
       if (delivery.state === "delivered") return clone(delivery);
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
       const migrationBlocksDelivery = conversation?.migration
-        && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
+        && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       if (migrationBlocksDelivery) {
         delivery.state = "held";
         delivery.generationId = null;

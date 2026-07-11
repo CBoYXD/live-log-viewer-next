@@ -70,19 +70,21 @@ export async function DELETE(req: NextRequest) {
     ...accountRemovalBlockers("codex", account.id),
     ...(login.attemptState === "pending" || account.loginPane !== null ? ["login_pending"] : []),
   ];
-  if (blockers.length && body.force !== true) {
-    return NextResponse.json({ error: "Codex account has active sessions or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
+  if (blockers.includes("current_conversations") || blockers.length && body.force !== true) {
+    return NextResponse.json({ error: "Codex account has active sessions, conversations, or sign-in", code: "account_removal_blocked", blockers }, { status: 409 });
   }
-  const wasActive = agentRegistry().engineRouting("codex").activeAccountId === account.id;
+  const registry = agentRegistry();
+  const beforeRetirement = registry.snapshot();
   try {
     if (login.attemptState === "pending") await managedCodexRuntime().cancelLogin(account.id);
     if (account.loginPane !== null) setCodexAccountLoginPane(account.id, null);
-    agentRegistry().retireAccount("codex", account.id, "default");
+    registry.retireAccount("codex", account.id, "default");
+    const retired = registry.snapshot();
     try {
       removeManagedCodexAccount(account.id);
       requestAccountMigrationTick();
     } catch (error) {
-      if (wasActive) agentRegistry().setEngineRouting("codex", account.id);
+      registry.restoreSnapshot(retired, beforeRetirement);
       throw error;
     }
     return NextResponse.json({ removed: { id: account.id } });

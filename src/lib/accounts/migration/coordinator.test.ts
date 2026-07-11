@@ -1193,7 +1193,7 @@ describe("durable account migration coordinator", () => {
       },
     }, store);
 
-    expect(store.conversation(conversation.id)?.migration).toMatchObject({ targetId: "c", phase: "requested" });
+    expect(store.conversation(conversation.id)?.migration).toMatchObject({ targetId: "c", phase: "waiting-turn" });
     expect(store.pendingDeliveries(conversation.id)).toMatchObject([{
       clientMessageId: "delivery-retarget",
       state: "held",
@@ -1508,6 +1508,144 @@ describe("durable account migration coordinator", () => {
       expect(delivered).toEqual([`continue-${engine}`]);
       expect(restarted.pendingDeliveries(conversation.id)).toEqual([]);
     }
+  });
+
+  test("terminal migration races assign late accepted input to the current generation", async () => {
+    for (const terminal of ["stop", "commit"] as const) {
+      const store = registry();
+      const sourcePath = `/late-${terminal}.jsonl`;
+      store.reconcileConversations([observation(sourcePath, "a", "idle")]);
+      const conversation = store.conversationForPath(sourcePath)!;
+      const intent = store.commitMigrationIntent({
+        engine: "codex",
+        targetId: "b",
+        origin: "manual",
+        requestId: `late-${terminal}`,
+        expectedRevision: store.engineRouting("codex").revision,
+        scope: "all",
+      });
+      const revision = store.conversation(conversation.id)!.migration!.revision;
+      if (terminal === "stop") {
+        store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+      } else {
+        store.transitionConversationMigration(conversation.id, revision, ["requested"], { phase: "preparing" });
+        store.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
+        store.transitionConversationMigration(conversation.id, revision, ["successor-starting"], {
+          phase: "verifying",
+          providerReceipt: {
+            operationId: store.conversation(conversation.id)!.migration!.operationId,
+            nativeId: "late-successor",
+            path: "/late-successor.jsonl",
+            continuityPaths: [],
+            historyHash: "late",
+            host: { kind: "codex-app-server", identity: "late", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+          },
+        });
+        store.commitSuccessor(conversation.id, {
+          id: "late-successor",
+          path: "/late-successor.jsonl",
+          accountId: "b",
+        }, revision);
+      }
+
+      const queued = store.holdDelivery(conversation.id, `late-${terminal}`, `late-${terminal}`);
+      const current = store.conversation(conversation.id)!.generations.at(-1)!;
+      expect(queued).toMatchObject({ state: "assigned", generationId: current.id });
+      const delivered: string[] = [];
+      await drainHeldDeliveries(conversation.id, {
+        async deliver({ delivery }) { delivered.push(delivery.text); return "delivered"; },
+      }, store);
+      expect(delivered).toEqual([`late-${terminal}`]);
+    }
+  });
+
+  test("a migration that wins before delivery actuation fences the predecessor", () => {
+    const store = registry();
+    store.reconcileConversations([observation("/delivery-race.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/delivery-race.jsonl")!;
+    const queued = store.holdDelivery(conversation.id, "race", "delivery-race");
+    expect(queued.state).toBe("assigned");
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "migration-wins",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+
+    expect(store.beginDeliveryAttempt(queued.id, queued.generationId!)).toBeNull();
+    expect(store.requeueHeldDelivery(queued.id)).toMatchObject({ state: "held", generationId: null });
+  });
+
+  test("a delivery attempt that wins first keeps migration waiting until its outcome is durable", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/delivery-first.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/delivery-first.jsonl")!;
+    const queued = store.holdDelivery(conversation.id, "delivery first", "delivery-first");
+    expect(store.beginDeliveryAttempt(queued.id, queued.generationId!)).toMatchObject({ state: "delivery-uncertain" });
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "migration-second",
+      expectedRevision: store.engineRouting("codex").revision,
+      scope: "all",
+    });
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("waiting-turn");
+    const counts = { create: 0, verify: 0 };
+
+    await advanceConversationMigration(conversation.id, store, provider(["/after-delivery.jsonl"], counts));
+    expect(counts.create).toBe(0);
+    store.recordDeliveryOutcome(queued.id, "delivered");
+    await advanceConversationMigration(conversation.id, store, provider(["/after-delivery.jsonl"], counts));
+    expect(counts.create).toBe(1);
+    expect(store.conversation(conversation.id)?.migration?.phase).toBe("committed");
+  });
+
+  test("successor commit invalidates migration previews while exact replay stays stable", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/preview-source.jsonl", "default", "idle")]);
+    const conversation = store.conversationForPath("/preview-source.jsonl")!;
+    const preview = await previewMigration("codex", "default", store);
+    store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "b",
+      origin: "manual",
+      requestId: "preview-successor",
+      expectedRevision: preview.previewRevision,
+      scope: "all",
+    });
+    const revision = store.conversation(conversation.id)!.migration!.revision;
+    store.transitionConversationMigration(conversation.id, revision, ["requested"], { phase: "preparing" });
+    store.transitionConversationMigration(conversation.id, revision, ["preparing"], { phase: "successor-starting" });
+    store.transitionConversationMigration(conversation.id, revision, ["successor-starting"], {
+      phase: "verifying",
+      providerReceipt: {
+        operationId: store.conversation(conversation.id)!.migration!.operationId,
+        nativeId: "preview-successor",
+        path: "/preview-successor.jsonl",
+        continuityPaths: [],
+        historyHash: "preview",
+        host: { kind: "codex-app-server", identity: "preview", epoch: 1, verifiedAt: "2026-07-10T12:01:00.000Z" },
+      },
+    });
+    const beforeCommit = store.engineRouting("codex").revision;
+    const successor = { id: "preview-successor", path: "/preview-successor.jsonl", accountId: "b" };
+    store.commitSuccessor(conversation.id, successor, revision);
+    const afterCommit = store.engineRouting("codex").revision;
+
+    expect(afterCommit).toBe(beforeCommit + 1);
+    expect(() => store.commitMigrationIntent({
+      engine: "codex",
+      targetId: "default",
+      origin: "manual",
+      requestId: "stale-preview-after-successor",
+      expectedRevision: preview.previewRevision,
+      scope: "all",
+    })).toThrow(MigrationRevisionError);
+    store.commitSuccessor(conversation.id, successor, revision);
+    expect(store.engineRouting("codex").revision).toBe(afterCommit);
   });
 
   test("a return-to-source retarget cleans a stale successor after clearing migration state", async () => {
