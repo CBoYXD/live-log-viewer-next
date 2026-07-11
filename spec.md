@@ -1,44 +1,40 @@
-# Issue #60 — durable board closes
+# Issue #40 — in-UI multi-account switching
 
 ## Task statement
 
-Fix closed scheme cards resurfacing after reload. The server must preserve close
-tombstones across concurrent board writers and carry them across transcript
-succession paths, including clients that retry a stale whole-list `hidden` patch
-or omit a `remap-paths` mutation.
+Provide one shared account panel for Claude and Codex that lists stored accounts,
+shows authentication and quota state, supports direct active-account selection,
+and exposes add-account and quick-login flows with clear operation progress.
+Account selection updates the engine routing used by future launches while every
+existing pane, conversation generation, transcript path, migration intent, and
+held delivery retains its current ownership and content.
 
 ## Acceptance criteria
 
-- AC1: A legacy whole-list board PATCH retried with a current revision cannot
-  erase hidden entries committed by another writer.
-- AC2: Legacy board PATCH requests remain schema-compatible, and revision-zero
-  preference seeding continues to work.
-- AC3: Hidden tombstones take precedence over stale manual and expanded
-  membership supplied by whole-list clients.
-- AC4: Server-side board mutations derive aliases from durable conversation
-  generations and continuity paths.
-- AC5: A closed predecessor remains hidden when its successor appears and root
-  reconciliation arrives without a client-provided remap.
-- AC6: Root reconciliation preserves hidden entries when conversation identity
-  remains stable.
-- AC7: Regression tests reproduce the concurrent stale-list retry and the
-  successor-without-remap scenarios through the board route.
-- AC8: A malformed or unreadable conversation registry leaves validated board
-  mutations available and skips alias enrichment for that request.
-- AC9: Pending continuity paths cannot create aliases from a future successor
-  back to the current predecessor during initial or repeated migrations;
-  committed continuity paths keep carrying tombstones during later migrations.
-- AC10: Scanner discovery, observed spawn settlement, provider persistence, and
-  explicit continuity callbacks all record pending succession provenance.
-- AC11: Return-to-source routing and target retirement preserve an abandoned
-  successor fence after clearing the active migration.
-- AC12: A table-driven route regression covers commit, return-to-source,
-  target retirement, chained succession, deferred board repair, and queued
-  cleanup receipts across close-before/during/after timing and alias
-  enrichment, root reconciliation, and client remap mutations.
-- AC13: Fenced successor paths can trigger committed alias repair while
-  remaining ineligible for root reconciliation and client remaps.
-- AC14: `bun test` passes.
-- AC15: `bunx tsc --noEmit` passes.
-- AC16: The live board state and production Viewer on port 8898 remain
-  unchanged during implementation and verification.
+- AC1: The Accounts panel lists Claude and Codex accounts with labels,
+  authentication state, active state, and available quota capacity.
+- AC2: Selecting an account updates the engine routing and compatibility account
+  catalog through the existing active-account endpoint.
+- AC3: Account selection leaves conversation records, transcript files,
+  migration intents, held deliveries, and running panes unchanged.
+- AC4: Active-account endpoints reject legacy preview and transcript-migration
+  selection modes.
+- AC5: Future launches resolve the newly selected account through the shared
+  account manager.
+- AC6: Add-account and quick-login entry points remain available for both
+  engines, including Codex device authorization and Claude browser/code login.
+- AC7: Authentication, add, switch, login, removal, refresh, failure, retry, and
+  empty/loading states remain visible and actionable in the panel.
+- AC8: Account mutations are serialized, account selection is optimistic, and a
+  failed selection restores the prior active account before offering retry.
+- AC9: Quota polling records fresh per-account observations without changing
+  engine routing or creating transcript-migration intents.
+- AC10: English and Ukrainian account-panel copy describes direct routing and
+  operation progress.
+- AC11: Regression tests cover route-only selection for both engines and assert
+  unchanged conversations, migration intents, held deliveries, and transcript
+  ownership.
+- AC12: `bun test` passes.
+- AC13: `bunx tsc --noEmit` completes without diagnostics.
+- AC14: Verification uses unit and integration tests only; the live Viewer on
+  port 8898 receives no account switch or login requests.
