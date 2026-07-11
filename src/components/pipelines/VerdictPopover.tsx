@@ -22,6 +22,7 @@ export function VerdictPopover({
   stage,
   attempt,
   canOpenFlow = true,
+  canOpenPath = true,
   onClose,
   onOpenPath,
   onOpenFlow,
@@ -32,6 +33,9 @@ export function VerdictPopover({
   /** Whether the embedded flow still has a board deck; a closed/missing flow
       hides "Open review" so it never routes to an absent entry (default true). */
   canOpenFlow?: boolean;
+  /** Whether the run transcript is still in the scan; a vanished path hides
+      "Open transcript" so it never no-ops on a missing file (default true). */
+  canOpenPath?: boolean;
   onClose: () => void;
   onOpenPath?: (path: string) => void;
   onOpenFlow?: (flowId: string) => void;
@@ -148,7 +152,7 @@ export function VerdictPopover({
         {/* A review-loop's agentPath is the reviewer transcript the board folds
             into the round deck — opening it reveals nothing, so offer only the
             flow route below. A run stage opens its own node here (#93 §2.2). */}
-        {stage.kind !== "review-loop" && attempt.agentPath && onOpenPath ? (
+        {stage.kind !== "review-loop" && attempt.agentPath && onOpenPath && canOpenPath ? (
           <button type="button" className="rounded-full border border-line bg-bg px-2.5 py-1 text-[10px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40" onClick={() => onOpenPath(attempt.agentPath!)}>
             {t("pipelineVerdict.openTranscript")}
           </button>

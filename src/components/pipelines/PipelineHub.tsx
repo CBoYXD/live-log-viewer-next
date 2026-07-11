@@ -43,6 +43,10 @@ export function PipelineHub({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const wasOpen = useRef(false);
+  /* Set when the popover closes because focus was intentionally moved elsewhere
+     (e.g. "open dashboard strip"); the close effect then skips restoring focus to
+     the hub trigger, so keyboard focus actually lands on the transfer target. */
+  const focusTransferred = useRef(false);
 
   /* Focus enters the control popover on open and returns to the hub chip when it
      closes (Escape, close action, or toggle), matching the verdict popover. The
@@ -52,7 +56,8 @@ export function PipelineHub({
       popoverRef.current?.focus();
       wasOpen.current = true;
     } else if (wasOpen.current) {
-      triggerRef.current?.focus();
+      if (!focusTransferred.current) triggerRef.current?.focus();
+      focusTransferred.current = false;
       wasOpen.current = false;
     }
   }, [open]);
@@ -75,6 +80,9 @@ export function PipelineHub({
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.focus({ preventScroll: true });
+    /* Focus now lives on the strip; suppress the close effect's trigger restore so
+       it isn't yanked back to the hub. */
+    focusTransferred.current = true;
     setOpen(false);
   };
 

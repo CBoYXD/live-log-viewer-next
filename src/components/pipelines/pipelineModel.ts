@@ -188,13 +188,16 @@ export function renderableFlowIds(flows: Flow[]): Set<string> {
  * foldClaimedReviewers removes that transcript from the board and folds it into
  * the flow's round deck — so opening the raw path reveals nothing. Route those
  * to the embedded flow (deck + round focus) instead; a plain run stage opens its
- * own node by path. `renderableFlows`, when supplied, disables the flow target
- * for a closed/missing flow that has no deck to reveal.
+ * own node by path. `renderableFlows` disables the flow target for a
+ * closed/missing flow, and `renderablePaths` disables the run target for a
+ * transcript that is no longer in the scanned file set — either way the action
+ * is disabled rather than silently doing nothing (AC4).
  */
 export function stageOpenTarget(
   stage: PipelineStage,
   attempt: PipelineStageAttempt | null,
   renderableFlows?: ReadonlySet<string>,
+  renderablePaths?: ReadonlySet<string>,
 ): { kind: "flow"; flowId: string } | { kind: "path"; path: string } | null {
   if (!attempt) return null;
   /* A review-loop stage's agentPath is always the reviewer transcript the board
@@ -205,8 +208,11 @@ export function stageOpenTarget(
     if (renderableFlows && !renderableFlows.has(attempt.flowId)) return null;
     return { kind: "flow", flowId: attempt.flowId };
   }
-  if (attempt.agentPath) return { kind: "path", path: attempt.agentPath };
-  return null;
+  if (!attempt.agentPath) return null;
+  /* A run transcript that has vanished from the scan can't be revealed, so the
+     chip/Open-transcript is disabled instead of no-opping on a missing file. */
+  if (renderablePaths && !renderablePaths.has(attempt.agentPath)) return null;
+  return { kind: "path", path: attempt.agentPath };
 }
 
 /**

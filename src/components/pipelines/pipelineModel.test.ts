@@ -288,6 +288,16 @@ describe("stageOpenTarget (reviewer paths route to the flow, not the folded node
     /* A run stage is unaffected by the flow set. */
     expect(stageOpenTarget(runStage, attempt({ agentPath: "/build" }), renderable)).toEqual({ kind: "path", path: "/build" });
   });
+
+  test("a run stage whose transcript left the scan has no open target (AC4)", () => {
+    /* renderablePaths gates run targets: a present path opens, a vanished one
+       disables the action rather than no-opping on a missing file. */
+    const present = new Set<string>(["/build"]);
+    expect(stageOpenTarget(runStage, attempt({ agentPath: "/build" }), undefined, present)).toEqual({ kind: "path", path: "/build" });
+    expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }), undefined, present)).toBeNull();
+    /* Without the set (no gating) the path opens as before. */
+    expect(stageOpenTarget(runStage, attempt({ agentPath: "/gone" }))).toEqual({ kind: "path", path: "/gone" });
+  });
 });
 
 describe("stageHasEvidence (running attempts have no verdict sheet)", () => {

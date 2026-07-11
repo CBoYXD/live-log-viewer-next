@@ -229,6 +229,9 @@ export function ProjectDashboard({
   }, [expandedFlowConversations, prefs.expanded]);
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
   const projectPipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
+  /* Stage actions that route to a transcript are disabled once it leaves the
+     scan, so gate them on the current file paths (AC4). */
+  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
     () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedConversations }),
@@ -680,7 +683,7 @@ export function ProjectDashboard({
         <div className="flex shrink-0 flex-col gap-1.5 border-b border-line bg-[#fbfbfd] px-3 py-1.5">
           {projectPipelines.map((pipeline) => (
             <div key={pipeline.id} id={pipelineStripDomId(pipeline.id)} tabIndex={-1} className="scroll-mt-2 rounded-[14px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50">
-              <PipelineStrip pipeline={pipeline} flows={flows} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
+              <PipelineStrip pipeline={pipeline} flows={flows} renderablePaths={renderablePaths} onOpenPath={openPipelinePath} onOpenFlow={openPipelineFlow} />
             </div>
           ))}
           {projectWorkflows.map((wf) => (

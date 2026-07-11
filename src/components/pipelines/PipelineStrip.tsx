@@ -124,6 +124,7 @@ function StageChip({
   index,
   flows,
   renderableFlows,
+  renderablePaths,
   open,
   onToggleVerdict,
   onCloseVerdict,
@@ -136,6 +137,8 @@ function StageChip({
   flows: Flow[];
   /** Ids of flows that still have a board deck; gates review-loop actions. */
   renderableFlows: ReadonlySet<string>;
+  /** Transcript paths still in the scan; gates run-stage actions. */
+  renderablePaths?: ReadonlySet<string>;
   open: boolean;
   onToggleVerdict: () => void;
   onCloseVerdict: () => void;
@@ -157,9 +160,10 @@ function StageChip({
   const chipState = t(`pipelineChipState.${state}`);
   const title = [stage.role?.roleId ?? stage.id, t(access === "read-only" ? "pipelineStrip.readOnly" : "pipelineStrip.readWrite"), attempt?.sessionId].filter(Boolean).join(" · ");
   /* Review-loop chips open their flow's round deck, not the reviewer transcript
-     path (which the board folds away); a closed/missing flow has no deck, so
-     renderableFlows disables the action rather than dead-ending (#93 §2.2). */
-  const openTarget = stageOpenTarget(stage, attempt, renderableFlows);
+     path (which the board folds away); a closed/missing flow has no deck and a
+     vanished run transcript is not in the scan, so renderableFlows/renderablePaths
+     disable the action rather than dead-ending (#93 §2.2, AC4). */
+  const openTarget = stageOpenTarget(stage, attempt, renderableFlows, renderablePaths);
   const canOpen = openTarget ? (openTarget.kind === "flow" ? Boolean(onOpenFlow) : Boolean(onOpenPath)) : false;
   const openStage = () => {
     if (!openTarget) return;
@@ -171,8 +175,9 @@ function StageChip({
      or parked Retry/Skip), but a plain running attempt has none — the shared
      predicate keeps the trigger from opening a misleading "no findings" sheet. */
   const evidence = stageHasEvidence(pipeline, stage, attempt);
-  /* Only offer the popover's "Open review" for a flow that still has a deck. */
+  /* Only offer the popover's open actions for targets the board can still reveal. */
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
+  const canOpenPath = Boolean(attempt?.agentPath && (!renderablePaths || renderablePaths.has(attempt.agentPath)));
 
   return (
     <span ref={chipRef} className="relative flex shrink-0 items-center gap-1.5">
@@ -208,7 +213,7 @@ function StageChip({
       </span>
       {open && attempt ? (
         <AnchoredVerdict anchorRef={chipRef}>
-          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} canOpenFlow={canOpenFlow} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+          <VerdictPopover pipeline={pipeline} stage={stage} attempt={attempt} canOpenFlow={canOpenFlow} canOpenPath={canOpenPath} onClose={onCloseVerdict} onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
         </AnchoredVerdict>
       ) : null}
     </span>
@@ -218,12 +223,16 @@ function StageChip({
 export function PipelineStrip({
   pipeline,
   flows = [],
+  renderablePaths,
   compact = false,
   onOpenPath,
   onOpenFlow,
 }: {
   pipeline: Pipeline;
   flows?: Flow[];
+  /** Transcript paths currently in the scan; a run chip / "open transcript" is
+      disabled for an attempt whose path is absent (AC4). Omitted → no gating. */
+  renderablePaths?: ReadonlySet<string>;
   /** Board variant (§2.2): trimmed to node width — drops the "PIPELINE" kicker
       and tightens padding so the chips + controls fit over a single node. */
   compact?: boolean;
@@ -282,6 +291,7 @@ export function PipelineStrip({
             index={index}
             flows={flows}
             renderableFlows={renderableFlows}
+            renderablePaths={renderablePaths}
             open={openVerdict === stage.id}
             onToggleVerdict={() => setOpenVerdict((prev) => (prev === stage.id ? null : stage.id))}
             onCloseVerdict={() => setOpenVerdict(null)}

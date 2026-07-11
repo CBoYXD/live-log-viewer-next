@@ -517,6 +517,7 @@ function NodeShell({
   flow,
   pipeline,
   flows,
+  renderablePaths,
   canFlow,
   canPipeline,
   onSelect,
@@ -543,6 +544,8 @@ function NodeShell({
   pipeline: Pipeline | null;
   /** All flows, for the strip's review-loop round counters + open-review. */
   flows: Flow[];
+  /** Transcript paths still in the scan; gates the strip's run-stage actions. */
+  renderablePaths: ReadonlySet<string>;
   /** This node may host a new flow (root claude/codex conversation without one). */
   canFlow: boolean;
   /** This conversation may seed a pipeline — broader than canFlow: children and
@@ -594,7 +597,7 @@ function NodeShell({
           the slot to FlowStrip, so the two never coexist here). */}
       {boardStrip ? (
         <div className="absolute -top-[60px] left-0 z-[5]" style={{ width: node.w }}>
-          <PipelineStrip pipeline={boardStrip} flows={flows} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
+          <PipelineStrip pipeline={boardStrip} flows={flows} renderablePaths={renderablePaths} compact onOpenPath={onOpenPath} onOpenFlow={onOpenFlow} />
         </div>
       ) : null}
       {/* Flow + pipeline entry buttons. The pipeline button is decoupled from
@@ -838,6 +841,9 @@ export const NodesLayer = memo(function NodesLayer({
     const file = files.find((entry) => entry.path === path);
     if (file) onSelect(file);
   };
+  /* Paths still in the scan; a run stage action is disabled once its transcript
+     leaves the file set (AC4). */
+  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   /* A review-loop stage's reviewer transcript is folded into the flow's round
      deck, so focus the deck's latest round (revealing that reviewer) rather than
      the removed node — the same round-focus channel FlowStrip drives (#93 §2.2). */
@@ -915,6 +921,7 @@ export const NodesLayer = memo(function NodesLayer({
             flow={flowsByImpl.get(node.file.path) ?? null}
             pipeline={pipelineStrips.get(node.file.path) ?? null}
             flows={flows}
+            renderablePaths={renderablePaths}
             canFlow={canStartFlow(node.file, flowsByImpl)}
             canPipeline={canSourcePipeline(node.file)}
             onSelect={onSelect}

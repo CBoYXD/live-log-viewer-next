@@ -100,6 +100,16 @@ test("a review-loop verdict offers Open flow, not the folded reviewer transcript
   expect(html).toContain("Open review");
 });
 
+test("Open transcript is withheld when the run transcript left the scan", () => {
+  /* A run stage whose transcript vanished (canOpenPath=false) must not offer an
+     action that would no-op on a missing file. */
+  const only = attempt(1, { agentPath: "/gone.jsonl", verdict: { status: "fail", findings: [] } });
+  const html = renderToStaticMarkup(
+    <VerdictPopover pipeline={pipeline([only])} stage={stage} attempt={only} canOpenPath={false} onClose={() => {}} onOpenPath={() => {}} />,
+  );
+  expect(html).not.toContain("Open transcript");
+});
+
 test("Open review is withheld when the flow no longer has a board deck", () => {
   const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
   /* A closed/missing flow (canOpenFlow=false) has no deck to reveal, so the

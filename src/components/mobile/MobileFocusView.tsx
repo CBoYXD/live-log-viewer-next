@@ -167,8 +167,10 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
   const activePath = activeNode ? activeNode.file.path : null;
   const activeFlowId = activeDeck ? activeDeck.flow.id : null;
   const pipelineFocus = findPipelineStage(pipelines, activePath, activeFlowId);
-  /* Only flows that still have a board deck can be hopped/opened to. */
+  /* Only flows that still have a board deck — and run transcripts still in the
+     scan — can be hopped/opened to. */
   const renderableFlows = useMemo(() => renderableFlowIds(flows), [flows]);
+  const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
 
   const openStagePath = useCallback(
     (path: string) => {
@@ -182,7 +184,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
     if (!pipelineFocus) return;
     const stage = pipelineFocus.pipeline.stages[index];
     if (!stage) return;
-    const target = stageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), renderableFlows);
+    const target = stageOpenTarget(stage, latestAttempt(pipelineFocus.pipeline, stage.id), renderableFlows, renderablePaths);
     if (!target) return;
     /* Review-loop targets land on the flow's round deck (an entry key), not the
        folded reviewer transcript; run stages open their own node by path. */
@@ -264,7 +266,7 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       ) : null}
 
       {pipelineFocus ? (
-        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} onHop={hopToStage} onOpenPath={openStagePath} />
+        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
       ) : null}
 
       <div className="relative flex min-h-0 flex-1 flex-col p-1.5 pb-[max(0.375rem,env(safe-area-inset-bottom))]">
@@ -388,7 +390,7 @@ function findPipelineStage(pipelines: Pipeline[], path: string | null, flowId: s
     stage/state, and prev/next stage chips as hop targets along the chain. The
     current-stage chip opens a verdict bottom sheet (#93 §2.3) when its stage has
     run, surfacing findings/confidence and parked Retry/Skip on mobile. */
-function PipelineFocusRow({ pipeline, index, renderableFlows, onHop, onOpenPath }: { pipeline: Pipeline; index: number; renderableFlows: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
+function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, onHop, onOpenPath }: { pipeline: Pipeline; index: number; renderableFlows: ReadonlySet<string>; renderablePaths: ReadonlySet<string>; onHop: (index: number) => void; onOpenPath: (path: string) => void }) {
   const { t } = useLocale();
   const [sheetOpen, setSheetOpen] = useState(false);
   const total = pipeline.stages.length;
@@ -397,16 +399,17 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, onHop, onOpenPath 
   const tone = STAGE_TONES[state];
   const prev = index > 0 ? pipeline.stages[index - 1]! : null;
   const next = index < total - 1 ? pipeline.stages[index + 1]! : null;
-  /* A hop resolves through stageOpenTarget, so a review-loop neighbor is
-     reachable once its flow still has a deck (renderableFlows), not only a run
-     stage's own path. */
-  const prevHopEnabled = prev ? Boolean(stageOpenTarget(prev, latestAttempt(pipeline, prev.id), renderableFlows)) : false;
-  const nextHopEnabled = next ? Boolean(stageOpenTarget(next, latestAttempt(pipeline, next.id), renderableFlows)) : false;
+  /* A hop resolves through stageOpenTarget, so a neighbor is reachable only while
+     its flow still has a deck (renderableFlows) or its run transcript is still in
+     the scan (renderablePaths). */
+  const prevHopEnabled = prev ? Boolean(stageOpenTarget(prev, latestAttempt(pipeline, prev.id), renderableFlows, renderablePaths)) : false;
+  const nextHopEnabled = next ? Boolean(stageOpenTarget(next, latestAttempt(pipeline, next.id), renderableFlows, renderablePaths)) : false;
   const attempt = latestAttempt(pipeline, stage.id);
   /* Match the desktop evidence predicate: a running attempt has no verdict sheet
      to open, so the button stays disabled instead of showing "no findings". */
   const canOpenVerdict = stageHasEvidence(pipeline, stage, attempt);
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
+  const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
   return (
     <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-[#fbfbfd] px-2 py-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
       <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
@@ -458,6 +461,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, onHop, onOpenPath 
               stage={stage}
               attempt={attempt}
               canOpenFlow={canOpenFlow}
+              canOpenPath={canOpenPath}
               onClose={() => setSheetOpen(false)}
               onOpenPath={(path) => { setSheetOpen(false); onOpenPath(path); }}
             />
