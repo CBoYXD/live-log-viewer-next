@@ -6,6 +6,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { withoutArchivedPredecessors } from "@/lib/accounts/identity";
 import { agentRegistry, AgentRegistry, setAgentRegistryForTests } from "@/lib/agent/registry";
+import { writeSessionTitle } from "@/lib/session/titleStore";
 import type { FileEntry } from "@/lib/types";
 
 let scans = 0;
@@ -320,6 +321,23 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
 
   expect(child?.parent).toBe(parentPath);
   expect(child?.conversationId).toBe(begun.receipt.conversationId);
+});
+
+test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
+  const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
+  const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;
+  writeSessionTitle(`uuid:codex:${sessionUuid}`, "My human name", undefined, "2026-07-12T00:00:00.000Z");
+  const derived = file(sessionPath);
+  derived.title = "auto derived from first prompt";
+  scannedFiles = [derived];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const entry = body.files.find((candidate) => candidate.path === sessionPath);
+
+  expect(entry?.title).toBe("My human name");
+  expect(entry?.autoTitle).toBe("auto derived from first prompt");
+  expect(entry?.titleRevision).toBe(1);
 });
 
 test("an unreadable pipelines store degrades to pipelinesError without failing the poll", async () => {

@@ -20,6 +20,7 @@ import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
 import { CtxChip, GoalChip, PlanChip } from "./PlanChip";
+import { SessionTitle } from "./session/SessionTitle";
 import { ProcessStatusControls } from "./TaskHeader";
 import { TmuxComposer } from "./TmuxComposer";
 import { RateLimitBadge } from "./RateLimitBadge";
@@ -182,9 +183,13 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         >
           <div className="flex min-w-0 items-center gap-1.5">
             <span className={`h-2 w-2 shrink-0 rounded-full ${activityDot(file.activity)}`} title={t(`branch.${state}`)} />
-            <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
-              {cleanTitle(file.title, 90)}
-            </span>
+            {file.engine === "claude" || file.engine === "codex" ? (
+              <SessionTitle file={file} displayMax={90} titleClassName="text-[12px] font-semibold" />
+            ) : (
+              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold" title={cleanTitle(file.title)}>
+                {cleanTitle(file.title, 90)}
+              </span>
+            )}
             <ProcessStatusControls file={file} compact hideChip={isMobile} />
             {onToggleExpand ? (
               <button

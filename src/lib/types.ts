@@ -33,6 +33,13 @@ export interface FileEntry {
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
   worktree?: string;
   title: string;
+  /** The scanner-derived title, kept as provenance when a user rename
+      (issue #33) overrode `title`. Absent when no override is in effect. */
+  autoTitle?: string;
+  /** Revision of the active custom-title override, echoed back as the
+      base revision on the next `PATCH /api/session/title` for optimistic
+      concurrency. Absent when the session has no override. */
+  titleRevision?: number;
   engine: Engine;
   kind: string;
   fmt: Fmt;

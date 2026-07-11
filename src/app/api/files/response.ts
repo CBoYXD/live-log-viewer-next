@@ -14,6 +14,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { applyTitleOverride, indexSessionTitles, loadSessionTitles } from "@/lib/session/titleStore";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
 
@@ -81,6 +82,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
         failure: conversation.migration.error,
         revision: conversation.migration.revision,
       };
+    }
+  }
+  /* Custom session titles (issue #33) are the last word on `title`: they run
+     after the registry has stamped `conversationId`, so an override filed under
+     the stable conversation identity wins over the launch-profile title, the
+     derived title, and everything downstream (cards, lists, attention, push).
+     The pre-override title survives on `autoTitle`. */
+  const titleIndex = indexSessionTitles(loadSessionTitles());
+  if (titleIndex.size > 0) {
+    for (const file of files) {
+      if (file.engine !== "claude" && file.engine !== "codex") continue;
+      applyTitleOverride(file, titleIndex);
     }
   }
   const tasks = reconcileTasks(files, loadTasks(), {
