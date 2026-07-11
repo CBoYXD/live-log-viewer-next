@@ -30,7 +30,9 @@ or omit a `remap-paths` mutation.
   committed continuity paths keep carrying tombstones during later migrations.
 - AC10: Scanner discovery, observed spawn settlement, provider persistence, and
   explicit continuity callbacks all record pending succession provenance.
-- AC11: `bun test` passes.
-- AC12: `bunx tsc --noEmit` passes.
-- AC13: The live board state and production Viewer on port 8898 remain
+- AC11: Return-to-source routing and target retirement preserve an abandoned
+  successor fence after clearing the active migration.
+- AC12: `bun test` passes.
+- AC13: `bunx tsc --noEmit` passes.
+- AC14: The live board state and production Viewer on port 8898 remain
   unchanged during implementation and verification.

@@ -374,6 +374,116 @@ test("a scanner-discovered repeated successor stays pending before its provider 
   });
 });
 
+test("returning to the current account keeps an abandoned successor out of board aliases", async () => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const first = "/return-generation-a.jsonl";
+  const second = "/return-generation-b.jsonl";
+  const abandoned = "/return-abandoned-c.jsonl";
+  const conversation = registry.ensureConversation("codex", first, "account-a");
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "return-first-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const firstRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "return-generation-b", path: second, accountId: "account-b" }, firstRevision);
+
+  const placed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "return-to-current",
+    baseRevision: 0,
+    mutations: [{ kind: "restore", path: second, placement: "manual" }],
+  }));
+  expect(placed.status).toBe(200);
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-c",
+    origin: "manual",
+    requestId: "return-second-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  registry.recordConversationContinuityPath(conversation.id, abandoned);
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "return-to-current",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  expect(registry.conversation(conversation.id)?.migration).toBeNull();
+
+  const closed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "return-to-current",
+    baseRevision: 1,
+    mutations: [{ kind: "close", path: second }],
+  }));
+  expect(closed.status).toBe(200);
+  const closedBody = await closed.json() as { board: { pathAliases: Record<string, string> } };
+  expect(closedBody).toMatchObject({ board: { revision: 2, prefs: { hidden: [second] } } });
+  expect(closedBody.board.pathAliases).toEqual({ [first]: second });
+});
+
+test("retiring a migration target keeps its abandoned successor out of board aliases", async () => {
+  const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
+  setAgentRegistryForTests(registry);
+  const first = "/retire-generation-a.jsonl";
+  const second = "/retire-generation-b.jsonl";
+  const abandoned = "/retire-abandoned-c.jsonl";
+  const conversation = registry.ensureConversation("codex", first, "account-a");
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-b",
+    origin: "manual",
+    requestId: "retire-first-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  const firstRevision = registry.conversation(conversation.id)!.migration!.revision;
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["requested", "waiting-turn"], { phase: "preparing" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["preparing"], { phase: "successor-starting" });
+  registry.transitionConversationMigration(conversation.id, firstRevision, ["successor-starting"], { phase: "verifying" });
+  registry.commitSuccessor(conversation.id, { id: "retire-generation-b", path: second, accountId: "account-b" }, firstRevision);
+
+  const placed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "retire-target",
+    baseRevision: 0,
+    mutations: [{ kind: "restore", path: second, placement: "manual" }],
+  }));
+  expect(placed.status).toBe(200);
+
+  registry.commitMigrationIntent({
+    engine: "codex",
+    targetId: "account-c",
+    origin: "manual",
+    requestId: "retire-second-migration",
+    expectedRevision: registry.engineRouting("codex").revision,
+  });
+  registry.recordConversationContinuityPath(conversation.id, abandoned);
+  registry.retireAccount("codex", "account-c", "account-b");
+  expect(registry.conversation(conversation.id)?.migration).toBeNull();
+
+  const closed = await PATCH(patch({
+    schemaVersion: 1,
+    project: "retire-target",
+    baseRevision: 1,
+    mutations: [{ kind: "close", path: second }],
+  }));
+  expect(closed.status).toBe(200);
+  const closedBody = await closed.json() as { board: { pathAliases: Record<string, string> } };
+  expect(closedBody).toMatchObject({ board: { revision: 2, prefs: { hidden: [second] } } });
+  expect(closedBody.board.pathAliases).toEqual({ [first]: second });
+});
+
 test("a pending repeated migration preserves deferred historical continuity tombstones", async () => {
   const registry = new AgentRegistry(path.join(path.dirname(testFile), "agent-registry.json"));
   setAgentRegistryForTests(registry);

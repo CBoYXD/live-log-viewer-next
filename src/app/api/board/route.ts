@@ -40,10 +40,11 @@ function mutationsWithConversationAliases(mutations: readonly BoardMutationV1[])
   const pairedSources = new Set(suppliedRemapSources);
   for (const conversation of Object.values(conversations)) {
     if (conversation.generations.length < 2) continue;
-    const pendingContinuityPaths = conversation.migration && conversation.migration.phase !== "committed"
-      ? new Set(conversation.migration.pendingContinuityPaths)
-      : new Set<string>();
-    const continuityPaths = conversation.continuityPaths.filter((pathname) => !pendingContinuityPaths.has(pathname));
+    const excludedContinuityPaths = new Set(conversation.abandonedContinuityPaths);
+    if (conversation.migration && conversation.migration.phase !== "committed") {
+      for (const pathname of conversation.migration.pendingContinuityPaths) excludedContinuityPaths.add(pathname);
+    }
+    const continuityPaths = conversation.continuityPaths.filter((pathname) => !excludedContinuityPaths.has(pathname));
     const paths = [
       ...conversation.generations.map((generation) => generation.path),
       ...continuityPaths,
