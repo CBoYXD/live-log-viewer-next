@@ -410,15 +410,21 @@ export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<bo
   const pane = await verifyTmuxSpawnBinding(binding, endpoint);
   if (!pane || pane.windowName !== host.windowName || !pidAlive(host.agent.pid)) return false;
   if (host.agent.startIdentity !== null && procBackend.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (!sameArgv(readArgv(host.agent.pid), host.argv)) return false;
   return ancestryDistance(host.agent.pid, host.panePid.pid, readPpid) !== null;
 }
 
 /** Closes a pane after full host verification and an in-command server/pane fence. */
 interface KillTmuxHostDeps extends TmuxRunnerDeps {
   pidAlive(pid: number): boolean;
+  argv(pid: number): string[];
   parentPid(pid: number): number | null;
   sleep(milliseconds: number): Promise<void>;
   maxVerifyAttempts: number;
+}
+
+function sameArgv(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((argument, index) => argument === right[index]);
 }
 
 function processIsGone(expected: ProcessIdentity, deps: Pick<KillTmuxHostDeps, "pidAlive" | "processIdentity">): boolean {
@@ -436,6 +442,7 @@ export async function killTmuxHostIfMatches(
     runTmux,
     processIdentity: (pid) => procBackend.processIdentity(pid),
     pidAlive,
+    argv: readArgv,
     parentPid: readPpid,
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     maxVerifyAttempts: 20,
@@ -452,6 +459,7 @@ export async function killTmuxHostIfMatches(
   const pane = await verifyTmuxSpawnBinding(binding, endpoint, deps);
   if (!pane || pane.windowName !== host.windowName || !deps.pidAlive(host.agent.pid)) return false;
   if (host.agent.startIdentity !== null && deps.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (!sameArgv(deps.argv(host.agent.pid), host.argv)) return false;
   if (ancestryDistance(host.agent.pid, host.panePid.pid, deps.parentPid) === null) return false;
   const condition = `#{&&:#{==:#{pid},${host.server.pid}},#{&&:#{==:#{pane_id},${host.paneId}},#{==:#{pane_pid},${host.panePid.pid}}}}`;
   const mismatch = `llv-host-mismatch-${crypto.randomUUID()}`;

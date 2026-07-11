@@ -82,6 +82,8 @@ function input(overrides: Partial<ReaperInput> = {}): ReaperInput {
     registry: registryFor(new Map()),
     hosts: [],
     reviewerProcesses: [],
+    viewerOwnedPaths: new Set(),
+    authorshipUnverifiedPaths: new Set(),
     files: [],
     flows: [],
     manualPaths: new Set(),
@@ -121,6 +123,8 @@ test("classifies every policy class and applies its exact idle TTL", () => {
     flows: [flow("flow-1", implementer, reviewer)],
     mergedFlowIds: new Set(["flow-1"]),
     missingTranscriptPaths: new Set([dead]),
+    viewerOwnedPaths: new Set([probe]),
+    authorshipUnverifiedPaths: new Set([dead]),
     firstObservedAt: { "%5:2005:2005:one": new Date(NOW - 31 * 60_000).toISOString() },
   }));
 
@@ -129,10 +133,22 @@ test("classifies every policy class and applies its exact idle TTL", () => {
     ["%9", "duplicate-resume", 0, false],
     ["%2", "flow-worker", 1800, true],
     ["%4", "probe", 3600, true],
-    ["%5", "dead-transcript", 1800, true],
+    ["%5", "dead-transcript", 1800, false],
     [null, "headless-reviewer", 300, true],
   ]);
   expect(report.agents.find((agent) => agent.paneId === "%9")?.protectedReasons).toContain("newest-duplicate");
+  expect(report.agents.find((agent) => agent.paneId === "%5")?.protectedReasons).toContain("authorship-unverified");
+});
+
+test("probe-shaped metadata stays unclassified without Viewer spawn provenance", () => {
+  const pathname = transcript(17);
+  const report = evaluateReaper(input({
+    registry: registryFor(new Map([[pathname, emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "external soak probe" })]])),
+    hosts: [host(17, pathname, 17)],
+    files: [file(pathname, 120)],
+  }));
+
+  expect(report.agents[0]).toMatchObject({ class: null, eligible: false, protectedReasons: ["unclassified"] });
 });
 
 test("a newer active flow wins over a closed flow for the same implementer", () => {
@@ -170,6 +186,7 @@ test("hard exemptions protect user conversations, mid-turn agents, and manual bo
     files: paths.map((pathname) => file(pathname, 120)),
     userAuthoredPaths: new Set([paths[0]!]),
     manualPaths: new Set([paths[2]!]),
+    viewerOwnedPaths: new Set(paths),
   }));
 
   expect(report.agents.map((agent) => agent.protectedReasons)).toEqual([
@@ -214,6 +231,7 @@ test("live migration generations are independent hosts and remain protected thro
     registry,
     hosts: [host(14, source, 14), host(114, successor, 114)],
     files: [file(source, 120), file(successor, 120)],
+    viewerOwnedPaths: new Set([source, successor]),
   }));
 
   expect(report.agents.map((agent) => agent.class)).toEqual(["probe", "probe"]);
@@ -238,6 +256,7 @@ test("dry-run is the default and real mode journals every actuation with its cla
   const base = input({
     registry: registryFor(new Map([[pathname, emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" })]])),
     hosts: [host(20, pathname, 20)], files: [file(pathname, 61)],
+    viewerOwnedPaths: new Set([pathname]),
   });
   let kills = 0;
   const dry = await runEvaluatedReaper(evaluateReaper(base), {

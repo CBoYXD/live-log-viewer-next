@@ -7,8 +7,9 @@ import { agentRegistry, type AgentRegistry, type TmuxHostEvidence } from "@/lib/
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { boardFor } from "@/lib/board/store";
 import { statePath } from "@/lib/configDir";
-import { loadFlows } from "@/lib/flows/store";
-import type { Flow } from "@/lib/flows/types";
+import { resolveFlowMergeIdentity } from "@/lib/flows/git";
+import { loadFlows, saveFlows } from "@/lib/flows/store";
+import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
 import { countUserAuthoredMessages } from "@/lib/session/reader";
@@ -68,12 +69,99 @@ function updateObservationState(hosts: TranscriptHost[], now: number): ReaperSta
   return state;
 }
 
-function branchContainsHead(flow: Flow): boolean {
+function localBranchMerged(flow: Flow): boolean {
   for (const branch of ["origin/main", "origin/master", "main", "master"]) {
     const result = spawnSync("git", ["merge-base", "--is-ancestor", "HEAD", branch], { cwd: flow.cwd, stdio: "ignore" });
     if (result.status === 0) return true;
   }
   return false;
+}
+
+function probePullRequest(evidence: FlowMergeEvidence): { number: number; mergedAt: string | null; headRefOid: string | null } | null {
+  if (!evidence.repository || !evidence.headRef) return null;
+  const args = evidence.prNumber
+    ? ["pr", "view", String(evidence.prNumber), "--repo", evidence.repository, "--json", "number,mergedAt,headRefOid"]
+    : ["pr", "list", "--repo", evidence.repository, "--head", evidence.headRef, "--state", "all", "--json", "number,mergedAt,headRefOid", "--limit", "1"];
+  const result = spawnSync("gh", args, { encoding: "utf8" });
+  if (result.status !== 0) return null;
+  try {
+    const parsed = JSON.parse(result.stdout) as unknown;
+    const item = (Array.isArray(parsed) ? parsed[0] : parsed) as { number?: unknown; mergedAt?: unknown; headRefOid?: unknown } | undefined;
+    if (!item || !Number.isInteger(item.number)) return null;
+    const mergedAt = typeof item.mergedAt === "string" && item.mergedAt ? item.mergedAt : null;
+    const headRefOid = typeof item.headRefOid === "string" && item.headRefOid ? item.headRefOid : null;
+    if (!evidence.prNumber && mergedAt && (!evidence.headSha || headRefOid !== evidence.headSha)) return null;
+    return { number: item.number as number, mergedAt, headRefOid };
+  } catch {
+    return null;
+  }
+}
+
+const MERGE_CHECK_INTERVAL_MS = 5 * 60_000;
+
+export function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOverrides = {}): Set<string> {
+  const now = (overrides.now ?? Date.now)();
+  const merged = new Set<string>();
+  let changed = false;
+  for (const flow of flows) {
+    let evidence = flow.mergeEvidence ?? null;
+    const identity = (overrides.resolveMergeIdentity ?? resolveFlowMergeIdentity)(flow.cwd);
+    if (identity) {
+      if (!evidence) {
+        evidence = { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null };
+        flow.mergeEvidence = evidence;
+        changed = true;
+      } else if (evidence.repository !== identity.repository || evidence.headRef !== identity.headRef || evidence.headSha !== identity.headSha) {
+        evidence.repository = identity.repository;
+        evidence.headRef = identity.headRef;
+        evidence.headSha = identity.headSha;
+        evidence.checkedAt = null;
+        changed = true;
+      }
+    }
+    if (evidence?.mergedAt) {
+      merged.add(flow.id);
+      continue;
+    }
+    const checkedAt = evidence?.checkedAt ? Date.parse(evidence.checkedAt) : Number.NaN;
+    if (Number.isFinite(checkedAt) && now - checkedAt < MERGE_CHECK_INTERVAL_MS) continue;
+    let confirmed: FlowMergeEvidence | null = null;
+    if (evidence?.repository && evidence.headRef) {
+      const pullRequest = (overrides.probePullRequest ?? probePullRequest)(evidence);
+      if (pullRequest?.mergedAt) {
+        confirmed = {
+          ...evidence,
+          prNumber: pullRequest.number,
+          mergedAt: pullRequest.mergedAt,
+          headSha: pullRequest.headRefOid ?? evidence.headSha,
+          checkedAt: new Date(now).toISOString(),
+          source: "github-pr",
+        };
+      } else {
+        if (pullRequest) evidence.prNumber = pullRequest.number;
+        evidence.checkedAt = new Date(now).toISOString();
+        changed = true;
+      }
+    }
+    if (!confirmed && (overrides.localBranchMerged ?? localBranchMerged)(flow)) {
+      confirmed = {
+        repository: evidence?.repository ?? null,
+        headRef: evidence?.headRef ?? null,
+        headSha: evidence?.headSha ?? null,
+        prNumber: evidence?.prNumber ?? null,
+        mergedAt: new Date(now).toISOString(),
+        checkedAt: new Date(now).toISOString(),
+        source: "git-ancestor",
+      };
+    }
+    if (confirmed) {
+      flow.mergeEvidence = confirmed;
+      merged.add(flow.id);
+      changed = true;
+    }
+  }
+  if (changed) (overrides.saveFlows ?? saveFlows)(flows);
+  return merged;
 }
 
 function profileForPath(snapshot: ReturnType<AgentRegistry["snapshot"]>, pathname: string) {
@@ -102,6 +190,11 @@ function userAuthoredPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, host
     if (count > launchPromptAllowance) protectedPaths.add(pathname);
   }
   return protectedPaths;
+}
+
+function viewerOwnedPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): Set<string> {
+  return new Set(hosts.flatMap((host) =>
+    host.primaryPath && hasViewerWorkerLaunchPrompt(snapshot, host.primaryPath) ? [host.primaryPath] : []));
 }
 
 function manualPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[], files: FileEntry[]): Set<string> {
@@ -160,18 +253,21 @@ function makeInput(
 ): ReaperInput {
   const snapshot = registry.snapshot();
   const flows = (overrides.loadFlows ?? loadFlows)();
+  const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
+    host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
   return {
     now,
     registry: snapshot,
     hosts,
     reviewerProcesses: observeHeadlessReviewers(flows, overrides),
+    viewerOwnedPaths: viewerOwnedPaths(snapshot, hosts),
+    authorshipUnverifiedPaths: missingTranscriptPaths,
     files,
     flows,
     manualPaths: manualPaths(snapshot, hosts, files),
     userAuthoredPaths: userAuthoredPaths(snapshot, hosts),
-    missingTranscriptPaths: new Set(hosts.flatMap((host) =>
-      host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : [])),
-    mergedFlowIds: new Set(flows.filter(branchContainsHead).map((flow) => flow.id)),
+    missingTranscriptPaths,
+    mergedFlowIds: refreshMergedFlowIds(flows, overrides),
     firstObservedAt: state.firstObservedAt,
     enabled: process.env.LLV_REAPER_ENABLED === "1",
   };
@@ -298,6 +394,10 @@ export interface ReaperActuationOverrides {
   pidAlive?: (pid: number) => boolean;
   processIdentity?: (pid: number) => string | null;
   killProcess?: typeof killHeadlessReviewerIfMatches;
+  resolveMergeIdentity?: typeof resolveFlowMergeIdentity;
+  probePullRequest?: typeof probePullRequest;
+  localBranchMerged?: typeof localBranchMerged;
+  saveFlows?: typeof saveFlows;
   now?: () => number;
 }
 

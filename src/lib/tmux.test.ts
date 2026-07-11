@@ -398,6 +398,7 @@ describe("killTmuxHostIfMatches", () => {
         return { code: 0, stdout: "", stderr: "" };
       },
       processIdentity: (pid) => `${pid}:one`,
+      argv: () => ["codex"],
       pidAlive: (pid) => !killed && (pid === 100 || pid === 101),
       parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
       sleep: async () => {},
@@ -414,6 +415,7 @@ describe("killTmuxHostIfMatches", () => {
         ? { code: 0, stdout: "900\t%11\t100\tagents:2.0\tworker\tzsh\n", stderr: "" }
         : { code: 0, stdout: "", stderr: "" },
       processIdentity: (pid) => `${pid}:one`,
+      argv: () => ["codex"],
       pidAlive: () => true,
       parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
       sleep: async () => {},
@@ -421,5 +423,24 @@ describe("killTmuxHostIfMatches", () => {
     });
 
     expect(result).toBe(false);
+  });
+
+  test("rejects an exec-replaced agent whose live argv differs from registry evidence", async () => {
+    let killCommands = 0;
+    const result = await killTmuxHostIfMatches(host, {
+      runTmux: async (args) => {
+        if (args[0] === "if-shell") killCommands += 1;
+        return { code: 0, stdout: "900\t%11\t100\tagents:2.0\tworker\tzsh\n", stderr: "" };
+      },
+      processIdentity: (pid) => `${pid}:one`,
+      argv: () => ["bash", "external-task"],
+      pidAlive: () => true,
+      parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
+      sleep: async () => {},
+      maxVerifyAttempts: 2,
+    });
+
+    expect(result).toBe(false);
+    expect(killCommands).toBe(0);
   });
 });

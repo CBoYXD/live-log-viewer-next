@@ -9,7 +9,7 @@ import type { TranscriptHost, TranscriptHostSnapshot } from "@/lib/agent/transcr
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { killHeadlessReviewerIfMatches, readReaperReport, runReaperCycle } from "./reaperRuntime";
+import { killHeadlessReviewerIfMatches, readReaperReport, refreshMergedFlowIds, runReaperCycle } from "./reaperRuntime";
 
 const originalStateDir = process.env.LLV_STATE_DIR;
 const originalEnabled = process.env.LLV_REAPER_ENABLED;
@@ -122,11 +122,8 @@ test("an external one-message session keeps the user-authored exemption", async 
       now,
     });
 
-    expect(report.agents[0]).toMatchObject({
-      class: "probe",
-      eligible: false,
-      protectedReasons: ["user-authored-message"],
-    });
+    expect(report.agents[0]).toMatchObject({ class: null, eligible: false });
+    expect(report.agents[0]?.protectedReasons).toContain("user-authored-message");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -218,11 +215,8 @@ test("authorship at the beginning of a transcript survives a tail larger than th
       now,
     });
 
-    expect(report.agents[0]).toMatchObject({
-      class: "probe",
-      eligible: false,
-      protectedReasons: ["user-authored-message"],
-    });
+    expect(report.agents[0]).toMatchObject({ class: null, eligible: false });
+    expect(report.agents[0]?.protectedReasons).toContain("user-authored-message");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -329,14 +323,15 @@ test("headless reviewer termination rejects pid reuse and verifies process exit"
   expect(signals).toBe(1);
 });
 
-test("a delivery completed before reaper actuation fences the stale idle turn", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-delivery-fence-"));
-  const pathname = path.join(directory, "missing-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl");
-  const now = Date.now();
+test("persisted GitHub merge evidence survives a deleted checkout and allows flow cleanup", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-merged-flow-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1345.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, "");
   process.env.LLV_STATE_DIR = directory;
-  process.env.LLV_REAPER_ENABLED = "1";
+  delete process.env.LLV_REAPER_ENABLED;
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
-  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker" });
+  const profile = emptyLaunchProfile({ cwd: "/deleted/worktree", role: "worker" });
   registry.reconcileConversations([{
     engine: "codex",
     path: pathname,
@@ -345,9 +340,93 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
     turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
     observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
   }]);
-  const conversation = registry.conversationForPath(pathname)!;
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-merged",
+    cwd: "/deleted/worktree",
+    implementerPath: pathname,
+    reviewerMode: "pane",
+    rounds: [],
+    closedAt: new Date(now - 31 * 60_000).toISOString(),
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "agent/issue-31-reaper",
+      headSha: "a".repeat(40),
+      prNumber: 125,
+      mergedAt: new Date(now - 10 * 60_000).toISOString(),
+      checkedAt: new Date(now - 10 * 60_000).toISOString(),
+      source: "github-pr",
+    },
+  } as Flow;
+
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+      actuation: { loadFlows: () => [flow], now: () => now },
+    });
+
+    expect(report.agents[0]).toMatchObject({ class: "flow-worker", eligible: true, protectedReasons: [] });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a squash-merged GitHub PR becomes durable evidence before checkout deletion", () => {
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-squash",
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/squashed",
+      headSha: "b".repeat(40),
+      prNumber: null,
+      mergedAt: null,
+      checkedAt: null,
+      source: null,
+    },
+  } satisfies Flow;
+  let probes = 0;
+  let saves = 0;
+  const mergedAt = new Date(now - 60_000).toISOString();
+
+  expect(refreshMergedFlowIds([flow], {
+    now: () => now,
+    resolveMergeIdentity: () => null,
+    probePullRequest: () => { probes += 1; return { number: 321, mergedAt, headRefOid: "b".repeat(40) }; },
+    localBranchMerged: () => false,
+    saveFlows: () => { saves += 1; },
+  })).toEqual(new Set([flow.id]));
+  expect(flow.mergeEvidence).toMatchObject({ prNumber: 321, mergedAt, source: "github-pr" });
+  expect(probes).toBe(1);
+  expect(saves).toBe(1);
+
+  flow.cwd = "/deleted/worktree";
+  expect(refreshMergedFlowIds([flow], {
+    now: () => now + 60 * 60_000,
+    resolveMergeIdentity: () => null,
+    probePullRequest: () => { throw new Error("durable evidence should avoid a refresh"); },
+    localBranchMerged: () => false,
+    saveFlows: () => { saves += 1; },
+  })).toEqual(new Set([flow.id]));
+  expect(saves).toBe(1);
+});
+
+test("a delivery completed before reaper actuation fences the stale idle turn", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-delivery-fence-"));
+  const pathname = path.join(directory, "missing-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl");
+  const now = Date.now();
+  process.env.LLV_STATE_DIR = directory;
+  process.env.LLV_REAPER_ENABLED = "1";
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
+  fs.writeFileSync(pathname, "");
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
   const key = { engine: "codex" as const, sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1342" };
-  registry.upsert({
+  registry.completeSpawn(receipt.launchId, {
     key,
     artifactPath: pathname,
     cwd: "/repo",
@@ -359,6 +438,15 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
     claimOwner: null,
     pendingAction: null,
   });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+  const conversation = registry.conversationForPath(pathname)!;
   const host = runtimeHost(pathname);
   fs.writeFileSync(path.join(directory, "reaper-state.json"), JSON.stringify({
     version: 1,
@@ -376,7 +464,7 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
     const report = await runReaperCycle({
       registry,
       hosts: [host],
-      files: [],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
       now,
       actuation: {
         readHosts: async () => {
@@ -393,7 +481,7 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
       },
     });
 
-    expect(report.agents[0]).toMatchObject({ class: "dead-transcript", eligible: true, action: "kill-failed" });
+    expect(report.agents[0]).toMatchObject({ class: "probe", eligible: true, action: "kill-failed" });
     expect(observations).toBe(2);
     expect(kills).toBe(0);
   } finally {

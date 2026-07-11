@@ -7,6 +7,7 @@ import type { FileEntry } from "@/lib/types";
 export type ReaperClass = "flow-worker" | "headless-reviewer" | "probe" | "duplicate-resume" | "dead-transcript";
 export type ReaperProtection =
   | "user-authored-message"
+  | "authorship-unverified"
   | "mid-turn"
   | "manual-board-placement"
   | "migration-in-progress"
@@ -57,6 +58,8 @@ export interface ReaperInput {
   registry: RegistryFile;
   hosts: TranscriptHost[];
   reviewerProcesses: HeadlessReviewerProcess[];
+  viewerOwnedPaths: ReadonlySet<string>;
+  authorshipUnverifiedPaths: ReadonlySet<string>;
   files: FileEntry[];
   flows: Flow[];
   manualPaths: ReadonlySet<string>;
@@ -195,7 +198,7 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
       idleSeconds = flowIdleSeconds(input.now, flowMatch.flow);
       if (!new Set(["approved", "closed"]).has(flowMatch.flow.state)) protectedReasons.push("flow-in-progress");
       if (!input.mergedFlowIds.has(flowMatch.flow.id)) protectedReasons.push("flow-not-merged");
-    } else if (probeProfile(profile, host)) {
+    } else if (pathname && input.viewerOwnedPaths.has(pathname) && probeProfile(profile, host)) {
       agentClass = "probe";
       idleSeconds = pathname ? fileIdleSeconds(input.now, files.get(pathname)) : null;
     } else if (pathname && input.missingTranscriptPaths.has(pathname)) {
@@ -204,6 +207,7 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
     }
 
     if (pathname && input.userAuthoredPaths.has(pathname)) protectedReasons.unshift("user-authored-message");
+    if (pathname && input.authorshipUnverifiedPaths.has(pathname)) protectedReasons.unshift("authorship-unverified");
     if (conversation && (conversation.turn.state === "busy" || conversation.turn.state === "unknown" || deliveryFencesTurn(input.registry, conversation))) {
       protectedReasons.unshift("mid-turn");
     }

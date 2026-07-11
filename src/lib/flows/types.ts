@@ -39,6 +39,16 @@ export type FlowBlock = {
   resetAt: number | null;
 };
 
+export type FlowMergeEvidence = {
+  repository: string | null;
+  headRef: string | null;
+  headSha: string | null;
+  prNumber: number | null;
+  mergedAt: string | null;
+  checkedAt: string | null;
+  source: "github-pr" | "git-ancestor" | null;
+};
+
 export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
@@ -96,6 +106,9 @@ export type Flow = {
   stateDetail: string | null;
   /** Ephemeral read-model block derived from the attached implementer. */
   block?: FlowBlock | null;
+  /** Durable positive merge evidence and the repository identity needed to
+      refresh it after the originating worktree disappears. */
+  mergeEvidence?: FlowMergeEvidence | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;

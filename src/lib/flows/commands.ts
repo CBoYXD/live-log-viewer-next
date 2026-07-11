@@ -9,7 +9,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
 import { forgetHeadlessReview } from "./exec";
-import { resolveBaseRef } from "./git";
+import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
 import { loadFlows, loadPresets, saveFlows } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
@@ -91,6 +91,10 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     state: "waiting_ready",
     pausedState: null,
     stateDetail: null,
+    mergeEvidence: (() => {
+      const identity = resolveFlowMergeIdentity(cwd);
+      return identity ? { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
+    })(),
     rounds: [],
     createdAt: isoNow(),
     closedAt: null,
