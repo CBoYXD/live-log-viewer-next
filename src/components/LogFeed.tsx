@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ArrowDown, ChevronUp, Sparkle } from "@/components/icons";
 import { useLogTail } from "@/hooks/useLogTail";
+import { conversationIdentity } from "@/lib/accounts/identity";
 import { getLocale, translate, useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -13,6 +14,7 @@ import { isAwaitingUser } from "@/hooks/useSwitchboardData";
 import { createFeedSession, type FeedSession, type FeedSnapshot } from "./feed/parse";
 import { FeedItem } from "./feed/FeedItem";
 import { RawLineProvider, type RawLineLookup } from "./feed/rawLine";
+import { BoundedLru } from "./feed/scrollMemory";
 import { QuestionCard } from "./feed/QuestionCard";
 import { isSubagent } from "./projectModel";
 import { TaskHeader } from "./TaskHeader";
@@ -41,16 +43,44 @@ const EMPTY_FEED: FeedSnapshot = { items: [], hiddenServiceCount: 0 };
     again. User releases are real scrolls that arrive outside this window. */
 const GLUE_SETTLE_MS = 300;
 
-/* Scroll state per transcript, surviving pane remounts: layout reshuffles can
-   unmount a pane (a conversation moves between shell kinds), and a fresh
-   instance used to start at the top as if unread. Glued panes re-glue, and
-   released panes return to the same distance from the tail. */
-const scrollMemory = new Map<string, { magnet: boolean; fromBottom: number }>();
-const SCROLL_MEMORY_CAP = 300;
+/* Scroll state per stable conversation, surviving pane remounts and native
+   generation changes during account migration. */
+interface ViewportAnchor {
+  key: string;
+  offset: number;
+}
 
-function rememberScroll(path: string, magnet: boolean, fromBottom: number): void {
-  if (scrollMemory.size > SCROLL_MEMORY_CAP && !scrollMemory.has(path)) scrollMemory.clear();
-  scrollMemory.set(path, { magnet, fromBottom });
+interface ScrollMemory {
+  magnet: boolean;
+  fromBottom: number;
+  anchor: ViewportAnchor | null;
+}
+
+interface PendingRestore extends ScrollMemory {
+  path: string;
+  applied: boolean;
+}
+
+const SCROLL_MEMORY_CAP = 300;
+const scrollMemory = new BoundedLru<ScrollMemory>(SCROLL_MEMORY_CAP);
+
+function rememberScroll(key: string, memory: ScrollMemory): void {
+  scrollMemory.set(key, memory);
+}
+
+function feedRows(scroller: HTMLElement): HTMLElement[] {
+  return Array.from(scroller.querySelectorAll<HTMLElement>("[data-feed-key]"));
+}
+
+function viewportAnchor(scroller: HTMLElement): ViewportAnchor | null {
+  const viewportTop = scroller.getBoundingClientRect().top;
+  const row = feedRows(scroller).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
+  const key = row?.dataset.feedKey;
+  return row && key ? { key, offset: row.getBoundingClientRect().top - viewportTop } : null;
+}
+
+function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
+  return feedRows(scroller).find((row) => row.dataset.feedKey === key) ?? null;
 }
 
 /** Animated presence row: the agent of a live transcript is mid-turn right now. */
@@ -81,10 +111,11 @@ interface Props {
 
 export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, setFollow, compact = false }: Props) {
   const { locale, t } = useLocale();
+  const memoryKey = file ? conversationIdentity(file) : null;
   /* The scroll magnet lives per feed instance, so each column remembers its
      own state across polls: glued to the live tail, or released by the user.
      A remount inherits the transcript's remembered state. */
-  const [magnet, setMagnetState] = useState(() => (file ? (scrollMemory.get(file.path)?.magnet ?? follow) : follow));
+  const [magnet, setMagnetState] = useState(() => (memoryKey ? (scrollMemory.get(memoryKey)?.magnet ?? follow) : follow));
   /* Released reader must never lose lines above the viewport: the tail cap
      applies only while the magnet holds the bottom in view anyway. */
   const tail = useLogTail(file, paused, magnet ? (compact ? TAIL_CAP : FOCUS_CAP) : 0);
@@ -104,7 +135,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const pulseTimer = useRef<number | null>(null);
   const glueAtRef = useRef(0);
   const restoreInitializedPathRef = useRef<string | null>(null);
-  const pendingRestoreRef = useRef<{ path: string; fromBottom: number } | null>(null);
+  const pendingRestoreRef = useRef<PendingRestore | null>(null);
   const filePathRef = useRef(file?.path ?? null);
   const controlledFollowRef = useRef(follow);
 
@@ -114,7 +145,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     setMagnetState(value);
     setFollow(value);
     if (value) setNewCount(0);
-    if (file) rememberScroll(file.path, value, scrollMemory.get(file.path)?.fromBottom ?? 0);
+    if (memoryKey) {
+      const remembered = scrollMemory.get(memoryKey);
+      rememberScroll(memoryKey, {
+        magnet: value,
+        fromBottom: remembered?.fromBottom ?? 0,
+        anchor: value ? null : (remembered?.anchor ?? null),
+      });
+    }
     if (withPulse) {
       setPulse(true);
       if (pulseTimer.current) window.clearTimeout(pulseTimer.current);
@@ -143,11 +181,22 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       pendingRestoreRef.current = null;
       return false;
     }
+    if (pending.anchor) {
+      const row = rowForAnchor(el, pending.anchor.key);
+      if (row) {
+        const currentOffset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
+        glueAtRef.current = Date.now();
+        el.scrollTop += currentOffset - pending.anchor.offset;
+        pending.applied = true;
+        return true;
+      }
+    }
     const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
     glueAtRef.current = Date.now();
     el.scrollTop = Math.max(0, maxScroll - pending.fromBottom);
     if (maxScroll < pending.fromBottom) return false;
-    pendingRestoreRef.current = null;
+    pending.applied = true;
+    if (!pending.anchor) pendingRestoreRef.current = null;
     return true;
   };
 
@@ -155,14 +204,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   useEffect(() => setVisibleCount(initialCount), [file?.path, initialCount]);
   /* Same instance, new transcript: pick up that transcript's remembered state. */
   useEffect(() => {
-    if (!file) return;
-    const remembered = scrollMemory.get(file.path)?.magnet ?? follow;
+    if (!memoryKey) return;
+    const remembered = scrollMemory.get(memoryKey)?.magnet ?? follow;
     if (remembered !== magnetRef.current) {
       magnetRef.current = remembered;
        
       setMagnetState(remembered);
     }
-  }, [file?.path]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [file?.path, memoryKey]); // eslint-disable-line react-hooks/exhaustive-deps
   /* External Follow transitions from the focus header drive the same magnet.
      A compact pane's constant true value leaves remount memory authoritative. */
   useEffect(() => {
@@ -266,16 +315,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     lastLenRef.current = len;
     /* First non-empty render of a released pane after a remount: stage the
        remembered distance from the tail for immediate and resize retries. */
+    let initializedRestore = false;
     if (file && len && restoreInitializedPathRef.current !== file.path) {
       restoreInitializedPathRef.current = file.path;
-      const remembered = scrollMemory.get(file.path);
-      pendingRestoreRef.current = !magnet && remembered && remembered.fromBottom > 0
-        ? { path: file.path, fromBottom: remembered.fromBottom }
+      const remembered = memoryKey ? scrollMemory.get(memoryKey) : undefined;
+      pendingRestoreRef.current = !magnet && remembered && (remembered.fromBottom > 0 || remembered.anchor)
+        ? { path: file.path, ...remembered, applied: false }
         : null;
+      initializedRestore = true;
     }
     if (pendingRestoreRef.current) {
       restorePendingPosition();
-      return;
+      if (initializedRestore || !pendingRestoreRef.current?.applied) return;
     }
     if (magnet) {
       glue();
@@ -365,8 +416,12 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             if (settling) glue();
             else setMagnet(false);
           }
-          if (file && !settling) {
-            rememberScroll(file.path, magnetRef.current, Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop));
+          if (memoryKey && !settling) {
+            rememberScroll(memoryKey, {
+              magnet: magnetRef.current,
+              fromBottom: Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop),
+              anchor: magnetRef.current ? null : viewportAnchor(el),
+            });
           }
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
         }}
@@ -414,13 +469,9 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
                   /* Session-stable keys: a row keeps its DOM node while the
                      window slides. Compact panes live on the zoomable canvas:
                      off-screen rows skip layout/paint via content-visibility. */
-                  compact ? (
-                    <div key={key} className="feed-cv">
-                      <FeedItem item={item} />
-                    </div>
-                  ) : (
-                    <FeedItem key={key} item={item} />
-                  ),
+                  <div key={key} data-feed-key={key} className={compact ? "feed-cv" : undefined}>
+                    <FeedItem item={item} />
+                  </div>,
                 )}
                 {file.pendingQuestion || file.waitingInput ? <QuestionCard key={file.pendingQuestion?.toolUseId ?? "waiting"} file={file} /> : null}
                 {!file.pendingQuestion && !file.waitingInput && endedQuestion ? (

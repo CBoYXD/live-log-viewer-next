@@ -271,6 +271,27 @@ function assistantLine(text: string): string {
   });
 }
 
+function rect(top: number, height: number): DOMRect {
+  return {
+    x: 0,
+    y: top,
+    top,
+    left: 0,
+    width: 600,
+    height,
+    right: 600,
+    bottom: top + height,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function setViewportRects(scroller: HTMLElement, rows: Map<HTMLElement, { top: number; height: number }>, viewport = 200) {
+  scroller.getBoundingClientRect = () => rect(0, viewport);
+  for (const [row, box] of rows) {
+    row.getBoundingClientRect = () => rect(box.top - scroller.scrollTop, box.height);
+  }
+}
+
 test("every scheme host collection keeps stable DOM siblings while geometry changes", () => {
   const nodeA = node(file("/node-a", "Node A"), 100);
   const nodeB = node(file("/node-b", "Node B"), 700);
@@ -343,6 +364,101 @@ test("an anchored production feed survives overtakes and a short remount window"
   triggerResize();
   expect(remountedGeometry.fromBottom()).toBe(400);
   expect(host.querySelector('[data-scheme-node="/reader"]')?.textContent).toContain("Reader anchor");
+});
+
+test("an account-migration successor inherits its conversation scroll state", async () => {
+  let now = 5_000;
+  Date.now = () => now;
+  tails.set("/predecessor", [assistantLine("Shared history")]);
+  tails.set("/successor", [assistantLine("Shared history")]);
+  const predecessor = { ...file("/predecessor", "Predecessor"), conversationId: "conversation-stable" };
+  const successor = {
+    ...file("/successor", "Successor"),
+    conversationId: "conversation-stable",
+    predecessorPath: "/predecessor",
+  };
+  const { host, root } = mountHost();
+
+  renderLayer(root, layout({ nodes: [node(predecessor, 100)] }));
+  await settle();
+  const predecessorScroller = scrollerFor(host, "/predecessor");
+  const predecessorGeometry = setScrollerGeometry(predecessorScroller, 1_000, 200);
+  triggerResize();
+  now += 1_000;
+  predecessorGeometry.setTop(400);
+  flushSync(() => predecessorScroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event));
+  expect(predecessorGeometry.fromBottom()).toBe(400);
+
+  renderLayer(root, layout());
+  renderLayer(root, layout({ nodes: [node(successor, 100)] }));
+  await settle();
+  const successorScroller = scrollerFor(host, "/successor");
+  const successorGeometry = setScrollerGeometry(successorScroller, 1_000, 200);
+  triggerResize();
+
+  expect(successorGeometry.fromBottom()).toBe(400);
+  expect(host.querySelector('[data-scheme-node="/successor"]')?.textContent).toContain("Shared history");
+});
+
+test("an anchored feed item keeps its viewport offset while the transcript grows during remount", async () => {
+  let now = 8_000;
+  Date.now = () => now;
+  const path = "/anchor-growth";
+  const initialLines = [
+    assistantLine("Before anchor"),
+    assistantLine("Visible anchor row"),
+    assistantLine("Existing tail row"),
+  ];
+  tails.set(path, initialLines);
+  const entry = file(path, "Growing transcript");
+  const { host, root } = mountHost();
+
+  renderLayer(root, layout({ nodes: [node(entry, 100)] }));
+  await settle();
+  const scroller = scrollerFor(host, path);
+  const geometry = setScrollerGeometry(scroller, 1_000, 200);
+  const rows = Array.from(host.querySelectorAll<HTMLElement>(`[data-scheme-node="${path}"] [data-feed-key]`));
+  const before = rows.find((row) => row.textContent?.includes("Before anchor"));
+  const anchor = rows.find((row) => row.textContent?.includes("Visible anchor row"));
+  const tail = rows.find((row) => row.textContent?.includes("Existing tail row"));
+  expect(before).toBeTruthy();
+  expect(anchor).toBeTruthy();
+  expect(tail).toBeTruthy();
+  setViewportRects(scroller, new Map([
+    [before!, { top: 300, height: 80 }],
+    [anchor!, { top: 380, height: 80 }],
+    [tail!, { top: 500, height: 80 }],
+  ]));
+  geometry.setTop(400);
+  now += 1_000;
+  flushSync(() => scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event));
+  expect(anchor!.getBoundingClientRect().top).toBe(-20);
+
+  renderLayer(root, layout());
+  tails.set(path, initialLines.concat([
+    assistantLine("Arrived while unmounted one"),
+    assistantLine("Arrived while unmounted two"),
+  ]));
+  renderLayer(root, layout({ nodes: [node(entry, 100)] }));
+  await settle();
+
+  const remountedScroller = scrollerFor(host, path);
+  const remountedGeometry = setScrollerGeometry(remountedScroller, 1_400, 200);
+  const remountedRows = Array.from(host.querySelectorAll<HTMLElement>(`[data-scheme-node="${path}"] [data-feed-key]`));
+  const remountedBefore = remountedRows.find((row) => row.textContent?.includes("Before anchor"));
+  const remountedAnchor = remountedRows.find((row) => row.textContent?.includes("Visible anchor row"));
+  const remountedTail = remountedRows.find((row) => row.textContent?.includes("Existing tail row"));
+  expect(remountedAnchor).toBeTruthy();
+  setViewportRects(remountedScroller, new Map([
+    [remountedBefore!, { top: 300, height: 80 }],
+    [remountedAnchor!, { top: 380, height: 80 }],
+    [remountedTail!, { top: 500, height: 80 }],
+  ]));
+  triggerResize();
+
+  expect(remountedScroller.scrollTop).toBe(400);
+  expect(remountedAnchor!.getBoundingClientRect().top).toBe(-20);
+  expect(remountedGeometry.fromBottom()).toBe(800);
 });
 
 test("a bottom-following production feed returns to the tail after remount", async () => {
