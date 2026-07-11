@@ -12,6 +12,7 @@ import {
   viewerComposeServiceFromConfig,
   viewerComposeServiceUid,
 } from "../src/runtime-host/candidateContainer";
+import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
@@ -31,10 +32,10 @@ async function command(argv: string[]): Promise<string> {
 }
 
 async function ensureMirror(): Promise<void> {
-  fs.mkdirSync(deploymentDir, { recursive: true, mode: 0o700 });
-  if (!fs.existsSync(mirrorDir)) await command(["git", "clone", "--mirror", canonicalRemote, mirrorDir]);
-  await command(["git", "--git-dir", mirrorDir, "remote", "set-url", "origin", canonicalRemote]);
-  await command(["git", "--git-dir", mirrorDir, "fetch", "--prune", "origin", "+refs/heads/*:refs/heads/*"]);
+  await ensureCanonicalMirror(
+    { deploymentDir, mirrorDir, remote: canonicalRemote },
+    { run: command },
+  );
 }
 
 async function resolveRevision(requested: string): Promise<string> {
