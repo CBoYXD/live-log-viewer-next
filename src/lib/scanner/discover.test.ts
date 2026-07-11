@@ -524,3 +524,41 @@ test("catalog healing preserves board state for a source project with surviving 
     await rm(base, { recursive: true, force: true });
   }
 });
+
+test("demoted archived predecessors rank below live transcripts for the recency cap", async () => {
+  const base = await mkdtemp(path.join(os.tmpdir(), "llv-discover-demote-"));
+  try {
+    const roots: Record<RootKey, string> = {
+      "codex-sessions": path.join(base, "codex-sessions"),
+      "claude-projects": path.join(base, "claude-projects"),
+      "claude-tasks": path.join(base, "claude-tasks"),
+    };
+    await Promise.all(Object.values(roots).map((root) => mkdir(root, { recursive: true })));
+
+    const startedAt = 1_700_030_000;
+    /* The newest transcript is an archived migration predecessor; the oldest
+       is a live conversation that the plain mtime cap would evict. */
+    const archivedPath = path.join(roots["codex-sessions"], "archived-predecessor.jsonl");
+    await writeFixture(archivedPath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo" } }) + "\n", startedAt + FILE_CAP + 10);
+    const oldestLivePath = path.join(roots["codex-sessions"], "oldest-live.jsonl");
+    await writeFixture(oldestLivePath, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo" } }) + "\n", startedAt - 10);
+    for (let index = 0; index < FILE_CAP - 1; index += 1) {
+      const pathname = path.join(roots["codex-sessions"], `live-${String(index).padStart(3, "0")}.jsonl`);
+      await writeFixture(pathname, JSON.stringify({ type: "session_meta", payload: { cwd: "/repo" } }) + "\n", startedAt + index);
+    }
+
+    const entries = await discoverFiles(roots, new Set([archivedPath]));
+
+    /* Every live transcript makes the cap; the archived predecessor yields its
+       slot despite carrying the freshest mtime. */
+    expect(entries).toHaveLength(FILE_CAP);
+    expect(entries.some((entry) => entry.path === oldestLivePath)).toBe(true);
+    expect(entries.some((entry) => entry.path === archivedPath)).toBe(false);
+
+    /* With slack under the cap the archived predecessor still rides along. */
+    const withSlack = await discoverFiles(roots, new Set([archivedPath, oldestLivePath]));
+    expect(withSlack.some((entry) => entry.path === archivedPath)).toBe(true);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,5 @@
 import type { FileEntry, ProjectCatalogEntry } from "../types";
+import { agentRegistry } from "../agent/registry";
 import { tickFlows } from "../flows/engine";
 import { tickPipelines } from "../pipelines/engine";
 import { notifyQuestion } from "../push";
@@ -83,15 +84,33 @@ export async function listFilesWithProjectCatalog(selectedProject?: string, opti
   return listFilesInternal(true, selectedProject, options);
 }
 
+/* Transcript paths superseded by an account migration: every generation and
+   continuity path of a conversation except its current one. Mirrors the
+   `migratedTo` annotation in the files response — these entries are folded
+   into their successor's card, so they rank below live transcripts for the
+   recency cap instead of crowding it out. */
+function archivedTranscriptPaths(): ReadonlySet<string> {
+  const archived = new Set<string>();
+  const snapshot = agentRegistry().snapshot();
+  for (const conversation of Object.values(snapshot.conversations)) {
+    const latest = conversation.generations.at(-1);
+    if (!latest) continue;
+    for (const generation of conversation.generations) if (generation.path !== latest.path) archived.add(generation.path);
+    for (const pathname of conversation.continuityPaths) if (pathname !== latest.path) archived.add(pathname);
+  }
+  return archived;
+}
+
 async function listFilesInternal(
   includeProjectCatalog: boolean,
   selectedProject?: string,
   options: FileScanOptions = {},
 ): Promise<{ files: FileEntry[]; projectCatalog: ProjectCatalogEntry[] }> {
   const persist = options.persist === true;
+  const demote = archivedTranscriptPaths();
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist })
-    : { files: await discoverFiles(), projectCatalog: [] };
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote })
+    : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
   // live pid. When the shortlist has no such entries, skip the scan entirely;

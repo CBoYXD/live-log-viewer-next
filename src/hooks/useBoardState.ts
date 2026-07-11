@@ -22,6 +22,10 @@ const RETRY_MAX_MS = 30_000;
    consecutive conflict requires a fresh concurrent write each round, so this
    cap only guards against a pathological writer that never yields. */
 const MAX_CONFLICT_RETRIES = 8;
+/* Mirrors the server's per-PATCH mutation cap (`validateBoardPatchRequest`):
+   an outbox that grew past it during an outage drains in accepted chunks
+   instead of one oversized batch the server would reject. */
+const MAX_MUTATIONS_PER_PATCH = 128;
 
 export const EMPTY_BOARD_PREFS: BoardPrefs = { manual: [], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false };
 
@@ -119,6 +123,11 @@ export function resetPendingOpensForTest(): void {
 type WriteAttempt =
   | { status: "ok"; board: BoardProjectStateV1 }
   | { status: "conflict"; board: BoardProjectStateV1 }
+  /* The server refused the batch itself (a non-409 4xx: oversized body,
+     validation failure). Resending the same bytes can never succeed, so the
+     batch must be dropped — retrying it forever wedges every later mutation
+     queued behind it (the /api/board 413 storm). */
+  | { status: "rejected" }
   | { status: "error" };
 
 /** Two boards carry the same durable arrangement when their prefs and aliases
@@ -230,6 +239,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       });
       if (res.ok) return { status: "ok", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
       if (res.status === 409) return { status: "conflict", board: ((await res.json()) as { board: BoardProjectStateV1 }).board };
+      if (res.status >= 400 && res.status < 500) return { status: "rejected" };
       return { status: "error" };
     } catch {
       return { status: "error" };
@@ -312,8 +322,9 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     refresh();
     /* Send the outbox as a stable prefix: mutations appended while this request
        is inflight stay queued and flush on the next drain, so an earlier response
-       never drops a later optimistic action. */
-    const prefix = outbox.slice();
+       never drops a later optimistic action. Bounded to the server's per-PATCH
+       mutation cap; a longer outbox drains over consecutive requests. */
+    const prefix = outbox.slice(0, MAX_MUTATIONS_PER_PATCH);
     const result = await attemptMutations(prefix, confirmed.revision);
     inflight = false;
     if (disposed) return;
@@ -321,6 +332,18 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
       cancelRetry();
       conflictStreak = 0;
       confirmed = result.board;
+      outbox = outbox.slice(prefix.length);
+      refresh();
+      if (outbox.length) void drain();
+      return;
+    }
+    if (result.status === "rejected") {
+      /* Unacceptable batch: drop it so the mutations queued behind it (a user's
+         close, a restore) still reach the server instead of starving forever
+         behind a payload the server will never take. The dropped intent reverts
+         optimistically to the confirmed board on the next refresh. */
+      cancelRetry();
+      conflictStreak = 0;
       outbox = outbox.slice(prefix.length);
       refresh();
       if (outbox.length) void drain();
@@ -370,7 +393,7 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
         const result = await attemptSeed(seed, 0);
         inflight = false;
         if (disposed) return;
-        confirmed = result.status === "error" ? board : result.board;
+        confirmed = result.status === "ok" || result.status === "conflict" ? result.board : board;
         refresh();
         /* A mutation queued while the seed was inflight parked in the outbox
            because drain returns early during inflight. Flush it now so the

@@ -412,3 +412,63 @@ test("16: a queued cross-project open dispatches explicit restore", async () => 
   expect(server.projects.proj.prefs.expanded).toEqual(["/child"]);
   store.dispose();
 });
+
+test("a non-409 4xx drops the rejected batch so later mutations still land", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  let patchAttempts = 0;
+  /* The server refuses any batch carrying a reconcile — the shape of the 413
+     oversized-reconcile regression; plain closes pass through untouched. */
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      patchAttempts += 1;
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      if (body.mutations?.some((mutation) => mutation.kind === "reconcile-roots")) {
+        return { ok: false, status: 413, json: async () => ({ error: "PAYLOAD_TOO_LARGE" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const sched = idleScheduler();
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: sched.scheduler });
+  await settle();
+
+  store.mutate([{ kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }]);
+  await settle();
+  /* One refusal, no backoff timer: the batch is dropped, not retried forever. */
+  expect(patchAttempts).toBe(1);
+  expect(sched.pendingTimeouts()).toBe(0);
+  expect(store.getSnapshot().sync).toBe("current");
+
+  /* The regression this guards: a close queued after the poisoned batch must
+     still reach the server instead of starving behind endless 413 retries. */
+  store.mutate([{ kind: "close", path: "/a" }]);
+  await settle();
+  expect(store.getSnapshot().prefs.hidden).toEqual(["/a"]);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  store.dispose();
+});
+
+test("an outbox longer than the server's per-PATCH cap drains in bounded chunks", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const batchSizes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      batchSizes.push(body.mutations?.length ?? 0);
+    }
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  for (let index = 0; index < 200; index += 1) store.mutate([{ kind: "close", path: `/c${index}` }]);
+  await settle();
+  await settle();
+
+  /* Every PATCH stays within the server's 128-mutation validation cap and the
+     whole outbox still lands. */
+  expect(Math.max(...batchSizes)).toBeLessThanOrEqual(128);
+  expect(batchSizes.length).toBeGreaterThan(1);
+  expect(server.projects.proj.prefs.hidden).toHaveLength(200);
+  store.dispose();
+});

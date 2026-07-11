@@ -102,7 +102,7 @@ async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Ra
   }))).flat();
 }
 
-function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>): FileEntry[] {
+function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>): FileEntry[] {
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
   for (const entry of raw) {
@@ -110,11 +110,18 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
     const threadId = codexThreadIdFromPath(entry.path);
     if (threadId) rawByCodexThread.set(threadId, entry);
   }
-  const selected = raw.slice(0, FILE_CAP);
+  /* Demoted transcripts (archived migration predecessors — their conversation
+     lives on under a successor path) rank below every current transcript for
+     the recency cap: an account-migration wave must not eat half the cap and
+     churn live conversations in and out of the feed on every poll. */
+  const ranked = demoted?.size
+    ? [...raw.filter((entry) => !demoted.has(entry.path)), ...raw.filter((entry) => demoted.has(entry.path))]
+    : raw;
+  const selected = ranked.slice(0, FILE_CAP);
   const selectedPaths = new Set(selected.map((entry) => entry.path));
   if (selectedProject) {
     for (const entry of raw) {
-      if (selectedPaths.has(entry.path)) continue;
+      if (selectedPaths.has(entry.path) || demoted?.has(entry.path)) continue;
       const project = projectByPath?.get(entry.path) ?? (describe(entry.rootName, entry.root, entry.path, entry.st).project || "other");
       if (project !== selectedProject) continue;
       selectedPaths.add(entry.path);
@@ -159,7 +166,7 @@ function entriesFromRaw(raw: RawEntry[], selectedProject?: string, projectByPath
 export async function discoverFilesWithProjectCatalog(
   roots: Roots | RootEntries = scanRootEntries(),
   selectedProject?: string,
-  options: { persist?: boolean } = {},
+  options: { persist?: boolean; demote?: ReadonlySet<string> } = {},
 ): Promise<{
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
@@ -167,13 +174,13 @@ export async function discoverFilesWithProjectCatalog(
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   const { projectCatalog, projectByPath } = projectCatalogSnapshotFromRaw(raw, options);
-  return { files: entriesFromRaw(raw, selectedProject, projectByPath), projectCatalog };
+  return { files: entriesFromRaw(raw, selectedProject, projectByPath, options.demote), projectCatalog };
 }
 
-export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries()): Promise<FileEntry[]> {
+export async function discoverFiles(roots: Roots | RootEntries = scanRootEntries(), demote?: ReadonlySet<string>): Promise<FileEntry[]> {
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
   // describe() reads file heads, so it runs only on the capped shortlist plus
   // parent closure; the walk stays a cheap stat pass over every candidate.
-  return entriesFromRaw(raw);
+  return entriesFromRaw(raw, undefined, undefined, demote);
 }
