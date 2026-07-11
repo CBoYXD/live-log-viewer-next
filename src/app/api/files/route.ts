@@ -11,8 +11,8 @@ export async function GET(request: Request): Promise<Response> {
   const parsedRevision = revision !== null && /^\d+$/.test(revision) ? Number(revision) : undefined;
   const requiredRevision = parsedRevision !== undefined && Number.isSafeInteger(parsedRevision) ? parsedRevision : undefined;
   return buildFilesResponse(request, {
-    listFilesWithProjectCatalog: async (selectedProject) => {
-      const scan = await cachedFileScan(selectedProject, Date.now(), requiredRevision);
+    listFilesWithProjectCatalog: async (selectedProject, pinnedPath) => {
+      const scan = await cachedFileScan(selectedProject, pinnedPath, Date.now(), requiredRevision);
       if (scan.refreshAfterResponse) after(scan.refreshAfterResponse);
       return scan.snapshot;
     },

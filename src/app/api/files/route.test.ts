@@ -61,7 +61,7 @@ test("repeated files reads reuse the pure read snapshot and retain ETag behavior
   const etag = first.headers.get("etag");
   const second = await GET(new Request("http://127.0.0.1/api/files", { headers: { "if-none-match": etag! } }));
   expect(first.status).toBe(200);
-  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } } });
+  expect(await first.json()).toEqual({ files: [], projectCatalog: [], flows: [], pipelines: [], workflows: [], tasks: [], systemHealth: { tmux: { status: "healthy" } }, conversationAliases: {} });
   expect(second.status).toBe(304);
   expect(scans).toBe(1);
   expect(scanOptions).toEqual({ persist: false });
@@ -97,7 +97,7 @@ test("concurrent cold files reads share one scan", async () => {
 
 test("an expired snapshot schedules its refresh after the response", async () => {
   await cachedFileScan();
-  const stale = await cachedFileScan(undefined, Number.MAX_SAFE_INTEGER);
+  const stale = await cachedFileScan(undefined, undefined, Number.MAX_SAFE_INTEGER);
 
   expect(scans).toBe(1);
   expect(stale.refreshAfterResponse).toBeFunction();
@@ -152,12 +152,12 @@ test("a newer revision waits for a follow-up scan when an older scan is in fligh
   let releaseOlder!: () => void;
   scanGates.push(new Promise<void>((resolve) => { releaseOlder = resolve; }));
   scannedFiles = [file("/sessions/revision-1.jsonl")];
-  const older = cachedFileScan(undefined, Date.now(), 1);
+  const older = cachedFileScan(undefined, undefined, Date.now(), 1);
   await Promise.resolve();
   expect(scans).toBe(1);
 
   scannedFiles = [file("/sessions/revision-2.jsonl")];
-  const newer = cachedFileScan(undefined, Date.now(), 2);
+  const newer = cachedFileScan(undefined, undefined, Date.now(), 2);
   releaseOlder();
   await older;
   const result = await newer;
@@ -181,7 +181,7 @@ test("a persisted legacy cache slot upgrades before fresh hydration", async () =
   }]]);
   scannedFiles = [file("/sessions/upgraded-fresh.jsonl")];
 
-  const result = await cachedFileScan(undefined, Date.now(), 1);
+  const result = await cachedFileScan(undefined, undefined, Date.now(), 1);
 
   expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/upgraded-fresh.jsonl"]);
   expect(scans).toBe(1);
