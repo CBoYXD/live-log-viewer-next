@@ -8,10 +8,11 @@ export const dynamic = "force-dynamic";
 
 export async function GET(request: Request): Promise<Response> {
   const revision = request.headers.get("x-llv-files-revision");
-  const requireFresh = revision !== null && /^\d+$/.test(revision);
+  const parsedRevision = revision !== null && /^\d+$/.test(revision) ? Number(revision) : undefined;
+  const requestedRevision = parsedRevision !== undefined && Number.isSafeInteger(parsedRevision) ? parsedRevision : undefined;
   return buildFilesResponse(request, {
     listFilesWithProjectCatalog: async (selectedProject) => {
-      const scan = await cachedFileScan(selectedProject, Date.now(), requireFresh);
+      const scan = await cachedFileScan(selectedProject, Date.now(), requestedRevision);
       if (scan.refreshAfterResponse) after(scan.refreshAfterResponse);
       return scan.snapshot;
     },

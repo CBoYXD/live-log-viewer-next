@@ -11,6 +11,7 @@ import type { FileEntry } from "@/lib/types";
 let scans = 0;
 let scanOptions: unknown;
 let scannedFiles: FileEntry[] = [];
+let scanGates: Promise<void>[] = [];
 let registryRoot = "";
 let tmuxHealth: unknown = { status: "healthy" };
 
@@ -20,6 +21,7 @@ beforeEach(() => {
   resetFilesRouteCacheForTests();
   scans = 0;
   scannedFiles = [];
+  scanGates = [];
   tmuxHealth = { status: "healthy" };
 });
 
@@ -33,7 +35,9 @@ mock.module("@/lib/scanner", () => ({
   listFilesWithProjectCatalog: async (_project: string | undefined, options: unknown) => {
     scans += 1;
     scanOptions = options;
-    return { files: scannedFiles, projectCatalog: [] };
+    const files = scannedFiles;
+    await scanGates.shift();
+    return { files, projectCatalog: [] };
   },
 }));
 let pipelinesStore: () => unknown[] = () => [];
@@ -113,6 +117,24 @@ test("a files revision request refreshes the snapshot before responding", async 
   const body = await response.json() as { files: FileEntry[] };
 
   expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/after-revision.jsonl"]);
+  expect(scans).toBe(2);
+});
+
+test("a newer revision waits for a follow-up scan when an older scan is in flight", async () => {
+  let releaseOlder!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { releaseOlder = resolve; }));
+  scannedFiles = [file("/sessions/revision-1.jsonl")];
+  const older = cachedFileScan(undefined, Date.now(), 1);
+  await Promise.resolve();
+  expect(scans).toBe(1);
+
+  scannedFiles = [file("/sessions/revision-2.jsonl")];
+  const newer = cachedFileScan(undefined, Date.now(), 2);
+  releaseOlder();
+  await older;
+  const result = await newer;
+
+  expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/revision-2.jsonl"]);
   expect(scans).toBe(2);
 });
 
