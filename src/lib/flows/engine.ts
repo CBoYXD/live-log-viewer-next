@@ -94,6 +94,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     relayStartedAt: null,
     relayDelivery: null,
     reviewedAt: null,
+    terminalAt: null,
     relayedAt: null,
     error: null,
   };
@@ -102,6 +103,12 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
 function markNeedsDecision(flow: Flow, detail: string): void {
   flow.state = "needs_decision";
   flow.stateDetail = detail;
+}
+
+function markRoundError(round: Round, error: string): string {
+  round.error = error;
+  round.terminalAt = isoNow();
+  return error;
 }
 
 function roundKey(flow: Flow, round: Round): string {
@@ -170,6 +177,7 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
   round.verdict = parsed.verdict;
   round.findingsCount = parsed.findingsCount;
   round.reviewedAt = isoNow();
+  round.terminalAt = round.reviewedAt;
   if (flow.mode === "manual") {
     flow.state = "relay_pending";
   } else {
@@ -301,8 +309,7 @@ async function tickFlow(
       persistCheckpoint();
       await launchReviewer(flow, round);
     } catch (error) {
-      round.error = error instanceof Error ? error.message : String(error);
-      markNeedsDecision(flow, round.error);
+      markNeedsDecision(flow, markRoundError(round, error instanceof Error ? error.message : String(error)));
     }
     return JSON.stringify(flow) !== before;
   }
@@ -335,8 +342,7 @@ async function tickFlow(
           const rawPath = round.findingsPath ?? findingsPathFor(flow.id, round.n);
           atomicWriteText(rawPath, status.finalOutput || status.stdout || status.stderr);
           round.findingsPath = rawPath;
-          round.error = status.status === "timeout" ? "reviewer timed out" : status.stderr.trim() || "reviewer verdict was unparseable";
-          markNeedsDecision(flow, round.error);
+          markNeedsDecision(flow, markRoundError(round, status.status === "timeout" ? "reviewer timed out" : status.stderr.trim() || "reviewer verdict was unparseable"));
         }
         return JSON.stringify(flow) !== before;
       }
@@ -373,7 +379,7 @@ async function tickFlow(
       persistCheckpoint();
       await relayFindings(flow, entriesByPath, round);
     } catch (error) {
-      round.error = error instanceof Error ? error.message : String(error);
+      markRoundError(round, error instanceof Error ? error.message : String(error));
       flow.state = "paused";
       flow.pausedState = "relaying";
       flow.stateDetail = round.error;

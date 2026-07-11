@@ -938,7 +938,7 @@ test("post-kill cleanup preserves a same-pane replacement registry host", async 
   }
 });
 
-test("a delivery completed before reaper actuation fences the stale idle turn", async () => {
+test("a delivery created during merge revalidation fences the final reap decision", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-delivery-fence-"));
   const pathname = path.join(directory, "missing-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl");
   const now = Date.now();
@@ -975,6 +975,26 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
     version: 1,
     firstObservedAt: { "%41:2041:2041:one": new Date(now - 2 * 60 * 60_000).toISOString() },
   }));
+  const reviewedSha = "5".repeat(40);
+  const flow = {
+    ...headlessFlow(now),
+    id: "flow-delivery-race",
+    cwd: "/deleted/delivery-race-worktree",
+    implementerPath: pathname,
+    reviewerMode: "pane",
+    closedAt: new Date(now - 31 * 60_000).toISOString(),
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/delivery-race",
+      headSha: reviewedSha,
+      prNumber: null,
+      mergedAt: null,
+      checkedAt: null,
+      source: null,
+    },
+  } satisfies Flow;
+  let probes = 0;
   let observations = 0;
   let kills = 0;
   const snapshot: TranscriptHostSnapshot = {
@@ -992,20 +1012,29 @@ test("a delivery completed before reaper actuation fences the stale idle turn", 
       actuation: {
         readHosts: async () => {
           observations += 1;
-          if (observations === 1) {
+          return snapshot;
+        },
+        loadFlows: () => [structuredClone(flow)],
+        resolveMergeIdentity: () => null,
+        probePullRequest: async () => {
+          probes += 1;
+          if (probes === 2) {
             const held = registry.holdDelivery(conversation.id, "new user turn");
             const started = registry.beginDeliveryAttempt(held.id, held.generationId!)!;
             registry.recordDeliveryOutcome(started.id, "delivered");
           }
-          return snapshot;
+          return { number: 604, mergedAt: new Date(now - 60_000).toISOString(), headRefOid: reviewedSha };
         },
+        localBranchMerged: () => false,
+        saveFlows: () => {},
         processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
         kill: async () => { kills += 1; return true; },
         now: () => now,
       },
     });
 
-    expect(report.agents[0]).toMatchObject({ class: "probe", eligible: true, action: "kill-failed" });
+    expect(report.agents[0]).toMatchObject({ class: "flow-worker", eligible: true, action: "kill-failed" });
+    expect(probes).toBe(2);
     expect(observations).toBe(2);
     expect(kills).toBe(0);
   } finally {

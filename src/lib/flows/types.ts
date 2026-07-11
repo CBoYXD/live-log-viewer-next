@@ -90,6 +90,8 @@ export type Round = {
   /** Exact transcript generation that received Viewer-generated findings. */
   relayDelivery?: ViewerFlowDelivery | null;
   reviewedAt: string | null; // verdict detected
+  /** Reviewer process reached a verdict or terminal error. */
+  terminalAt?: string | null;
   relayedAt: string | null; // findings delivered to implementer
   error: string | null;
 };

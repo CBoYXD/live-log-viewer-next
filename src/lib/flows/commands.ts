@@ -170,6 +170,7 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   }
   await stopReviewer(flow, round);
   round.error = "cancelled by user";
+  round.terminalAt = isoNow();
   flow.state = "needs_decision";
   flow.stateDetail = "round cancelled by user";
   saveFlows(flows);
@@ -186,7 +187,11 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
-  if (round && round.verdict === null && !round.error) await stopReviewer(flow, round);
+  if (round && round.verdict === null && !round.error) {
+    await stopReviewer(flow, round);
+    round.error = "flow closed by user";
+    round.terminalAt = isoNow();
+  }
   flow.state = "closed";
   flow.closedAt = isoNow();
   flow.stateDetail = null;
@@ -246,6 +251,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       relayStartedAt: null,
       relayDelivery: null,
       reviewedAt: null,
+      terminalAt: null,
       relayedAt: null,
       error: null,
     });

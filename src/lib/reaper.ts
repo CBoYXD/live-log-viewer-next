@@ -145,7 +145,12 @@ function flowIdleSeconds(now: number, flow: Flow): number | null {
 }
 
 function reviewerIdleSeconds(now: number, round: Round): number | null {
-  return secondsSince(now, round.reviewedAt);
+  if (!round.error) return secondsSince(now, round.reviewedAt);
+  const legacyFallback = [round.reviewedAt, round.relayedAt, round.relayStartedAt, round.spawnStartedAt, round.startedAt]
+    .map((value) => value ? Date.parse(value) : Number.NaN)
+    .filter(Number.isFinite)
+    .sort((left, right) => right - left)[0];
+  return secondsSince(now, round.terminalAt ?? (legacyFallback === undefined ? null : new Date(legacyFallback).toISOString()));
 }
 
 function probeProfile(profile: LaunchProfile | null, host: TranscriptHost): boolean {

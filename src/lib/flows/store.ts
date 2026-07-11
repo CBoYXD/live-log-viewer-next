@@ -178,6 +178,7 @@ export function loadFlows(): Flow[] {
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       relayDelivery: round.relayDelivery ?? null,
+      terminalAt: round.terminalAt ?? null,
       error: round.error ?? null,
     })),
   }));

@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { agentRegistry, type AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type RegistryFile, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { boardFor } from "@/lib/board/store";
 import { statePath } from "@/lib/configDir";
@@ -394,9 +394,10 @@ async function makeInput(
   now: number,
   overrides: ReaperActuationOverrides = {},
 ): Promise<ReaperInput> {
-  const snapshot = registry.snapshot();
   const flows = (overrides.loadFlows ?? loadFlows)();
   const processIdentity = overrides.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  const mergedFlowIds = await refreshMergedFlowIds(flows, overrides);
+  const snapshot = registry.snapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
   const authorship = authorshipEvidence(snapshot, hosts, flows);
@@ -413,7 +414,7 @@ async function makeInput(
     manualPaths: manualPaths(snapshot, hosts, files),
     userAuthoredPaths: authorship.userAuthoredPaths,
     missingTranscriptPaths,
-    mergedFlowIds: await refreshMergedFlowIds(flows, overrides),
+    mergedFlowIds,
     firstObservedAt: state.firstObservedAt,
     enabled: process.env.LLV_REAPER_ENABLED === "1",
   };
@@ -524,6 +525,14 @@ function reportMatchesCandidate(current: ReaperAgentReport, expected: ReaperAgen
     && sameTmuxEvidence(current.tmuxEvidence, expected.tmuxEvidence);
 }
 
+function deliveryRevision(snapshot: RegistryFile, conversationId: string | null): string {
+  if (!conversationId) return "";
+  const deliveries = Object.values(snapshot.heldDeliveries)
+    .filter((delivery) => delivery.conversationId === conversationId)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  return JSON.stringify(deliveries);
+}
+
 async function actuateCandidate(
   registry: AgentRegistry,
   files: FileEntry[],
@@ -561,9 +570,12 @@ async function actuateCandidate(
       const freshSnapshot: TranscriptHostSnapshot = await observeHosts(true);
       const freshHost = freshSnapshot.hosts.find((host) => hostMatchesCandidate(host, agent, processIdentity));
       if (!freshHost) return false;
-      const current = evaluateReaper(await makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides));
+      const currentInput = await makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides);
+      const current = evaluateReaper(currentInput);
       const candidate = current.agents.find((item) => reportMatchesCandidate(item, agent));
       if (!candidate?.eligible) return false;
+      if (deliveryRevision(registry.snapshot(), candidate.conversationId)
+        !== deliveryRevision(currentInput.registry, candidate.conversationId)) return false;
       const killed = await killHost(expectedEvidence);
       const registeredHost = registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host;
       if (killed && registeredHost && sameTmuxEvidence(registeredHost, expectedEvidence)) {

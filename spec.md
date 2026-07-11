@@ -20,3 +20,5 @@ Implement deterministic lifecycle cleanup for stale agent conversations and a re
 - AC12: Conversation kill acquires the per-session operation lock, refreshes registry host evidence inside the lock, and marks the verified entry unhosted after termination.
 - AC13: GitHub merge probes run asynchronously with a per-probe timeout and bounded concurrency so a stalled lookup cannot freeze the Viewer or delay independent flows indefinitely.
 - AC14: Merge-probe results update only merge evidence in a freshly loaded flow store and are discarded when the flow transition revision changed during the probe.
+- AC15: Reap actuation refreshes the registry after asynchronous merge probes and rejects the kill when the candidate conversation's delivery-state revision changes before actuation.
+- AC16: Reviewer verdicts and terminal errors persist a terminal timestamp; legacy errored rounds use their latest durable activity timestamp for the headless-reviewer TTL.

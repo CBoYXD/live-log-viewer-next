@@ -302,3 +302,32 @@ test("one rejected actuation is journaled and later candidates continue", async 
   expect(report.agents.map((agent) => agent.action)).toEqual(["kill-failed", "reaped"]);
   expect(journals).toMatchObject([{ outcome: "kill-failed" }, { outcome: "reaped" }]);
 });
+
+test("an errored headless reviewer ages from its persisted terminal timestamp", () => {
+  const reviewerPath = transcript(41);
+  const erroredFlow = flow("flow-errored-reviewer", transcript(40), reviewerPath);
+  erroredFlow.rounds[0] = {
+    ...erroredFlow.rounds[0]!,
+    verdict: null,
+    reviewedAt: null,
+    error: "reviewer timed out",
+    terminalAt: new Date(NOW - 6 * 60_000).toISOString(),
+  };
+  const report = evaluateReaper(input({
+    flows: [erroredFlow],
+    reviewerProcesses: [{
+      flowId: erroredFlow.id,
+      round: 1,
+      pid: 3041,
+      identity: "3041:one",
+      path: reviewerPath,
+    }],
+  }));
+
+  expect(report.agents[0]).toMatchObject({
+    class: "headless-reviewer",
+    idleSeconds: 360,
+    eligible: true,
+    protectedReasons: [],
+  });
+});
