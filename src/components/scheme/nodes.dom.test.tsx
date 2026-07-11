@@ -1,16 +1,105 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { Window as HappyWindow } from "happy-dom";
-import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
 
+import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
+import { emptyStore } from "@/components/runtime/runtimeModel";
 
-import { stableNodeDomOrder } from "./domOrder";
-import type { SchemeNode } from "./layout";
+import type { DeckNode, DraftNode, MiniStack, SchemeLayout, SchemeNode } from "./layout";
 
 const dom = new HappyWindow();
-const testDocument = dom.document as unknown as Document;
-const testWindow = dom as unknown as Window;
+const resizeCallbacks = new Set<() => void>();
+
+class TestResizeObserver {
+  private readonly notify: () => void;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.notify = () => callback([], this as unknown as ResizeObserver);
+    resizeCallbacks.add(this.notify);
+  }
+
+  observe() {}
+  unobserve() {}
+  disconnect() {
+    resizeCallbacks.delete(this.notify);
+  }
+}
+
+function bindDomGlobals() {
+  Object.assign(globalThis, {
+    window: dom,
+    document: dom.document,
+    navigator: dom.navigator,
+    Node: dom.Node,
+    HTMLElement: dom.HTMLElement,
+    HTMLButtonElement: dom.HTMLButtonElement,
+    HTMLInputElement: dom.HTMLInputElement,
+    Event: dom.Event,
+    CustomEvent: dom.CustomEvent,
+    MouseEvent: dom.MouseEvent,
+    sessionStorage: dom.sessionStorage,
+    localStorage: dom.localStorage,
+    ResizeObserver: TestResizeObserver,
+    IntersectionObserver: undefined,
+  });
+}
+
+bindDomGlobals();
+
+const actualRuntimeHooks = await import("@/hooks/useRuntime");
+const actualLogTail = await import("@/hooks/useLogTail");
+const inertRuntime = { enabled: false, connection: "offline" as const, resyncedAt: null, store: emptyStore() };
+mock.module("@/hooks/useRuntime", () => ({
+  ...actualRuntimeHooks,
+  useRuntimeBusState: () => ({ ...inertRuntime, lastEventAt: null }),
+  useRuntime: () => inertRuntime,
+  useRuntimeSession: () => null,
+  useRuntimeReceiptsForArtifact: () => [],
+  useRuntimeFlow: () => null,
+}));
+
+const tails = new Map<string, string[]>();
+mock.module("@/hooks/useLogTail", () => ({
+  useLogTail: (entry: FileEntry | null) => ({
+    lines: entry ? (tails.get(entry.path) ?? []) : [],
+    linesStart: 0,
+    size: entry?.size ?? 0,
+    loading: false,
+    error: null,
+    tickTime: null,
+    paused: false,
+    setPaused: () => undefined,
+    clear: () => undefined,
+    hasMore: false,
+    loadingOlder: false,
+    loadOlder: async () => 0,
+    prependGen: 0,
+  }),
+}));
+
+const { NodesLayer } = await import("./nodes");
+
+const roots = new Set<Root>();
+const realNow = Date.now;
+
+beforeEach(bindDomGlobals);
+
+afterAll(() => {
+  mock.module("@/hooks/useRuntime", () => actualRuntimeHooks);
+  mock.module("@/hooks/useLogTail", () => actualLogTail);
+});
+
+afterEach(() => {
+  for (const root of roots) flushSync(() => root.unmount());
+  roots.clear();
+  resizeCallbacks.clear();
+  tails.clear();
+  Date.now = realNow;
+  dom.document.body.replaceChildren();
+  dom.sessionStorage.clear();
+});
 
 function file(path: string, title: string): FileEntry {
   return {
@@ -38,72 +127,248 @@ function node(entry: FileEntry, x: number): SchemeNode {
   return { file: entry, tasks: [], under: [], isRoot: true, x, y: 0, w: 600, h: 780 };
 }
 
-function PaneList({ nodes, selected }: { nodes: SchemeNode[]; selected: string }) {
-  return (
-    <div>
-      {stableNodeDomOrder(nodes).map((item) => (
-        <div
-          key={item.file.path}
-          data-scheme-node={item.file.path}
-          style={{ transform: `translate(${item.x}px, ${item.y}px)` }}
-        >
-          <div className={selected === item.file.path ? "ring-2" : undefined}>
-            <span data-reader-title>{item.file.title}</span>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+function flow(id: string, implementerPath: string): Flow {
+  return {
+    id,
+    template: "implement-review-loop",
+    project: "project",
+    cwd: "/project",
+    implementerPath,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: null },
+      reviewer: { engine: "codex", model: null, effort: null },
+    },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "waiting_ready",
+    stateDetail: null,
+    rounds: [],
+    createdAt: "2026-07-12T00:00:00Z",
+    closedAt: null,
+  };
 }
 
-afterEach(() => testDocument.body.replaceChildren());
+function stack(key: string, x: number): MiniStack {
+  return { key, parent: "/parent", items: [{ file: file(`${key}/item`, key), branches: 0 }], x, y: 0, w: 360, h: 70 };
+}
 
-test("a reading pane keeps its DOM state when a more active pane overtakes it", () => {
-  Object.assign(globalThis, {
-    window: dom,
-    document: dom.document,
-    navigator: dom.navigator,
-    Node: dom.Node,
-    HTMLElement: dom.HTMLElement,
-    Event: dom.Event,
-  });
-  const readerFile = file("/reader", "Reader pane");
-  const overtakerFile = file("/overtaker", "Overtaker pane");
-  const initial = [node(readerFile, 0), node(overtakerFile, 600)];
-  const overtaken = [node(overtakerFile, 0), node(readerFile, 600)];
-  const host = testDocument.createElement("div");
-  testDocument.body.append(host);
-  const root: Root = createRoot(host);
-  const render = (next: SchemeNode[]) => {
-    flushSync(() => {
-      root.render(<PaneList nodes={next} selected="/reader" />);
-    });
+function deck(key: string, x: number): DeckNode {
+  return { key, flow: flow(`flow-${key}`, "/node-a"), rounds: [], x, y: 0, w: 600, h: 780 };
+}
+
+function draft(key: string, x: number): DraftNode {
+  return { key, id: key, x, y: 0, w: 600, h: 780 };
+}
+
+function layout(parts: Partial<SchemeLayout> = {}): SchemeLayout {
+  return {
+    nodes: [],
+    edges: [],
+    stacks: [],
+    decks: [],
+    loops: [],
+    links: [],
+    drafts: [],
+    byPath: new Map(),
+    width: 2000,
+    height: 1000,
+    ...parts,
   };
+}
 
-  render(initial);
-  const initialPaneOrder = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-node]"), (pane) => pane.dataset.schemeNode);
-  const reader = host.querySelector('[data-scheme-node="/reader"]') as HTMLElement;
-  const title = reader.querySelector("[data-reader-title]") as HTMLElement;
-  reader.scrollTop = 240;
-  reader.tabIndex = 0;
-  reader.focus();
-  const range = testDocument.createRange();
-  range.selectNodeContents(title);
-  const selection = testWindow.getSelection()!;
-  selection.removeAllRanges();
-  selection.addRange(range);
+function mountHost(): { host: HTMLElement; root: Root } {
+  const element = dom.document.createElement("div");
+  dom.document.body.append(element);
+  const host = element as unknown as HTMLElement;
+  const root = createRoot(host);
+  roots.add(root);
+  return { host, root };
+}
 
-  render(overtaken);
+function renderLayer(root: Root, next: SchemeLayout, options: { lite?: boolean; dormant?: boolean; selected?: string } = {}) {
+  const flows = next.decks.map((item) => item.flow);
+  flushSync(() => {
+    root.render(
+      <NodesLayer
+        layout={next}
+        project="project"
+        files={next.nodes.map((item) => item.file)}
+        interactive
+        lite={options.lite ?? false}
+        dormant={options.dormant ?? true}
+        selected={options.selected ?? null}
+        multi={new Set()}
+        session={false}
+        focus={null}
+        attentionPaths={null}
+        flowsByImpl={new Map()}
+        flows={flows}
+        pipelineStrips={new Map()}
+        deckFocus={null}
+        onSelect={() => undefined}
+        onClose={() => undefined}
+        onFocusRound={() => undefined}
+        onDraftClose={() => undefined}
+        onDraftSpawned={() => undefined}
+        onExpand={() => undefined}
+      />,
+    );
+  });
+}
 
-  const panes = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-node]"));
-  expect(host.querySelector('[data-scheme-node="/reader"]')).toBe(reader);
-  expect(reader.scrollTop).toBe(240);
-  expect(testDocument.activeElement).toBe(reader);
-  expect(selection.toString()).toBe("Reader pane");
-  expect(reader.querySelector(".ring-2")).toBeTruthy();
-  expect(reader.style.transform).toContain("600px");
-  expect(panes.map((pane) => pane.dataset.schemeNode)).toEqual(initialPaneOrder);
+async function settle() {
+  await Bun.sleep(0);
+  await Bun.sleep(0);
+}
 
-  flushSync(() => root.unmount());
-  host.remove();
+function triggerResize() {
+  for (const callback of [...resizeCallbacks]) callback();
+}
+
+function scrollerFor(host: HTMLElement, path: string): HTMLElement {
+  const scroller = host.querySelector(`[data-scheme-node="${path}"] .overflow-y-auto`);
+  expect(scroller).toBeTruthy();
+  return scroller as HTMLElement;
+}
+
+function setScrollerGeometry(element: HTMLElement, initialHeight: number, viewport: number) {
+  let height = initialHeight;
+  let client = viewport;
+  let top = 0;
+  Object.defineProperties(element, {
+    scrollHeight: { configurable: true, get: () => height },
+    clientHeight: { configurable: true, get: () => client },
+    scrollTop: {
+      configurable: true,
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(0, Math.min(Number(value), Math.max(0, height - client)));
+      },
+    },
+  });
+  return {
+    resize(nextHeight: number, nextViewport = client) {
+      height = nextHeight;
+      client = nextViewport;
+    },
+    setTop(value: number) {
+      element.scrollTop = value;
+    },
+    fromBottom() {
+      return Math.max(0, height - client - top);
+    },
+  };
+}
+
+function assistantLine(text: string): string {
+  return JSON.stringify({
+    type: "response_item",
+    timestamp: "2026-07-12T00:00:00Z",
+    payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] },
+  });
+}
+
+test("every scheme host collection keeps stable DOM siblings while geometry changes", () => {
+  const nodeA = node(file("/node-a", "Node A"), 100);
+  const nodeB = node(file("/node-b", "Node B"), 700);
+  const initial = layout({
+    stacks: [stack("stack::b", 700), stack("stack::a", 100)],
+    decks: [deck("deck::b", 700), deck("deck::a", 100)],
+    drafts: [draft("draft::b", 700), draft("draft::a", 100)],
+    nodes: [nodeB, nodeA],
+  });
+  const overtaken = layout({
+    stacks: [stack("stack::a", 900), stack("stack::b", 300)],
+    decks: [deck("deck::a", 900), deck("deck::b", 300)],
+    drafts: [draft("draft::a", 900), draft("draft::b", 300)],
+    nodes: [node(file("/node-a", "Node A"), 900), node(file("/node-b", "Node B"), 300)],
+  });
+  const { host, root } = mountHost();
+
+  renderLayer(root, initial, { lite: true });
+  const keys = ["stack::a", "stack::b", "deck::a", "deck::b", "draft::a", "draft::b", "/node-a", "/node-b"];
+  const originalHosts = new Map(keys.map((key) => [key, host.querySelector(`[data-scheme-node="${key}"]`)]));
+  const originalOrder = Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-node]"), (item) => item.dataset.schemeNode);
+
+  renderLayer(root, overtaken, { lite: true });
+
+  expect(Array.from(host.querySelectorAll<HTMLElement>("[data-scheme-node]"), (item) => item.dataset.schemeNode)).toEqual(originalOrder);
+  for (const key of keys) expect(host.querySelector(`[data-scheme-node="${key}"]`)).toBe(originalHosts.get(key) ?? null);
+  expect((host.querySelector('[data-scheme-node="stack::a"]') as HTMLElement).style.transform).toContain("900px");
+  expect((host.querySelector('[data-scheme-node="/node-a"]') as HTMLElement).style.transform).toContain("900px");
+});
+
+test("an anchored production feed survives overtakes and a short remount window", async () => {
+  let now = 1_000;
+  Date.now = () => now;
+  tails.set("/reader", [assistantLine("Reader anchor")]);
+  tails.set("/overtaker", [assistantLine("Overtaker tail")]);
+  const reader = file("/reader", "Reader pane");
+  const overtaker = file("/overtaker", "Overtaker pane");
+  const initial = layout({ nodes: [node(reader, 100), node(overtaker, 700)] });
+  const overtaken = layout({ nodes: [node(overtaker, 100), node(reader, 700)] });
+  const { host, root } = mountHost();
+
+  renderLayer(root, initial, { selected: "/reader" });
+  await settle();
+  const readerHost = host.querySelector('[data-scheme-node="/reader"]');
+  const scroller = scrollerFor(host, "/reader");
+  const geometry = setScrollerGeometry(scroller, 1_000, 200);
+  triggerResize();
+  expect(geometry.fromBottom()).toBe(0);
+  expect(readerHost?.textContent).toContain("Reader anchor");
+
+  now += 1_000;
+  geometry.setTop(400);
+  flushSync(() => scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event));
+  expect(geometry.fromBottom()).toBe(400);
+
+  renderLayer(root, overtaken, { selected: "/reader" });
+  expect(host.querySelector('[data-scheme-node="/reader"]')).toBe(readerHost);
+  expect(scrollerFor(host, "/reader")).toBe(scroller);
+  expect(geometry.fromBottom()).toBe(400);
+
+  renderLayer(root, layout());
+  renderLayer(root, overtaken, { selected: "/reader" });
+  await settle();
+  const remountedScroller = scrollerFor(host, "/reader");
+  const remountedGeometry = setScrollerGeometry(remountedScroller, 220, 200);
+  triggerResize();
+  expect(remountedScroller.scrollTop).toBe(0);
+
+  remountedGeometry.resize(1_000);
+  triggerResize();
+  expect(remountedGeometry.fromBottom()).toBe(400);
+  expect(host.querySelector('[data-scheme-node="/reader"]')?.textContent).toContain("Reader anchor");
+});
+
+test("a bottom-following production feed returns to the tail after remount", async () => {
+  let now = 10_000;
+  Date.now = () => now;
+  tails.set("/follower", [assistantLine("Follower tail")]);
+  const followerLayout = layout({ nodes: [node(file("/follower", "Follower pane"), 100)] });
+  const { host, root } = mountHost();
+
+  renderLayer(root, followerLayout);
+  await settle();
+  const scroller = scrollerFor(host, "/follower");
+  const geometry = setScrollerGeometry(scroller, 1_000, 200);
+  triggerResize();
+  expect(geometry.fromBottom()).toBe(0);
+  expect(host.textContent).toContain("Follower tail");
+
+  now += 1_000;
+  flushSync(() => scroller.dispatchEvent(new dom.Event("scroll", { bubbles: true }) as unknown as Event));
+  renderLayer(root, layout());
+  renderLayer(root, followerLayout);
+  await settle();
+
+  const remountedScroller = scrollerFor(host, "/follower");
+  const remountedGeometry = setScrollerGeometry(remountedScroller, 1_600, 200);
+  triggerResize();
+  expect(remountedGeometry.fromBottom()).toBe(0);
+  expect(host.textContent).toContain("Follower tail");
 });

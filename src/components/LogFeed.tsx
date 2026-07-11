@@ -103,9 +103,14 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const lastPrependRef = useRef(0);
   const pulseTimer = useRef<number | null>(null);
   const glueAtRef = useRef(0);
-  const restoredPathRef = useRef<string | null>(null);
+  const restoreInitializedPathRef = useRef<string | null>(null);
+  const pendingRestoreRef = useRef<{ path: string; fromBottom: number } | null>(null);
+  const filePathRef = useRef(file?.path ?? null);
+  const controlledFollowRef = useRef(follow);
+  filePathRef.current = file?.path ?? null;
 
   const setMagnet = (value: boolean, withPulse = false) => {
+    pendingRestoreRef.current = null;
     magnetRef.current = value;
     setMagnetState(value);
     setFollow(value);
@@ -128,20 +133,43 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     el.scrollTop = el.scrollHeight;
   };
 
+  /* A released pane can mount before its full content has measurable height.
+     Apply the best reachable position and keep retrying until the remembered
+     distance from the tail fits inside the current scroll range. */
+  const restorePendingPosition = () => {
+    const el = scroller.current;
+    const pending = pendingRestoreRef.current;
+    if (!el || !pending || magnetRef.current) return false;
+    if (pending.path !== filePathRef.current) {
+      pendingRestoreRef.current = null;
+      return false;
+    }
+    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+    glueAtRef.current = Date.now();
+    el.scrollTop = Math.max(0, maxScroll - pending.fromBottom);
+    if (maxScroll < pending.fromBottom) return false;
+    pendingRestoreRef.current = null;
+    return true;
+  };
+
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => setVisibleCount(initialCount), [file?.path, initialCount]);
   /* Same instance, new transcript: pick up that transcript's remembered state. */
   useEffect(() => {
     if (!file) return;
-    const remembered = scrollMemory.get(file.path)?.magnet ?? true;
+    const remembered = scrollMemory.get(file.path)?.magnet ?? follow;
     if (remembered !== magnetRef.current) {
       magnetRef.current = remembered;
        
       setMagnetState(remembered);
     }
   }, [file?.path]); // eslint-disable-line react-hooks/exhaustive-deps
-  /* External Follow toggle (focus header) drives the same magnet. */
+  /* External Follow transitions from the focus header drive the same magnet.
+     A compact pane's constant true value leaves remount memory authoritative. */
   useEffect(() => {
+    if (follow === controlledFollowRef.current) return;
+    controlledFollowRef.current = follow;
+    pendingRestoreRef.current = null;
     if (follow !== magnetRef.current) {
       magnetRef.current = follow;
       setMagnetState(follow);
@@ -209,6 +237,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     else onStatus("");
   }, [tail.error, tail.size, tail.tickTime, file, onStatus]);
 
+  useLayoutEffect(() => {
+    restoreInitializedPathRef.current = null;
+    pendingRestoreRef.current = null;
+  }, [file?.path]);
+
   /* Older history grows the content above the viewport; keep what the user
      was reading in place by compensating the scroll offset. */
   useLayoutEffect(() => {
@@ -231,17 +264,18 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     lastPrependRef.current = tail.prependGen;
     const delta = len - lastLenRef.current;
     lastLenRef.current = len;
-    /* First non-empty render of a released pane after a remount: return to
-       the remembered distance from the tail rather than the top. */
-    if (file && len && restoredPathRef.current !== file.path) {
-      restoredPathRef.current = file.path;
+    /* First non-empty render of a released pane after a remount: stage the
+       remembered distance from the tail for immediate and resize retries. */
+    if (file && len && restoreInitializedPathRef.current !== file.path) {
+      restoreInitializedPathRef.current = file.path;
       const remembered = scrollMemory.get(file.path);
-      if (!magnet && remembered && remembered.fromBottom > 0 && scroller.current) {
-        const el = scroller.current;
-        glueAtRef.current = Date.now();
-        el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - remembered.fromBottom);
-        return;
-      }
+      pendingRestoreRef.current = !magnet && remembered && remembered.fromBottom > 0
+        ? { path: file.path, fromBottom: remembered.fromBottom }
+        : null;
+    }
+    if (pendingRestoreRef.current) {
+      restorePendingPosition();
+      return;
     }
     if (magnet) {
       glue();
@@ -258,6 +292,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     if (!el || !inner) return;
     const observer = new ResizeObserver(() => {
       if (magnetRef.current) glue();
+      else restorePendingPosition();
     });
     observer.observe(inner);
     observer.observe(el);
@@ -320,6 +355,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
           const el = event.currentTarget;
           const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
           const settling = Date.now() - glueAtRef.current < GLUE_SETTLE_MS;
+          if (!settling) pendingRestoreRef.current = null;
           if (atBottom && !magnetRef.current) setMagnet(true, true);
           else if (!atBottom && magnetRef.current) {
             /* Off-bottom right after a programmatic glue is layout settling

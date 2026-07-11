@@ -1,15 +1,15 @@
-# Issue 121: deployment proxy request forwarding
+# Issue 24: preserve reading-pane state during activity reordering
 
 ## Task statement
 
-Investigate the first managed Viewer cutover failure where `serveViewerDeploymentProxy` accepted connections on the stable listener while returning zero response bytes. Repair request forwarding for the production `bun-container` runtime, preserve the target-file listener-switch design, cover the failure with a real TCP regression test, and remove the public-repository SSH bootstrap papercut.
+Fix the reading-pane scroll jump that occurs when scheme activity changes pane ordering. Keep pane hosts stable in the DOM while allowing their visual positions to update, so browser-owned reading state survives an overtake.
 
 ## Acceptance criteria
 
-- AC1: The deployment proxy forwards a request sent immediately after downstream TCP connection and returns the candidate Viewer response.
-- AC2: The proxy preserves request bytes while its upstream connection is being established under production-image Bun 1.2.18.
-- AC3: A regression test drives an external TCP client through an in-process proxy and upstream listener.
-- AC4: Missing, invalid, or recursive release targets continue to receive the existing `503 Service Unavailable` response.
-- AC5: The default canonical remote for the public repository uses HTTPS and remains configurable through `LLV_VIEWER_CANONICAL_REMOTE`.
-- AC6: `bun test` and `bunx tsc --noEmit` pass.
-- AC7: Investigation and verification use unused high ports and leave the production listener, runtime-host, legacy Viewer, and managed candidate lifecycle unchanged.
+- AC1: Scheme pane hosts retain stable DOM order while freshness changes their visual order.
+- AC2: An activity overtake preserves the reading pane's scroll position.
+- AC3: An activity overtake preserves focus, text selection, and selected state.
+- AC4: Pane identity and existing scheme ordering behavior remain unchanged outside DOM placement.
+- AC5: A deterministic DOM regression test covers an overtake while a pane is being read.
+- AC6: `bun test` passes.
+- AC7: `bunx tsc --noEmit` passes.

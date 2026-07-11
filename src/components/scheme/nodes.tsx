@@ -33,7 +33,7 @@ import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/comp
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
-import { stableNodeDomOrder } from "./domOrder";
+import { stableDomOrder, stableNodeDomOrder } from "./domOrder";
 import {
   LOOP_GAP,
   NODE_W,
@@ -848,9 +848,12 @@ export const NodesLayer = memo(function NodesLayer({
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
-  /* Activity ranking already reaches the screen through each node's x/y
-     transform. A path-stable sibling order keeps React from moving an existing
-     pane host in the DOM, preserving its scroll, focus, and text selection. */
+  /* Activity ranking reaches the screen through each host's x/y transform.
+     Stable sibling order keeps React from moving stateful hosts in the DOM,
+     preserving scroll, focus, selection, and draft/deck state. */
+  const stacksInDomOrder = useMemo(() => stableDomOrder(layout.stacks, (stack) => stack.key), [layout.stacks]);
+  const decksInDomOrder = useMemo(() => stableDomOrder(layout.decks, (deck) => deck.key), [layout.decks]);
+  const draftsInDomOrder = useMemo(() => stableDomOrder(layout.drafts, (draft) => draft.key), [layout.drafts]);
   const nodesInDomOrder = useMemo(
     () => stableNodeDomOrder(layout.nodes),
     [layout.nodes],
@@ -878,10 +881,10 @@ export const NodesLayer = memo(function NodesLayer({
     <div
       className={`${interactive ? "" : "pointer-events-none select-none"} ${session ? "scheme-session" : ""}`.trim() || undefined}
     >
-      {layout.stacks.map((stack) => (
+      {stacksInDomOrder.map((stack) => (
         <MiniStackShell key={stack.key} stack={stack} dimmed={stackDimmed(stack)} onSelect={onSelect} />
       ))}
-      {layout.decks.map((deck) =>
+      {decksInDomOrder.map((deck) =>
         lite ? (
           <LiteDeckShell key={deck.key} deck={deck} dimmed={deckDimmed(deck)} />
         ) : (
@@ -894,7 +897,7 @@ export const NodesLayer = memo(function NodesLayer({
           />
         ),
       )}
-      {layout.drafts.map((draft) =>
+      {draftsInDomOrder.map((draft) =>
         lite ? (
           <LiteDraftShell
             key={draft.key}
