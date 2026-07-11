@@ -77,7 +77,7 @@ export function Viewer() {
   useViewPresence();
   const [project, setProject] = useState<string>(() => initialProject());
   const [pendingHash, setPendingHash] = useState<ConversationHash | null>(null);
-  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? null);
+  const { files: allFiles, projectCatalog, flows: polledFlows, pipelines, pipelinesError, workflows, tasks, systemHealth, loaded } = useFiles(project === OVERVIEW ? null : project, pendingHash?.filePath ?? pendingHash?.conversationId ?? null);
   /* A committed account migration keeps the archived predecessor entry in the
      payload (for chain history) but it must never render as a second standalone
      card — every surface below sees only current generations. A no-op (same
@@ -110,7 +110,12 @@ export function Viewer() {
     const onHash = () => {
       const next = readHash();
       if (next.filePath || next.conversationId) setPendingHash(next);
-      else if (next.project) setProject(next.project);
+      else {
+        /* Navigation moved off the conversation link: the old target must
+           stop pinning polls and must not open later out of nowhere. */
+        setPendingHash(null);
+        if (next.project) setProject(next.project);
+      }
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
@@ -119,6 +124,9 @@ export function Viewer() {
 
   const selectProject = useCallback((nextProject: string) => {
     setProject(nextProject);
+    /* Explicit project navigation replaces the hash without a hashchange
+       event, so any unresolved conversation intent is cancelled here. */
+    setPendingHash(null);
     localStorage.setItem(PROJECT_KEY, nextProject);
     writeHash(nextProject);
     setDrawerOpen(false);

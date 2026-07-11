@@ -23,8 +23,8 @@ function fileScanCache(): Map<string, FileScanCacheSlot> {
   return fileScanCacheStore.__llvFilesRouteScans;
 }
 
-function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string, pinnedPath?: string): Promise<FileScanSnapshot> {
-  const refresh = listFilesWithProjectCatalog(selectedProject, { persist: false, pin: pinnedPath }).then((snapshot) => {
+function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string): Promise<FileScanSnapshot> {
+  const refresh = listFilesWithProjectCatalog(selectedProject, { persist: false }).then((snapshot) => {
     slot.snapshot = snapshot;
     slot.refreshedAt = Date.now();
     return snapshot;
@@ -36,7 +36,14 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string,
 }
 
 export async function cachedFileScan(selectedProject?: string, pinnedPath?: string, now = Date.now()): Promise<CachedFileScan> {
-  const key = `${selectedProject ?? ""}\u0000${pinnedPath ?? ""}`;
+  /* Pinned scans are rare (a poll or two while a deep link resolves) and the
+     pin value is user-controlled: caching them would grow one permanent
+     snapshot slot per distinct path. They run uncached; the shared slots hold
+     project-keyed scans only. */
+  if (pinnedPath) {
+    return { snapshot: await listFilesWithProjectCatalog(selectedProject, { persist: false, pin: pinnedPath }) };
+  }
+  const key = selectedProject ?? "";
   const cache = fileScanCache();
   let slot = cache.get(key);
   if (!slot) {
@@ -45,7 +52,7 @@ export async function cachedFileScan(selectedProject?: string, pinnedPath?: stri
   }
 
   if (!slot.snapshot) {
-    const snapshot = await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject, pinnedPath));
+    const snapshot = await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject));
     return { snapshot: structuredClone(snapshot) };
   }
 
@@ -54,7 +61,7 @@ export async function cachedFileScan(selectedProject?: string, pinnedPath?: stri
     slot.refreshScheduled = true;
     refreshAfterResponse = async () => {
       try {
-        await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject, pinnedPath));
+        await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject));
       } catch (error) {
         console.error("[files] background scan refresh failed", error);
       } finally {

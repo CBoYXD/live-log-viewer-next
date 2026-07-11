@@ -56,7 +56,11 @@ predecessor transcripts with recent mtimes):
   migration wave cannot evict live conversations from the feed; with slack
   under the cap they still appear, and selected-project hydration stays
   complete (archived predecessors included) so legacy `#f=` deep links keep
-  resolving to their successor.
+  resolving to their successor. A pending deep link pins its target through
+  the cap: `#f=` pins the exact transcript path, `#c=` resolves the
+  conversation id to its current generation through the registry; pinned
+  scans bypass the shared cache (no per-path cache slots), and explicit
+  project navigation cancels the pending intent.
 - AC7: Existing behavior preserved: first-poll chime baseline stays silent,
   spawn blips ring once per child, revision-conflict replay and network-error
   backoff in the board store are unchanged. Full `bun test` suite passes and

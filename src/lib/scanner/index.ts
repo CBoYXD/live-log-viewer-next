@@ -74,8 +74,23 @@ async function forEachEntryBatchYielding(
 
 export interface FileScanOptions {
   persist?: boolean;
-  /** Exact transcript path a deep link asked for; survives the recency cap. */
+  /** Deep-link target that must survive the recency cap: a transcript path,
+      or a `conversation_*` id resolved to its current generation path. */
   pin?: string;
+}
+
+/** Current transcript path for a pin value. A conversation id maps through
+    the registry to its latest generation; unknown ids and an unreadable
+    registry leave the scan unpinned. */
+export function pinnedPathFor(pin: string | undefined): string | undefined {
+  if (!pin || !pin.startsWith("conversation_")) return pin;
+  try {
+    const conversation = agentRegistry().snapshot().conversations[pin];
+    return conversation?.generations.at(-1)?.path ?? undefined;
+  } catch (error) {
+    if (error instanceof RegistryReadError) return undefined;
+    throw error;
+  }
 }
 
 export async function listFiles(options: FileScanOptions = {}): Promise<FileEntry[]> {
@@ -121,7 +136,7 @@ async function listFilesInternal(
   const persist = options.persist === true;
   const demote = archivedTranscriptPaths();
   const scan = includeProjectCatalog
-    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: options.pin })
+    ? await discoverFilesWithProjectCatalog(undefined, selectedProject, { persist, demote, pin: pinnedPathFor(options.pin) })
     : { files: await discoverFiles(undefined, demote), projectCatalog: [] };
   const entries = scan.files;
   // The /proc fd scan is only needed to attribute background-task outputs to a
