@@ -26,9 +26,12 @@ predecessor transcripts with recent mtimes):
 - AC2: The board store never sends more mutations in one PATCH than the
   server's per-request validation cap (128), and never a batch whose
   serialized bytes exceed the server body cap; an oversized outbox drains
-  across consecutive requests and fully lands. A rejected multi-mutation batch
-  is bisected until the offender stands alone; only the lone rejected mutation
-  is shed, so valid mutations on either side of the poison still land.
+  across consecutive requests and fully lands. A single mutation whose lists
+  exceed the per-list validation cap (512) or the byte budget is split into
+  equivalent transport pieces before entering the outbox. A rejected
+  multi-mutation batch is bisected until the offender stands alone; only the
+  lone rejected mutation is shed, so valid mutations on either side of the
+  poison still land.
 - AC3: `MAX_BOARD_BODY_BYTES` admits a realistic large root reconciliation
   (hundreds of roots × ~120-char paths); the per-item limits (512 paths,
   4096 chars each) remain enforced.

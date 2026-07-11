@@ -11,6 +11,7 @@ import {
   mergePatch,
   patchPrefix,
   queueColumnOpen,
+  splitMutationForTransport,
   readLegacyPrefs,
   resetPendingOpensForTest,
   type BoardPrefs,
@@ -558,4 +559,49 @@ test("patchPrefix always yields at least one mutation, even over budget", () => 
   const small: BoardMutationV1 = { kind: "close", path: "/small" };
   expect(patchPrefix([oversized, small])).toEqual([oversized]);
   expect(patchPrefix([small, oversized])).toEqual([small]);
+});
+
+test("a validator-accepted reconciliation past the body cap splits and lands whole", async () => {
+  const server = fakeServer({ proj: boardOf(1) });
+  const bodyBytes: number[] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") bodyBytes.push(new TextEncoder().encode(String(init.body)).length);
+    return server.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* The review probe: 70 roots × 4096-char paths ≈ 287 KB — accepted by the
+     item validator yet past the 256 KiB body cap as a single mutation. */
+  const roots = Array.from({ length: 70 }, (_, index) => `/${String(index).padStart(4, "0")}${"r".repeat(4090)}`);
+  store.mutate([{ kind: "reconcile-roots", roots, removeManual: [] }]);
+  await settle();
+  await settle();
+
+  expect(bodyBytes.length).toBeGreaterThan(1);
+  expect(Math.max(...bodyBytes)).toBeLessThanOrEqual(256 * 1024);
+  /* Nothing was shed: every root of the split reconciliation is durable. */
+  expect(server.projects.proj.prefs.manual).toHaveLength(70);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});
+
+test("splitMutationForTransport chunks by item count and bytes, preserving content", () => {
+  const small: BoardMutationV1 = { kind: "reconcile-roots", roots: ["/a"], removeManual: ["/b"] };
+  expect(splitMutationForTransport(small)).toEqual([small]);
+
+  /* 600 short roots exceed the server's 512-per-list validation cap. */
+  const manyRoots = Array.from({ length: 600 }, (_, index) => `/short-${index}`);
+  const byCount = splitMutationForTransport({ kind: "reconcile-roots", roots: manyRoots, removeManual: [] });
+  expect(byCount.length).toBeGreaterThan(1);
+  for (const piece of byCount) {
+    if (piece.kind !== "reconcile-roots") throw new Error("unexpected kind");
+    expect(piece.roots.length).toBeLessThanOrEqual(512);
+  }
+  expect(byCount.flatMap((piece) => (piece.kind === "reconcile-roots" ? piece.roots : []))).toEqual(manyRoots);
+
+  const pairs = Array.from({ length: 40 }, (_, index) => ({ from: `/${index}${"f".repeat(4000)}`, to: `/${index}${"t".repeat(4000)}` }));
+  const byBytes = splitMutationForTransport({ kind: "remap-paths", pairs });
+  expect(byBytes.length).toBeGreaterThan(1);
+  expect(byBytes.flatMap((piece) => (piece.kind === "remap-paths" ? piece.pairs : []))).toEqual(pairs);
 });

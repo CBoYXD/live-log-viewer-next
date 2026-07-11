@@ -37,6 +37,67 @@ function mutationBytes(mutation: BoardMutationV1): number {
   return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
 }
 
+/* Server-side per-list validation cap (`pathList` / remap `pairs`): a single
+   mutation carrying more entries than this is refused outright, so transport
+   splitting bounds item counts alongside bytes. */
+const MAX_PATHS_PER_MUTATION = 512;
+/* Path-bytes budget per split piece: half the per-PATCH byte budget, keeping
+   every piece (plus envelope and JSON syntax) far under the server body cap. */
+const SPLIT_PATH_BYTES = 96 * 1024;
+
+function byteLength(value: string): number {
+  return typeof TextEncoder === "undefined" ? value.length : new TextEncoder().encode(value).length;
+}
+
+function chunkByBudget<T>(items: readonly T[], bytesOf: (item: T) => number): T[][] {
+  const chunks: T[][] = [];
+  let current: T[] = [];
+  let bytes = 0;
+  for (const item of items) {
+    const size = bytesOf(item) + 4;
+    if (current.length > 0 && (current.length >= MAX_PATHS_PER_MUTATION || bytes + size > SPLIT_PATH_BYTES)) {
+      chunks.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(item);
+    bytes += size;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Break a validator-oversized mutation into transport-sized pieces. The two
+ * list-carrying kinds are safe to split: `reconcile-roots` is additive on
+ * `roots` and subtractive on the disjoint `removeManual`, and `remap-paths`
+ * accumulates aliases through normalization, so replaying the pieces in order
+ * reduces to the same board as the single large mutation. Everything else
+ * carries at most one path and passes through untouched.
+ */
+export function splitMutationForTransport(mutation: BoardMutationV1): BoardMutationV1[] {
+  if (mutation.kind === "reconcile-roots") {
+    const oversized = mutation.roots.length > MAX_PATHS_PER_MUTATION
+      || mutation.removeManual.length > MAX_PATHS_PER_MUTATION
+      || mutationBytes(mutation) > MAX_PATCH_BYTES;
+    if (!oversized) return [mutation];
+    const rootChunks = chunkByBudget(mutation.roots, byteLength);
+    const removeChunks = chunkByBudget(mutation.removeManual, byteLength);
+    const pieces: BoardMutationV1[] = [];
+    for (let index = 0; index < Math.max(rootChunks.length, removeChunks.length); index += 1) {
+      pieces.push({ kind: "reconcile-roots", roots: rootChunks[index] ?? [], removeManual: removeChunks[index] ?? [] });
+    }
+    return pieces;
+  }
+  if (mutation.kind === "remap-paths") {
+    const oversized = mutation.pairs.length > MAX_PATHS_PER_MUTATION || mutationBytes(mutation) > MAX_PATCH_BYTES;
+    if (!oversized) return [mutation];
+    return chunkByBudget(mutation.pairs, (pair) => byteLength(pair.from) + byteLength(pair.to))
+      .map((pairs): BoardMutationV1 => ({ kind: "remap-paths", pairs }));
+  }
+  return [mutation];
+}
+
 /** The longest outbox prefix that fits both per-PATCH caps (`maxCount` can
     tighten the count cap while isolating a rejected batch). Always at least
     one mutation, so a single over-budget mutation is attempted (and, refused,
@@ -296,11 +357,15 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
 
   const mutate = (mutations: readonly BoardMutationV1[]) => {
     if (mutations.length === 0) return;
+    /* Oversized mutations (a reconcile past the 512-path or byte budget) are
+       split into equivalent transport-sized pieces before they enter the
+       outbox, so no queued mutation can ever draw a size rejection alone. */
+    const expanded = mutations.flatMap(splitMutationForTransport);
     /* Drop a batch that changes nothing optimistically — an idempotent
        reconcile/remap, or a close of an already-hidden path — so it never
        reaches transport and never bumps a revision. */
     const before = optimisticBoard(confirmed, outbox);
-    const nextOutbox = [...outbox, ...mutations];
+    const nextOutbox = [...outbox, ...expanded];
     const after = optimisticBoard(confirmed, nextOutbox);
     if (sameArrangement(before, after)) return;
     outbox = nextOutbox;
