@@ -208,6 +208,45 @@ describe("derivePipelineLinks review-loop vertices (no duplicate hub on the flow
     const links = derivePipelineLinks([reviewPipeline], anchor);
     expect(links.some((link) => link.to === deckKey("f-rev"))).toBe(false);
   });
+
+  test("a 2-stage build→review whose only edge collapses still keeps a control hub (AC6)", () => {
+    /* build (run) → review (review-loop): the single edge folds into the
+       implementer, leaving no drawn rail. An anchor-only hub must still be
+       emitted on the implementer node so the pipeline keeps board controls. */
+    const twoStage = {
+      id: "p2", state: "running", cursor: { stageId: "review", state: "reviewing" },
+      stages: [
+        { id: "build", kind: "run", next: "review" },
+        { id: "review", kind: "review-loop", next: null },
+      ],
+      runs: [
+        { stageId: "build", attempts: [{ agentPath: "/build", state: "passed" }] },
+        { stageId: "review", attempts: [{ agentPath: "/reviewer", flowId: "f-rev", state: "reviewing" }] },
+      ],
+    } as unknown as Pipeline;
+    const links = derivePipelineLinks([twoStage], anchor, flowImpl);
+    expect(links.length).toBe(1);
+    const hub = links[0]!;
+    expect(hub.pipeline!.hub).toBe(true);
+    expect(hub.pipeline!.anchorOnly).toBe(true);
+    /* Anchored on the implementer node, never the flow deck. */
+    expect([hub.from, hub.to]).toEqual(["/build", "/build"]);
+    expect(hub.from === deckKey("f-rev") || hub.to === deckKey("f-rev")).toBe(false);
+  });
+
+  test("a chain still spawning (only one stage materialized) draws nothing", () => {
+    /* No adjacent pair exists yet, so nothing collapsed — no anchor hub, matching
+       the prior behavior for a partially spawned chain. */
+    const spawning = {
+      id: "p3", state: "provisioning", cursor: { stageId: "build", state: "running" },
+      stages: [
+        { id: "build", kind: "run", next: "review" },
+        { id: "review", kind: "review-loop", next: null },
+      ],
+      runs: [{ stageId: "build", attempts: [{ agentPath: "/build", state: "running" }] }],
+    } as unknown as Pipeline;
+    expect(derivePipelineLinks([spawning], anchor, flowImpl)).toEqual([]);
+  });
 });
 
 describe("pipelineRailSegment", () => {

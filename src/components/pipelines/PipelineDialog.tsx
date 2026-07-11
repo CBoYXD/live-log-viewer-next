@@ -93,6 +93,22 @@ function blankStage(runtime: RoleConfig): DraftStage {
   return { key: nextStageKey(), kind: "run", roleId: "", engine: runtime.engine, model: "", effort: "", access: "read-write", prompt: "", roleParams: {} };
 }
 
+/** Rebase still-pristine role-less rows onto the settled default engine. A row is
+    pristine when it has no role, no manual runtime override, and no explicit
+    model/effort — so restored and hand-edited stages are left untouched. Returns
+    the same array reference when nothing changes, so callers can skip a render. */
+export function rebaseFallbackStages(stages: DraftStage[], engine: FlowEngine): DraftStage[] {
+  let changed = false;
+  const next = stages.map((stage) => {
+    if (!stage.roleId && !stage.runtimeOverridden && !stage.model.trim() && !stage.effort && stage.engine !== engine) {
+      changed = true;
+      return { ...stage, engine };
+    }
+    return stage;
+  });
+  return changed ? next : stages;
+}
+
 /* Client detection without a setState-in-effect: the server snapshot is false
    (so SSR / static-render tests render the overlay inline, where portals are
    unsupported), the client snapshot is true (so the modal portals to body). */
@@ -303,8 +319,20 @@ export function PipelineDialog({
         if (cancelled) return;
         /* Deployer needs an interactive deploy confirmation a pipeline can't give,
            so it never enters the picker (the API rejects it too). */
-        setRoles(body.roles.filter((role) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(role.id as PipelineRoleId)));
+        const catalog = body.roles.filter((role) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(role.id as PipelineRoleId));
+        setRoles(catalog);
         setRolesError(false);
+        /* The initial rows were seeded with FALLBACK_RUNTIME's engine before the
+           catalog loaded. If the Builder default resolves to a different engine
+           (a customized Claude/Fable Builder), rebase the still-pristine role-less
+           rows to it — otherwise an untouched row stays Codex while its resolved
+           model is Fable, which the client validator and the API both reject as an
+           engine mismatch. Only rows with no role, no manual override, and no
+           explicit model/effort are touched, so restored and edited stages stand.
+           Done here (in the async resolve) rather than an effect to avoid a
+           synchronous setState-in-effect. */
+        const settledEngine = catalog.find((role) => role.id === "builder")?.config.engine ?? FALLBACK_RUNTIME.engine;
+        setStages((prev) => rebaseFallbackStages(prev, settledEngine));
       })
       .catch(() => {
         if (!cancelled) setRolesError(true);

@@ -32,7 +32,9 @@ const VERDICT_MARGIN = 8;
  * Pure placement math for the verdict popover (kept out of the effect so it is
  * unit-testable). Prefers above the chip (the design's placement) and flips
  * below only when the popover cannot fit above and below has at least as much
- * room; clamps the horizontal center so the box never spills past either edge.
+ * room; clamps the horizontal center so the box never spills past either edge,
+ * and clamps the vertical position so a tall popover (a long retry history,
+ * bounded to 80vh) keeps both its header and footer on-screen.
  */
 export function verdictPlacement(
   anchor: { top: number; bottom: number; left: number; width: number },
@@ -46,7 +48,14 @@ export function verdictPlacement(
   const half = content.width / 2;
   const cx = anchor.left + anchor.width / 2;
   const left = Math.min(Math.max(cx, half + margin), viewport.width - half - margin);
-  const top = below ? anchor.bottom + margin : anchor.top - margin;
+  if (below) {
+    /* transform-origin is the top edge; keep the whole box within the viewport. */
+    const top = Math.max(margin, Math.min(anchor.bottom + margin, viewport.height - margin - content.height));
+    return { left, top, below };
+  }
+  /* Above: `top` is the box's bottom edge (translate -100%); keep its top edge
+     (top - height) below the margin and its bottom edge above it. */
+  const top = Math.min(viewport.height - margin, Math.max(anchor.top - margin, margin + content.height));
   return { left, top, below };
 }
 

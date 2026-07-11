@@ -208,7 +208,9 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
   height: number;
 }) {
   if (!links.length) return null;
-  const pipelineLinks = links.filter((link) => link.pipeline && byPath.has(link.from) && byPath.has(link.to));
+  /* Anchor-only pipeline links carry a hub but no rail (from === to), so they are
+     excluded from the drawn-rail pass. */
+  const pipelineLinks = links.filter((link) => link.pipeline && !link.pipeline.anchorOnly && byPath.has(link.from) && byPath.has(link.to));
   return (
     <>
       {pipelineLinks.length ? (
@@ -243,10 +245,11 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
         const to = byPath.get(link.to);
         if (!from || !to) return null;
         if (link.pipeline) {
-          /* Rail midpoint, nudged onto the same off-center offset as the line. */
+          /* Rail midpoint, nudged onto the same off-center offset as the line;
+             an anchor-only hub (no rail) sits at the top-center of its node. */
           const seg = pipelineRailSegment(from, to);
-          const x = (seg.x1 + seg.x2) / 2;
-          const y = (seg.y1 + seg.y2) / 2;
+          const x = link.pipeline.anchorOnly ? from.x + from.w / 2 : (seg.x1 + seg.x2) / 2;
+          const y = link.pipeline.anchorOnly ? from.y : (seg.y1 + seg.y2) / 2;
           if (link.pipeline.hub) {
             return <PipelineHub key={link.key} pipeline={link.pipeline.pipeline} x={x} y={y} interactive={hubInteractive} moveTransition={MOVE_TRANSITION} />;
           }

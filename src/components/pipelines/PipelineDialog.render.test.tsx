@@ -6,7 +6,7 @@ import type { RoleConfig } from "@/lib/roles/types";
 import type { TFunction } from "@/lib/i18n";
 import type { RoleParameter } from "@/lib/roles/types";
 
-import { PipelineDialog, coerceStage, pipelineValidationError, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
+import { PipelineDialog, coerceStage, pipelineValidationError, rebaseFallbackStages, roleParamError, stagesFromTemplate, templateReady } from "./PipelineDialog";
 import { PIPELINE_TEMPLATES, type DraftStage } from "./pipelineModel";
 import type { RoleCatalogItem } from "./StageRow";
 
@@ -134,6 +134,23 @@ test("pipelineValidationError rejects an unresolved role and unknown role params
      (architect resolves to Claude/Fable, so the stage engine matches its runtime.) */
   const staleParam = pipelineValidationError(fakeT, { ...base, roles: CATALOG, stages: [stage({ roleId: "architect", engine: "claude", roleParams: { bogus: "x" } }), stage({ key: "k2" })] });
   expect(staleParam).toContain("paramUnknown");
+});
+
+test("rebaseFallbackStages moves pristine rows to the settled engine but keeps role/edited/restored rows", () => {
+  const s = (over: Partial<DraftStage>): DraftStage => ({ key: "k", kind: "run", roleId: "", engine: "codex", model: "", effort: "", access: "read-write", prompt: "", roleParams: {}, ...over });
+  const pristine = s({ key: "p" });
+  const withRole = s({ key: "r", roleId: "architect", engine: "codex" });
+  const overridden = s({ key: "o", engine: "codex", runtimeOverridden: true });
+  const explicitModel = s({ key: "m", engine: "codex", model: "gpt-5.6-terra" });
+  const out = rebaseFallbackStages([pristine, withRole, overridden, explicitModel], "claude");
+  /* Only the pristine role-less row rebases to Claude. */
+  expect(out[0]!.engine).toBe("claude");
+  expect(out[1]!.engine).toBe("codex");
+  expect(out[2]!.engine).toBe("codex");
+  expect(out[3]!.engine).toBe("codex");
+  /* Same reference when nothing needs changing (already on the settled engine). */
+  const already = [s({ key: "a", engine: "claude" })];
+  expect(rebaseFallbackStages(already, "claude")).toBe(already);
 });
 
 test("coerceStage repairs a malformed persisted stage instead of crashing on restore", () => {

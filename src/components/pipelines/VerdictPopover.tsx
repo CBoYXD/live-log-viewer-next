@@ -74,7 +74,7 @@ export function VerdictPopover({
       tabIndex={-1}
       role="dialog"
       aria-label={t("pipelineVerdict.title", { label })}
-      className="flex w-[260px] flex-col gap-2 rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)] focus-visible:outline-none"
+      className="flex max-h-[80vh] w-[260px] flex-col gap-2 overflow-y-auto rounded-[12px] border border-line bg-panel p-2.5 shadow-[0_10px_36px_rgb(20_20_30/0.18)] focus-visible:outline-none"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.stopPropagation();
@@ -123,19 +123,24 @@ export function VerdictPopover({
       ) : null}
 
       {priorAttempts.length ? (
-        <div className="flex flex-col gap-0.5 border-t border-line pt-1.5">
+        <div className="flex shrink-0 flex-col gap-0.5 border-t border-line pt-1.5">
           <span className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("pipelineVerdict.priorAttempts")}</span>
-          {priorAttempts.map((prior) => (
-            <span key={prior.n} className="font-mono text-[9.5px] text-dim">
-              {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : prior.state })}
-            </span>
-          ))}
+          {/* Retries append attempts without bound, so the audit scrolls within a
+              fixed height — otherwise a long history grows the popover past the
+              viewport and pushes the Retry/Skip footer off-screen. */}
+          <div className="flex max-h-24 flex-col gap-0.5 overflow-y-auto">
+            {priorAttempts.map((prior) => (
+              <span key={prior.n} className="font-mono text-[9.5px] text-dim">
+                {t("pipelineVerdict.attemptLine", { n: prior.n, status: prior.verdict ? verdictStatusLabel(t, prior.verdict.status) : prior.state })}
+              </span>
+            ))}
+          </div>
         </div>
       ) : null}
 
       {error ? <span className="truncate text-[10px] font-semibold text-err" title={error}>{error}</span> : null}
 
-      <div className="flex flex-wrap items-center gap-1.5 border-t border-line pt-2">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-line pt-2">
         {/* A review-loop's agentPath is the reviewer transcript the board folds
             into the round deck — opening it reveals nothing, so offer only the
             flow route below. A run stage opens its own node here (#93 §2.2). */}

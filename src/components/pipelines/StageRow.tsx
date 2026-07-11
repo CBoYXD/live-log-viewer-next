@@ -152,7 +152,15 @@ export function StageRow({
     });
   };
 
-  const runtimeSummary = [stage.engine, stage.model.trim() || defaultRuntime.model || t("pipelineDialog.modelPlaceholder"), stage.effort || defaultRuntime.effort || t("pipelineDialog.effortDefault")]
+  /* A blank override resolves server-side through the selected role's
+     parameter-aware runtime (Architect → claude · fable · high), not the Builder
+     default — so the collapsed summary and the model placeholder must fall back
+     through that same runtime, or they would show a launch config the API won't
+     use (e.g. gpt-5.6-sol under a Claude role). */
+  const roleRuntimeConfig = selectedRole ? roleRuntime(selectedRole, stage.roleParams) : null;
+  const fallbackModel = roleRuntimeConfig?.model || defaultRuntime.model;
+  const fallbackEffort = roleRuntimeConfig?.effort || defaultRuntime.effort;
+  const runtimeSummary = [stage.engine, stage.model.trim() || fallbackModel || t("pipelineDialog.modelPlaceholder"), stage.effort || fallbackEffort || t("pipelineDialog.effortDefault")]
     .filter(Boolean)
     .join(" · ");
 
@@ -279,7 +287,7 @@ export function StageRow({
           <input
             value={stage.model}
             list={modelListId}
-            placeholder={defaultRuntime.model || t("pipelineDialog.modelPlaceholder")}
+            placeholder={fallbackModel || t("pipelineDialog.modelPlaceholder")}
             aria-label={t("pipelineDialog.model")}
             className="h-7 w-0 min-w-24 flex-1 rounded-[8px] border border-line bg-bg px-1.5 font-mono text-[11px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onChange={(event) => patch({ model: event.target.value.trim(), runtimeOverridden: true })}

@@ -111,6 +111,11 @@ export interface AgentLink {
     hub: boolean;
     /** Whole-pipeline pause: freezes chevron drift while keeping tones. */
     paused: boolean;
+    /** A hub with no drawn rail: `from === to` and it only positions the control
+        pill. Emitted when every real edge collapsed (e.g. a 2-stage
+        build→review whose sole edge folds into the implementer) so the pipeline
+        still keeps a board control surface (AC6). */
+    anchorOnly?: boolean;
   };
   /** Message links (#12): one aggregated edge per endpoint pair. */
   message?: { count: number; lastAt: number };
@@ -252,6 +257,12 @@ export function derivePipelineLinks(
     const total = pipeline.stages.length;
     const cursorStageId = pipeline.cursor?.stageId ?? pipeline.stages.at(-1)?.id ?? null;
     const own: AgentLink[] = [];
+    /* Every materialized stage's resolved board vertex, kept so a pipeline whose
+       edges all collapse still has a node to anchor its control hub on. */
+    const vertices: Array<{ stageId: string; index: number; path: string }> = [];
+    /* An adjacent pair resolved to the same board node (a review-loop folding
+       into its implementer), so a real edge was intended but suppressed. */
+    let collapsed = false;
     let previous: { stageId: string; path: string } | null = null;
     for (let index = 0; index < pipeline.stages.length; index += 1) {
       const stage = pipeline.stages[index]!;
@@ -266,9 +277,11 @@ export function derivePipelineLinks(
         ? (attempt?.flowId ? flowImplementerPath(attempt.flowId) : null)
         : attempt?.agentPath ?? null;
       if (!vertexPath) continue;
+      vertices.push({ stageId: stage.id, index, path: vertexPath });
       if (previous) {
         const from = anchorOf(previous.path);
         const to = anchorOf(vertexPath);
+        if (from && to && from === to) collapsed = true;
         if (from && to && from !== to) {
           own.push({
             key: `pipelinelink::${pipeline.id}::${previous.stageId}::${stage.id}`,
@@ -293,8 +306,41 @@ export function derivePipelineLinks(
     }
     /* One hub per pipeline: the edge into the current stage, else the last edge. */
     const hubLink = own.find((link) => link.pipeline!.toStageId === cursorStageId) ?? own.at(-1);
-    if (hubLink) hubLink.pipeline!.hub = true;
+    if (hubLink) {
+      hubLink.pipeline!.hub = true;
+      links.push(...own);
+      continue;
+    }
     links.push(...own);
+    /* No drawn edge carries the hub, and a real edge collapsed into a single
+       node (the canonical case: a 2-stage build→review whose only edge folds
+       into the implementer). Anchor a rail-less control hub on the current
+       stage's node so the pipeline keeps board-level pause/retry/skip/close
+       (AC6). A chain that is merely still spawning (no adjacent pair yet) has no
+       collapse and draws nothing, as before. */
+    if (own.length || !collapsed) continue;
+    const anchor = vertices.find((vertex) => vertex.stageId === cursorStageId) ?? vertices.at(-1);
+    const at = anchor ? anchorOf(anchor.path) : null;
+    if (anchor && at) {
+      links.push({
+        key: `pipelinehub::${pipeline.id}`,
+        kind: "pipeline",
+        from: at,
+        to: at,
+        leg: null,
+        pipeline: {
+          pipeline,
+          fromStageId: anchor.stageId,
+          toStageId: anchor.stageId,
+          tone: pipelineLinkTone(pipeline, cursorStageId ?? anchor.stageId),
+          index: anchor.index + 1,
+          total,
+          hub: true,
+          paused: pipeline.state === "paused",
+          anchorOnly: true,
+        },
+      });
+    }
   }
   return links;
 }

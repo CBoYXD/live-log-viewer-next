@@ -43,4 +43,24 @@ describe("verdictPlacement (#93 finding: popover never renders off-screen)", () 
        worse spot. */
     expect(p.below).toBe(false);
   });
+
+  test("clamps a tall popover placed above so its top edge and footer stay on-screen", () => {
+    /* A long retry history bounds the box near 80vh; both edges must stay in view. */
+    const tall = { width: 260, height: 700 };
+    const anchor = { top: 400, bottom: 424, left: 470, width: 60 };
+    const p = verdictPlacement(anchor, tall, viewport);
+    expect(p.below).toBe(false);
+    /* box occupies [top - height, top]; both within [margin, vh - margin]. */
+    expect(p.top - tall.height).toBeGreaterThanOrEqual(8);
+    expect(p.top).toBeLessThanOrEqual(viewport.height - 8);
+  });
+
+  test("clamps a tall popover flipped below so its bottom edge stays on-screen", () => {
+    const tall = { width: 260, height: 500 };
+    const anchor = { top: 10, bottom: 34, left: 470, width: 60 };
+    const p = verdictPlacement(anchor, tall, viewport);
+    expect(p.below).toBe(true);
+    expect(p.top).toBeGreaterThanOrEqual(8);
+    expect(p.top + tall.height).toBeLessThanOrEqual(viewport.height - 8);
+  });
 });

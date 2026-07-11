@@ -60,6 +60,22 @@ test("a first attempt shows no earlier-attempts section", () => {
   expect(html).not.toContain("Earlier attempts");
 });
 
+test("an oversized retry history bounds the popover and scrolls the audit", () => {
+  /* Many retries would otherwise grow the popover past the viewport and push the
+     Retry/Skip footer off-screen; the root is capped and the audit scrolls. */
+  const attempts = Array.from({ length: 25 }, (_, i) => attempt(i + 1, { verdict: { status: "fail", findings: [] } }));
+  const current = attempts.at(-1)!;
+  const html = renderToStaticMarkup(
+    <VerdictPopover pipeline={pipeline(attempts)} stage={stage} attempt={current} onClose={() => {}} />,
+  );
+  /* Popover height is bounded, and the prior-attempt audit is a bounded scroll. */
+  expect(html).toContain("max-h-[80vh]");
+  expect(html).toContain("max-h-24");
+  expect(html).toContain("overflow-y-auto");
+  /* Attempt 24 (the last prior) is still present, just inside the scroll region. */
+  expect(html).toContain("Attempt 24:");
+});
+
 test("a review-loop verdict offers Open flow, not the folded reviewer transcript", () => {
   const reviewStage: PipelineStage = { ...stage, id: "review", kind: "review-loop" };
   /* agentPath is the reviewer transcript the board folds into the deck, so

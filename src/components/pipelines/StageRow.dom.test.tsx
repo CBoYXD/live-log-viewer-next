@@ -17,7 +17,9 @@ Object.assign(globalThis, {
   Node: dom.Node,
   HTMLElement: dom.HTMLElement,
   HTMLSelectElement: dom.HTMLSelectElement,
+  HTMLInputElement: dom.HTMLInputElement,
   Event: dom.Event,
+  MouseEvent: dom.MouseEvent,
 });
 
 function role(id: string, config: RoleConfig): RoleCatalogItem {
@@ -67,6 +69,36 @@ test("selecting a role then No role returns the runtime to the pipeline default"
     select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
   });
   expect(latest).toMatchObject({ roleId: "", engine: "codex", model: "", effort: "" });
+
+  flushSync(() => { root.unmount(); });
+  host.remove();
+});
+
+test("clearing a role's model override shows the role runtime, not the Builder fallback", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root: Root = createRoot(host);
+  flushSync(() => { root.render(<Host onStage={() => {}} />); });
+
+  const summary = () => host.querySelector(".font-mono") as HTMLElement;
+  const select = host.querySelector("select") as HTMLSelectElement;
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!.call(select, "architect");
+    select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  expect(summary().textContent).toContain("fable");
+
+  /* Open the runtime editor and clear the model. The collapsed summary must fall
+     back through Architect's own runtime (fable), not the Builder default (sol). */
+  const edit = host.querySelector('[aria-label="Edit runtime for stage 1"]') as HTMLElement;
+  flushSync(() => { edit.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event); });
+  const modelInput = host.querySelector('input[aria-label="Model"]') as HTMLInputElement;
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")!.set!.call(modelInput, "");
+    modelInput.dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  expect(summary().textContent).toContain("fable");
+  expect(summary().textContent).not.toContain("gpt-5.6-sol");
 
   flushSync(() => { root.unmount(); });
   host.remove();
