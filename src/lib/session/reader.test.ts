@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { readSession } from "./reader";
+import { readSession, scanUserAuthoredMessages } from "./reader";
 
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-session-reader-"));
 
@@ -65,4 +65,14 @@ describe("readSession", () => {
     expect(result.messages.map((item) => item.text)).toEqual(["Fix the tests", "Fixed."]);
     expect(result.traces[0]?.name).toBe("turn_complete");
   });
+});
+
+test("authorship scan reports malformed and oversized records as incomplete", () => {
+  const malformed = writeJsonl("malformed-authorship.jsonl", [{ type: "event_msg", payload: { type: "agent_message", message: "ok" } }]);
+  fs.appendFileSync(malformed, "{broken\n");
+  expect(scanUserAuthoredMessages(malformed, "codex", 1)).toEqual({ count: 0, complete: false });
+
+  const oversized = path.join(SANDBOX, "oversized-authorship.jsonl");
+  fs.writeFileSync(oversized, JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(8 * 1024 * 1024 + 1) } }) + "\n");
+  expect(scanUserAuthoredMessages(oversized, "codex", 1)).toEqual({ count: 0, complete: false });
 });

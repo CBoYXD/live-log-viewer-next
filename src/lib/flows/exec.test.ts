@@ -4,10 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { procBackend } from "@/lib/proc";
+
 /* The state dir must point at a sandbox before store.ts computes its
    module-level constants, so exec/store load dynamically after the env set. */
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-exec-test-"));
-const { headlessReviewStatus, reviewerCommand, scanEventStream } = await import("./exec");
+const { forgetHeadlessReview, headlessReviewStatus, reviewerCommand, scanEventStream } = await import("./exec");
 const { reviewerPrompt } = await import("./prompts");
 const { outputPathFor, stdoutPathFor } = await import("./store");
 
@@ -137,7 +139,7 @@ test("status is null when the round never left a trace", () => {
 test("restart reconstruction: alive pid reports running, dead pid yields the artifact verdict", async () => {
   const pid = spawnSleeper();
   writeArtifacts("flow-b", 1, EVENTS);
-  const round = { reviewerPid: pid, spawnStartedAt: new Date().toISOString() };
+  const round = { reviewerPid: pid, reviewerIdentity: procBackend.processIdentity(pid), spawnStartedAt: new Date().toISOString() };
 
   const running = headlessReviewStatus("flow-b", 1, round, "codex");
   expect(running?.status).toBe("running");
@@ -151,19 +153,43 @@ test("restart reconstruction: alive pid reports running, dead pid yields the art
   expect(done?.finalOutput).toBe("VERDICT: APPROVE\n\nShip it.");
 });
 
+test("restart reconstruction rejects a live pid whose process identity changed", () => {
+  const pid = spawnSleeper();
+  try {
+    const status = headlessReviewStatus("flow-reused", 1, {
+      reviewerPid: pid,
+      reviewerIdentity: `${pid}:stale`,
+      spawnStartedAt: new Date().toISOString(),
+    }, "codex");
+    expect(status?.status).not.toBe("running");
+  } finally {
+    process.kill(pid, "SIGKILL");
+  }
+});
+
+test("cancel leaves a reused persisted reviewer pid untouched", () => {
+  const pid = spawnSleeper();
+  try {
+    forgetHeadlessReview("flow-cancel-reused", 1, { reviewerPid: pid, reviewerIdentity: `${pid}:stale` });
+    expect(() => process.kill(pid, 0)).not.toThrow();
+  } finally {
+    process.kill(pid, "SIGKILL");
+  }
+});
+
 test("restart reconstruction: dead codex run without artifact falls back to the event-stream message", async () => {
   const pid = spawnSleeper();
   writeArtifacts("flow-c", 2, EVENTS);
   process.kill(pid, "SIGKILL");
   await waitForDeath(pid);
-  const status = headlessReviewStatus("flow-c", 2, { reviewerPid: pid, spawnStartedAt: new Date().toISOString() }, "codex");
+  const status = headlessReviewStatus("flow-c", 2, { reviewerPid: pid, reviewerIdentity: procBackend.processIdentity(pid), spawnStartedAt: new Date().toISOString() }, "codex");
   expect(status?.status).toBe("done");
   expect(status?.finalOutput).toContain("VERDICT: APPROVE");
 });
 
 test("restart reconstruction: claude reviewer's verdict is its captured stdout", () => {
   writeArtifacts("flow-d", 1, "VERDICT: REQUEST_CHANGES\n\n- fix the thing\n");
-  const status = headlessReviewStatus("flow-d", 1, { reviewerPid: 999_999_999, spawnStartedAt: new Date().toISOString() }, "claude");
+  const status = headlessReviewStatus("flow-d", 1, { reviewerPid: 999_999_999, reviewerIdentity: "999999999:gone", spawnStartedAt: new Date().toISOString() }, "claude");
   expect(status?.status).toBe("done");
   expect(status?.finalOutput).toBe("VERDICT: REQUEST_CHANGES\n\n- fix the thing");
 });
@@ -171,6 +197,6 @@ test("restart reconstruction: claude reviewer's verdict is its captured stdout",
 test("restart reconstruction: dead run with no output at all times out past the budget", () => {
   writeArtifacts("flow-e", 1, "");
   const started = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const status = headlessReviewStatus("flow-e", 1, { reviewerPid: 999_999_999, spawnStartedAt: started }, "codex");
+  const status = headlessReviewStatus("flow-e", 1, { reviewerPid: 999_999_999, reviewerIdentity: "999999999:gone", spawnStartedAt: started }, "codex");
   expect(status?.status).toBe("timeout");
 });

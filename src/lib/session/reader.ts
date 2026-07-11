@@ -214,13 +214,19 @@ function recordHasUserMessage(record: Record<string, unknown>, engine: Extract<E
 /** Scans every JSONL record with bounded memory and stops at the first human
     message. Oversized individual records are skipped while later records
     remain observable. */
-export function countUserAuthoredMessages(
+export interface AuthorshipScanResult {
+  count: number;
+  complete: boolean;
+}
+
+export function scanUserAuthoredMessages(
   pathname: string,
   engine: Extract<Engine, "claude" | "codex">,
   limit = Number.MAX_SAFE_INTEGER,
-): number {
+): AuthorshipScanResult {
   let fd: number | null = null;
   let count = 0;
+  let complete = true;
   try {
     fd = fs.openSync(pathname, "r");
     const chunk = Buffer.allocUnsafe(AUTHORSHIP_SCAN_CHUNK_BYTES);
@@ -235,6 +241,7 @@ export function countUserAuthoredMessages(
         return Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed)
           && recordHasUserMessage(parsed as Record<string, unknown>, engine));
       } catch {
+        complete = false;
         return false;
       }
     };
@@ -248,6 +255,7 @@ export function countUserAuthoredMessages(
           if (pending.length > AUTHORSHIP_SCAN_MAX_RECORD_CHARS) {
             pending = "";
             skippingRecord = true;
+            complete = false;
           }
         }
         if (newline === -1) return false;
@@ -264,17 +272,25 @@ export function countUserAuthoredMessages(
     for (;;) {
       const bytes = fs.readSync(fd, chunk, 0, chunk.length, null);
       if (bytes === 0) break;
-      if (consumeChunk(decoder.write(chunk.subarray(0, bytes)))) return count;
+      if (consumeChunk(decoder.write(chunk.subarray(0, bytes)))) return { count, complete };
     }
     const tail = decoder.end();
-    if (tail && consumeChunk(tail)) return count;
+    if (tail && consumeChunk(tail)) return { count, complete };
     if (!skippingRecord && Boolean(pending) && consume(pending)) count += 1;
-    return count;
+    return { count, complete };
   } catch {
-    return count;
+    return { count, complete: false };
   } finally {
     if (fd !== null) fs.closeSync(fd);
   }
+}
+
+export function countUserAuthoredMessages(
+  pathname: string,
+  engine: Extract<Engine, "claude" | "codex">,
+  limit = Number.MAX_SAFE_INTEGER,
+): number {
+  return scanUserAuthoredMessages(pathname, engine, limit).count;
 }
 
 export function hasUserAuthoredMessage(pathname: string, engine: Extract<Engine, "claude" | "codex">): boolean {

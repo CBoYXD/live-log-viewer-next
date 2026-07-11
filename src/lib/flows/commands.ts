@@ -131,7 +131,7 @@ function noteFromRequest(req: PatchFlowRequest): string | null {
  * the handle existed.
  */
 async function stopReviewer(flow: Flow, round: Round): Promise<void> {
-  forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  forgetHeadlessReview(flow.id, round.n, round);
   if (flow.reviewerMode !== "pane") return;
   try {
     const pane = round.reviewerPane;
@@ -225,7 +225,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.stateDetail = null;
   } else if (req.action === "retry-round") {
     if (flow.state !== "needs_decision" || !round) return { error: "flow cannot retry from its current state", status: 409 };
-    forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    forgetHeadlessReview(flow.id, round.n, round);
     Object.assign(round, {
       reviewerPath: null,
       sessionId: null,

@@ -273,3 +273,32 @@ test("dry-run is the default and real mode journals every actuation with its cla
   expect(real.agents[0]?.action).toBe("reaped");
   expect(journal).toMatchObject([{ paneId: "%20", class: "probe", reason: "idle-ttl-exceeded", outcome: "reaped" }]);
 });
+
+test("one rejected actuation is journaled and later candidates continue", async () => {
+  const first = transcript(31);
+  const second = transcript(32);
+  const report = evaluateReaper(input({
+    enabled: true,
+    registry: registryFor(new Map([
+      [first, emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" })],
+      [second, emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" })],
+    ])),
+    hosts: [host(31, first, 31), host(32, second, 32)],
+    files: [file(first, 61), file(second, 61)],
+    viewerOwnedPaths: new Set([first, second]),
+  }));
+  const journals: unknown[] = [];
+  let attempts = 0;
+
+  await expect(runEvaluatedReaper(report, {
+    actuate: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("lock rejected");
+      return true;
+    },
+    journal: (record) => journals.push(record),
+  })).resolves.toBe(report);
+
+  expect(report.agents.map((agent) => agent.action)).toEqual(["kill-failed", "reaped"]);
+  expect(journals).toMatchObject([{ outcome: "kill-failed" }, { outcome: "reaped" }]);
+});

@@ -12,7 +12,7 @@ import { loadFlows, saveFlows } from "@/lib/flows/store";
 import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
-import { countUserAuthoredMessages } from "@/lib/session/reader";
+import { scanUserAuthoredMessages } from "@/lib/session/reader";
 import { killTmuxHostIfMatches, tmuxEndpoint } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
@@ -90,7 +90,7 @@ function probePullRequest(evidence: FlowMergeEvidence): { number: number; merged
     if (!item || !Number.isInteger(item.number)) return null;
     const mergedAt = typeof item.mergedAt === "string" && item.mergedAt ? item.mergedAt : null;
     const headRefOid = typeof item.headRefOid === "string" && item.headRefOid ? item.headRefOid : null;
-    if (!evidence.prNumber && mergedAt && (!evidence.headSha || headRefOid !== evidence.headSha)) return null;
+    if (mergedAt && (!evidence.headSha || headRefOid !== evidence.headSha)) return null;
     return { number: item.number as number, mergedAt, headRefOid };
   } catch {
     return null;
@@ -112,10 +112,8 @@ export function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOv
         flow.mergeEvidence = evidence;
         changed = true;
       } else if (evidence.repository !== identity.repository || evidence.headRef !== identity.headRef || evidence.headSha !== identity.headSha) {
-        evidence.repository = identity.repository;
-        evidence.headRef = identity.headRef;
-        evidence.headSha = identity.headSha;
-        evidence.checkedAt = null;
+        evidence = { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null };
+        flow.mergeEvidence = evidence;
         changed = true;
       }
     }
@@ -128,7 +126,7 @@ export function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOv
     let confirmed: FlowMergeEvidence | null = null;
     if (evidence?.repository && evidence.headRef) {
       const pullRequest = (overrides.probePullRequest ?? probePullRequest)(evidence);
-      if (pullRequest?.mergedAt) {
+      if (pullRequest?.mergedAt && pullRequest.headRefOid === evidence.headSha) {
         confirmed = {
           ...evidence,
           prNumber: pullRequest.number,
@@ -180,16 +178,21 @@ function hasViewerWorkerLaunchPrompt(snapshot: ReturnType<AgentRegistry["snapsho
     && receipt.state === "completed");
 }
 
-function userAuthoredPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): Set<string> {
-  const protectedPaths = new Set<string>();
+function authorshipEvidence(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): {
+  userAuthoredPaths: Set<string>;
+  unverifiedPaths: Set<string>;
+} {
+  const userAuthoredPaths = new Set<string>();
+  const unverifiedPaths = new Set<string>();
   for (const host of hosts) {
     const pathname = host.primaryPath;
-    if (!pathname || protectedPaths.has(pathname) || !fs.existsSync(pathname)) continue;
+    if (!pathname || userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
     const launchPromptAllowance = hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0;
-    const count = countUserAuthoredMessages(pathname, host.engine, launchPromptAllowance + 1);
-    if (count > launchPromptAllowance) protectedPaths.add(pathname);
+    const scan = scanUserAuthoredMessages(pathname, host.engine, launchPromptAllowance + 1);
+    if (scan.count > launchPromptAllowance) userAuthoredPaths.add(pathname);
+    else if (!scan.complete) unverifiedPaths.add(pathname);
   }
-  return protectedPaths;
+  return { userAuthoredPaths, unverifiedPaths };
 }
 
 function viewerOwnedPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[]): Set<string> {
@@ -255,17 +258,18 @@ function makeInput(
   const flows = (overrides.loadFlows ?? loadFlows)();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
+  const authorship = authorshipEvidence(snapshot, hosts);
   return {
     now,
     registry: snapshot,
     hosts,
     reviewerProcesses: observeHeadlessReviewers(flows, overrides),
     viewerOwnedPaths: viewerOwnedPaths(snapshot, hosts),
-    authorshipUnverifiedPaths: missingTranscriptPaths,
+    authorshipUnverifiedPaths: new Set([...missingTranscriptPaths, ...authorship.unverifiedPaths]),
     files,
     flows,
     manualPaths: manualPaths(snapshot, hosts, files),
-    userAuthoredPaths: userAuthoredPaths(snapshot, hosts),
+    userAuthoredPaths: authorship.userAuthoredPaths,
     missingTranscriptPaths,
     mergedFlowIds: refreshMergedFlowIds(flows, overrides),
     firstObservedAt: state.firstObservedAt,

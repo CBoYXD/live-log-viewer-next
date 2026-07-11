@@ -295,7 +295,7 @@ async function inspectTmuxPane(
 }
 
 function sameProcess(expected: ProcessIdentity, pid: number, startIdentity: string | null): boolean {
-  return expected.pid === pid && (expected.startIdentity === null || expected.startIdentity === startIdentity);
+  return expected.startIdentity !== null && startIdentity !== null && expected.pid === pid && expected.startIdentity === startIdentity;
 }
 
 export async function verifyTmuxSpawnBinding(
@@ -399,6 +399,7 @@ export function selectSpawnedAgentProcess(
 }
 
 export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<boolean> {
+  if (host.server.startIdentity === null || host.panePid.startIdentity === null || host.agent.startIdentity === null) return false;
   const endpoint = createTmuxEndpointDescriptor(host.endpoint, process.getuid?.() ?? 0);
   const binding: TmuxSpawnBinding = {
     endpoint: host.endpoint,
@@ -409,7 +410,7 @@ export async function verifyTmuxHostEvidence(host: TmuxHostEvidence): Promise<bo
   };
   const pane = await verifyTmuxSpawnBinding(binding, endpoint);
   if (!pane || pane.windowName !== host.windowName || !pidAlive(host.agent.pid)) return false;
-  if (host.agent.startIdentity !== null && procBackend.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (procBackend.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
   if (!sameArgv(readArgv(host.agent.pid), host.argv)) return false;
   return ancestryDistance(host.agent.pid, host.panePid.pid, readPpid) !== null;
 }
@@ -438,6 +439,7 @@ export async function killTmuxHostIfMatches(
   host: TmuxHostEvidence,
   overrides: Partial<KillTmuxHostDeps> = {},
 ): Promise<boolean> {
+  if (host.server.startIdentity === null || host.panePid.startIdentity === null || host.agent.startIdentity === null) return false;
   const deps: KillTmuxHostDeps = {
     runTmux,
     processIdentity: (pid) => procBackend.processIdentity(pid),
@@ -458,7 +460,7 @@ export async function killTmuxHostIfMatches(
   };
   const pane = await verifyTmuxSpawnBinding(binding, endpoint, deps);
   if (!pane || pane.windowName !== host.windowName || !deps.pidAlive(host.agent.pid)) return false;
-  if (host.agent.startIdentity !== null && deps.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
+  if (deps.processIdentity(host.agent.pid) !== host.agent.startIdentity) return false;
   if (!sameArgv(deps.argv(host.agent.pid), host.argv)) return false;
   if (ancestryDistance(host.agent.pid, host.panePid.pid, deps.parentPid) === null) return false;
   const condition = `#{&&:#{==:#{pid},${host.server.pid}},#{&&:#{==:#{pane_id},${host.paneId}},#{==:#{pane_pid},${host.panePid.pid}}}}`;

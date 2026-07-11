@@ -8,7 +8,6 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
-import { procBackend } from "@/lib/proc";
 import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
@@ -218,7 +217,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   );
   if (launched.pid) {
     round.reviewerPid = launched.pid;
-    round.reviewerIdentity = procBackend.processIdentity(launched.pid);
+    round.reviewerIdentity = launched.identity;
   }
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
@@ -322,7 +321,7 @@ async function tickFlow(
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status) {
-        forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+        forgetHeadlessReview(flow.id, round.n, round);
         const parsed = parseFindings(status.finalOutput);
         if (parsed) {
           applyVerdict(flow, round, parsed);

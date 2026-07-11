@@ -287,7 +287,12 @@ export async function runEvaluatedReaper(
   if (report.mode === "dry-run") return report;
   for (const agent of report.agents) {
     if (!agent.eligible || agent.class === null) continue;
-    const killed = await deps.actuate(agent);
+    let killed = false;
+    try {
+      killed = await deps.actuate(agent);
+    } catch {
+      killed = false;
+    }
     agent.action = killed ? "reaped" : "kill-failed";
     deps.journal({
       at: new Date().toISOString(),

@@ -1,10 +1,11 @@
 import { resumeSpecFor } from "@/lib/agent/cli";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { deliveryFence } from "@/lib/accounts/migration/coordinator";
 import { requestAccountMigrationTick } from "@/lib/accounts/migration/controllerSignal";
 import { deliverToTranscriptHost, readTranscriptHosts, type HostDeliveryOutcome } from "@/lib/agent/transcriptHost";
 import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
+import { procBackend } from "@/lib/proc";
 import { detectBlockingGate, parseScreenMenu, screenWaitsForInput } from "@/lib/status";
 import {
   buildImagePayload,
@@ -215,7 +216,28 @@ interface KillConversationOverrides {
   pathAllowed?: typeof pathAllowed;
   listFiles?: typeof listFiles;
   registrySnapshot?: () => ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>;
+  registry?: Pick<AgentRegistry, "snapshot" | "withOperationLock" | "markUnhosted">;
   killHost?: typeof killTmuxHostIfMatches;
+}
+
+function registeredHostForPath(
+  snapshot: ReturnType<AgentRegistry["snapshot"]>,
+  filePath: string,
+): AgentRegistryEntry | null {
+  return Object.values(snapshot.entries)
+    .filter((candidate) => candidate.artifactPath === filePath && candidate.host !== null)
+    .sort((left, right) => right.claimEpoch - left.claimEpoch || right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
+}
+
+function sameRegisteredHost(left: TmuxHostEvidence | null, right: TmuxHostEvidence): boolean {
+  return Boolean(left
+    && left.paneId === right.paneId
+    && left.server.pid === right.server.pid
+    && left.server.startIdentity === right.server.startIdentity
+    && left.panePid.pid === right.panePid.pid
+    && left.panePid.startIdentity === right.panePid.startIdentity
+    && left.agent.pid === right.agent.pid
+    && left.agent.startIdentity === right.agent.startIdentity);
 }
 
 /** Closes the registry-owned pane for one root conversation. The registry
@@ -231,16 +253,29 @@ export async function killConversation(filePath: string, overrides: KillConversa
   if (entry && entry.parent) {
     return failure("a branch shares its root conversation pane and cannot be closed independently", 409);
   }
-  const snapshot = (overrides.registrySnapshot ?? (() => agentRegistry().snapshot()))();
-  const registered = Object.values(snapshot.entries)
-    .filter((candidate) => candidate.artifactPath === filePath && candidate.host !== null)
-    .sort((left, right) => right.claimEpoch - left.claimEpoch || right.updatedAt.localeCompare(left.updatedAt))[0];
+  const registry = overrides.registry ?? agentRegistry();
+  const readSnapshot = overrides.registry
+    ? () => registry.snapshot()
+    : overrides.registrySnapshot ?? (() => registry.snapshot());
+  const registered = registeredHostForPath(readSnapshot(), filePath);
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
+  const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+  const runLocked = overrides.registry || !overrides.registrySnapshot
+    ? <T>(task: () => Promise<T>) => registry.withOperationLock(registered.key, owner, task)
+    : <T>(task: () => Promise<T>) => task();
   try {
-    const killed = await (overrides.killHost ?? killTmuxHostIfMatches)(registered.host);
-    if (!killed) return failure("the registered pane changed or its process did not exit", 409);
-    forgetResumePane(filePath);
-    return { ok: true, target: registered.host.paneId };
+    return await runLocked(async () => {
+      const refreshed = registeredHostForPath(readSnapshot(), filePath);
+      if (!refreshed?.host) return failure("no registered agent pane for this conversation", 404);
+      const killed = await (overrides.killHost ?? killTmuxHostIfMatches)(refreshed.host);
+      if (!killed) return failure("the registered pane changed or its process did not exit", 409);
+      if (overrides.registry || !overrides.registrySnapshot) {
+        const current = registry.snapshot().entries[`${refreshed.key.engine}:${refreshed.key.sessionId}`];
+        if (sameRegisteredHost(current?.host ?? null, refreshed.host)) registry.markUnhosted(refreshed.key);
+      }
+      forgetResumePane(filePath);
+      return { ok: true, target: refreshed.host.paneId };
+    });
   } catch (error) {
     return failure(error);
   }

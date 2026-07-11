@@ -124,6 +124,39 @@ test("conversation kill rejects success when process-death verification fails", 
   expect(outcome).toEqual({ ok: false, outcome: "failed", error: "the registered pane changed or its process did not exit", status: 409 });
 });
 
+test("conversation kill refreshes the registry host inside the session lock", async () => {
+  const pathname = "/transcripts/racing.jsonl";
+  const oldSnapshot = killSnapshot(pathname, KILL_HOST);
+  const replacement: TmuxHostEvidence = {
+    ...KILL_HOST,
+    paneId: "%8",
+    panePid: { pid: 108, startIdentity: "108:one" },
+    agent: { pid: 208, startIdentity: "208:one" },
+  };
+  const freshSnapshot = structuredClone(oldSnapshot);
+  freshSnapshot.entries["codex:019f4e76-66b4-7f87-94b2-cfa9bf711111"]!.host = replacement;
+  let snapshots = 0;
+  const killed: string[] = [];
+  const unhosted: string[] = [];
+  const registry = {
+    snapshot: () => snapshots++ === 0 ? oldSnapshot : freshSnapshot,
+    withOperationLock: async (_key: unknown, _owner: unknown, task: () => Promise<unknown>) => task(),
+    markUnhosted: (key: { sessionId: string }) => { unhosted.push(key.sessionId); },
+  };
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registrySnapshot: () => oldSnapshot,
+    registry: registry as never,
+    killHost: async (host) => { killed.push(host.paneId); return true; },
+  });
+
+  expect(outcome).toEqual({ ok: true, target: "%8" });
+  expect(killed).toEqual(["%8"]);
+  expect(unhosted).toHaveLength(1);
+});
+
 test("image-only reservations stay request-local and never drain without the client payload", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "image-reservation-registry.json"));
   const observation: ConversationObservation = {

@@ -443,4 +443,27 @@ describe("killTmuxHostIfMatches", () => {
     expect(result).toBe(false);
     expect(killCommands).toBe(0);
   });
+
+  test("rejects destructive kills when any recorded process identity is unavailable", async () => {
+    for (const candidate of [
+      { ...host, server: { ...host.server, startIdentity: null } },
+      { ...host, panePid: { ...host.panePid, startIdentity: null } },
+      { ...host, agent: { ...host.agent, startIdentity: null } },
+    ]) {
+      let killCommands = 0;
+      expect(await killTmuxHostIfMatches(candidate, {
+        runTmux: async (args) => {
+          if (args[0] === "if-shell") killCommands += 1;
+          return { code: 0, stdout: "900\t%11\t100\tagents:2.0\tworker\tzsh\n", stderr: "" };
+        },
+        processIdentity: (pid) => `${pid}:one`,
+        argv: () => ["codex"],
+        pidAlive: () => true,
+        parentPid: (pid) => pid === 101 ? 100 : pid === 100 ? 900 : null,
+        sleep: async () => {},
+        maxVerifyAttempts: 2,
+      })).toBe(false);
+      expect(killCommands).toBe(0);
+    }
+  });
 });
