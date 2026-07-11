@@ -8,7 +8,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { tickFlows, persistTickFlows, flowTickBase } = await import("./engine");
+const { tickFlows, persistTickFlows, flowTickBase, reviewerOwnershipLost } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 
 afterAll(() => {
@@ -313,4 +313,44 @@ test("persistTickFlows preserves a flow created during the tick (issue #118 revi
   /* The ticked flow still advanced; the new flow survived untouched. */
   expect(after.find((flow) => flow.id === "flow-old")!.state).toBe("relaying");
   expect(after.find((flow) => flow.id === "flow-new")!.state).toBe("waiting_ready");
+});
+
+test("a reviewer spawned into a concurrently closed flow is detected as orphaned and its handle dropped (issue #118 review Finding 1)", () => {
+  /* The tick entered spawning and persisted spawnStartedAt; base = spawning. */
+  const spawning = raceFlow({
+    id: "flow-spawn",
+    state: "spawning",
+    reviewerMode: "pane",
+    rounds: [{
+      n: 1, reviewerPath: null, reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      reviewerPane: null, findingsPath: null, triggeredBy: "button", readyNote: null, verdict: null,
+      findingsCount: null, startedAt: "2026-06-06T00:00:00Z", spawnStartedAt: "2026-06-06T00:00:01Z",
+      relayStartedAt: null, reviewedAt: null, relayedAt: null, error: null,
+    }],
+  });
+  saveFlows([spawning]);
+  const clone = structuredClone(spawning);
+  const base = flowTickBase([clone]);
+
+  /* The operator closes the flow while the pane is being created; on disk it has
+     no pane handle yet, so close could not stop the reviewer. */
+  saveFlows([raceFlow({ id: "flow-spawn", state: "closed", closedAt: "2026-06-06T00:01:00Z", reviewerMode: "pane", rounds: spawning.rounds })]);
+
+  /* The tick finishes spawning: it stamps the pane handle and persists. */
+  clone.state = "reviewing";
+  clone.rounds[0]!.reviewerPane = { paneId: "%9", windowName: "codex-rev" };
+  persistTickFlows([clone], base);
+
+  const after = loadFlows()[0]!;
+  /* The close is respected (not reopened) and the pane handle was NOT persisted. */
+  expect(after.state).toBe("closed");
+  expect(after.rounds[0]!.reviewerPane).toBeNull();
+  /* So the engine's ownership check fires and the pane gets cleaned up. */
+  expect(reviewerOwnershipLost("flow-spawn")).toBe(true);
+});
+
+test("reviewerOwnershipLost is false while the flow is still open and alive", () => {
+  saveFlows([raceFlow({ id: "flow-open", state: "reviewing" })]);
+  expect(reviewerOwnershipLost("flow-open")).toBe(false);
+  expect(reviewerOwnershipLost("flow-missing")).toBe(true);
 });

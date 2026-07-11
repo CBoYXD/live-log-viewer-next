@@ -38,12 +38,20 @@ function seed(overrides: Partial<Flow> = {}): Flow {
 
 test("set-roles re-configures the reviewer for the next round and persists", () => {
   seed();
-  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "fable", effort: "" } } });
+  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "gpt-5-codex", effort: "" } } });
   expect(result.error).toBeUndefined();
-  expect(result.flow!.roles.reviewer).toEqual({ engine: "codex", model: "fable", effort: null });
+  expect(result.flow!.roles.reviewer).toEqual({ engine: "codex", model: "gpt-5-codex", effort: null });
   /* Implementer is untouched, and the change is written to the store. */
   expect(result.flow!.roles.implementer).toEqual({ engine: "codex", model: "gpt-5.6", effort: "medium" });
-  expect(loadFlows()[0]!.roles.reviewer.model).toBe("fable");
+  expect(loadFlows()[0]!.roles.reviewer.model).toBe("gpt-5-codex");
+});
+
+test("set-roles rejects a reviewer config the CLI cannot launch (issue #118 Finding 3)", () => {
+  seed();
+  /* codex + a claude model must not persist and fail later at spawn. */
+  expect(patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "fable" } } }).status).toBe(400);
+  expect(patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude" } } }).status).toBe(400);
+  expect(loadFlows()[0]!.roles.reviewer).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
 });
 
 test("set-roles can reseat the reviewer engine", () => {
@@ -89,4 +97,34 @@ test("set-roles rejects an invalid override and an empty payload", () => {
 test("set-roles refuses a closed flow", () => {
   seed({ state: "closed", closedAt: "2026-07-06T00:00:00Z" });
   expect(patchFlow("f1", { action: "set-roles", roles: { reviewer: { model: "fable" } } }).status).toBe(409);
+});
+
+test("advancing a spawn_pending round applies the freshly edited note (issue #118 Finding 4)", () => {
+  /* Manual mode: the round already exists (created at waiting_ready→spawn_pending)
+     with an old note; the operator revises it before spawning. */
+  seed({
+    mode: "manual",
+    state: "spawn_pending",
+    rounds: [{
+      n: 1, reviewerPath: null, findingsPath: null, triggeredBy: "button", readyNote: "old note",
+      verdict: null, findingsCount: null, startedAt: "2026-07-05T00:00:00Z", reviewedAt: null, relayedAt: null, error: null,
+    }] as never,
+  });
+  const result = patchFlow("f1", { action: "advance", note: "review the retry path carefully" });
+  expect(result.error).toBeUndefined();
+  expect(result.flow!.state).toBe("spawning");
+  expect(result.flow!.rounds[0]!.readyNote).toBe("review the retry path carefully");
+});
+
+test("advancing spawn_pending without a note keeps the existing round note", () => {
+  seed({
+    mode: "manual",
+    state: "spawn_pending",
+    rounds: [{
+      n: 1, reviewerPath: null, findingsPath: null, triggeredBy: "button", readyNote: "keep me",
+      verdict: null, findingsCount: null, startedAt: "2026-07-05T00:00:00Z", reviewedAt: null, relayedAt: null, error: null,
+    }] as never,
+  });
+  const result = patchFlow("f1", { action: "advance" });
+  expect(result.flow!.rounds[0]!.readyNote).toBe("keep me");
 });

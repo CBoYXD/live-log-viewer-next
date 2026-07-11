@@ -15,6 +15,22 @@ import type { SchemeGroup } from "./layout";
 
 const ENGINES: FlowEngine[] = ["claude", "codex"];
 
+/**
+ * Switching the engine invalidates the model (a claude model can't run on codex
+ * and vice-versa) and can invalidate the effort tier, so both are reset together
+ * (issue #118 review Finding 2). Model clears to the engine default; effort keeps
+ * a value only if the new engine still accepts it. Otherwise a stale gpt model
+ * would ride along a claude switch and fail the next launch / 400 the override.
+ */
+export function resetRuntimeForEngine(
+  next: FlowEngine,
+  ctl: { setEngine: (e: FlowEngine) => void; setModel: (m: string) => void; setEffort: (e: string) => void; effort: string },
+): void {
+  ctl.setEngine(next);
+  ctl.setModel("");
+  if (ctl.effort && !ENGINE_EFFORTS[next].includes(ctl.effort)) ctl.setEffort("");
+}
+
 /** How many attempts a pipeline stage has already run — 0 means it is still in
     the future and safe to re-configure (matches the engine's override guard). */
 function stageAttemptCount(group: SchemeGroup, stageId: string): number {
@@ -121,12 +137,15 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
 
   const closed = flow.state === "closed" || flow.state === "approved";
   /* The one action the current state is waiting on (Start review / Spawn / Relay
-     / Retry round / …). `advance` and `retry-round` create or restart the next
-     round, so they carry the next-round note; the others (spawn/relay hops) don't
-     consume it, so the note stays a no-op input there — but the button still lets
-     the operator drive the flow forward from the panel. */
+     / Retry round / …). The next-round note is delivered only where the backend
+     actually consumes it: advancing from waiting_ready (new round) or spawn_pending
+     (revising the created-but-unspawned round), and retry-round. A relay_pending
+     advance delivers findings to the implementer and never reads the note, so it
+     is not carried there (issue #118 Finding 4). */
   const pending = flowPresentation(t, flow, locale).pending;
-  const pendingCarriesNote = pending?.action === "advance" || pending?.action === "retry-round";
+  const pendingCarriesNote =
+    (pending?.action === "advance" && (flow.state === "waiting_ready" || flow.state === "spawn_pending")) ||
+    pending?.action === "retry-round";
 
   const run = async (label: string, action: () => Promise<string | null>) => {
     if (busy) return;
@@ -147,7 +166,7 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
 
       <span className="text-[10.5px] font-bold text-ink">{t("groupOverride.reviewerRole")}</span>
       <div className="flex items-end gap-1.5">
-        <EngineSelect value={engine} onChange={(next) => { setEngine(next); if (effort && !ENGINE_EFFORTS[next].includes(effort)) setEffort(""); }} />
+        <EngineSelect value={engine} onChange={(next) => resetRuntimeForEngine(next, { setEngine, setModel, setEffort, effort })} />
         <EffortSelect engine={engine} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
       </div>
       <label className="flex flex-col gap-1">
@@ -310,7 +329,7 @@ function StageForm({
         </select>
       </label>
       <div className="flex items-end gap-1.5">
-        <EngineSelect value={engine} onChange={(next) => { setEngine(next); if (effort && !ENGINE_EFFORTS[next].includes(effort)) setEffort(""); }} />
+        <EngineSelect value={engine} onChange={(next) => resetRuntimeForEngine(next, { setEngine, setModel, setEffort, effort })} />
         <EffortSelect engine={engine} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
       </div>
       <label className="flex flex-col gap-1">
@@ -396,7 +415,17 @@ function PipelineOverride({ group, onClose }: { group: SchemeGroup; onClose: () 
           </label>
           {/* Keyed on the stage id so switching stages remounts the form with the
               picked stage's config — no reset-in-effect. */}
-          <StageForm key={stage.id} group={group} stage={stage} busy={busy} disabled={closed} run={run} />
+          {/* Key on the effective role/runtime + prompt, not just the id, so once
+              an override resolves new defaults the form remounts and re-seeds
+              instead of holding the previous engine/model/effort (Finding 5). */}
+          <StageForm
+            key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`}
+            group={group}
+            stage={stage}
+            busy={busy}
+            disabled={closed}
+            run={run}
+          />
         </>
       ) : (
         <span className="text-[11px] font-semibold text-dim">{t("groupOverride.noEditableStage")}</span>

@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
 
+import { isEngineEffort } from "@/lib/agent/efforts";
+import { isCodexLaunchModel, normalizeClaudeLaunchModel } from "@/lib/agent/models";
 import { agentRegistry } from "@/lib/agent/registry";
 import { headCwd } from "@/lib/agent/transcript";
 import { livePaneTarget } from "@/lib/delivery";
@@ -53,6 +55,15 @@ export function applyRoleOverride(current: RoleConfig, patch: unknown): RoleConf
     if (p.effort !== null && typeof p.effort !== "string") return null;
     next.effort = typeof p.effort === "string" && p.effort.trim() ? p.effort.trim() : null;
   }
+  /* Validate the MERGED config through the canonical launch validators, not just
+     primitive shapes (issue #118 Finding 3): a claude+gpt / codex+fable / bad
+     effort combination must be rejected here rather than persisting and failing at
+     the next reviewer launch. */
+  if (next.model) {
+    if (next.engine === "claude" && !normalizeClaudeLaunchModel(next.model)) return null;
+    if (next.engine === "codex" && !isCodexLaunchModel(next.model)) return null;
+  }
+  if (next.effort && !isEngineEffort(next.engine, next.effort)) return null;
   return next;
 }
 
@@ -237,6 +248,12 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       flow.rounds.push(newRound(flow, "button", noteFromRequest(req)));
       flow.state = flow.mode === "manual" ? "spawn_pending" : "spawning";
     } else if (flow.state === "spawn_pending") {
+      /* The round exists but has not spawned yet, so a freshly edited note must
+         still reach the next reviewer (issue #118 Finding 4): manual mode creates
+         the round at waiting_ready→spawn_pending, then the operator can revise the
+         note before the spawn. Only overwrite when a note was actually sent. */
+      const note = noteFromRequest(req);
+      if (note !== null && round) round.readyNote = note;
       flow.state = "spawning";
     } else if (flow.state === "relay_pending") {
       flow.state = "relaying";

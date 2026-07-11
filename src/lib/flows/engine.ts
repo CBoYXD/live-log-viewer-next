@@ -8,7 +8,8 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
-import { spawnAgentWithPrompt } from "@/lib/tmux";
+import { isShellCommand } from "@/lib/status";
+import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
@@ -186,7 +187,29 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
   flow.stateDetail = null;
 }
 
-async function launchReviewer(flow: Flow, round: Round): Promise<void> {
+/** Has the flow lost the ability to own the reviewer we just spawned? A
+    concurrent close (or a delete) during the await means the spawned reviewer is
+    orphaned — the tick's merge will drop our handle, so we must stop it here. */
+export function reviewerOwnershipLost(flowId: string): boolean {
+  const disk = loadFlows().find((flow) => flow.id === flowId);
+  return !disk || disk.state === "closed";
+}
+
+/** Best-effort kill of a pane reviewer we spawned but can no longer own. The
+    window-name check guards against pane-id reuse; a shell there means the agent
+    already exited. */
+async function stopOrphanPane(round: Round): Promise<void> {
+  const pane = round.reviewerPane;
+  if (!pane) return;
+  try {
+    const info = await paneInfo(pane.paneId);
+    if (info && info.windowName === pane.windowName && !isShellCommand(info.command)) await killPane(pane.paneId);
+  } catch {
+    /* pane already gone */
+  }
+}
+
+async function launchReviewer(flow: Flow, round: Round, persistCheckpoint: () => void): Promise<void> {
   const prompt = reviewerPrompt(flow, round);
   /* The frozen per-round role, so a set-roles between spawn and launch cannot
      retarget this reviewer's engine/model/effort. */
@@ -218,6 +241,11 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     });
     if (transcript) round.reviewerPath = transcript;
     if (!round.reviewerPath && pane.panePid) round.error = null;
+    /* Persist the pane handle NOW so a close that races the tail of this spawn can
+       find and stop it; if the flow was already closed while we were spawning, the
+       merge dropped our handle and we own an orphan — kill it. */
+    persistCheckpoint();
+    if (reviewerOwnershipLost(flow.id)) await stopOrphanPane(round);
     return;
   }
   const launched = startHeadlessReview(
@@ -233,6 +261,11 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   if (launched.pid) round.reviewerPid = launched.pid;
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
+  /* Same ownership guard as the pane branch: persist the pid, and if the flow was
+     closed while the headless reviewer was launching, terminate the orphan
+     (forgetHeadlessReview SIGTERM/SIGKILLs the detached process group). */
+  persistCheckpoint();
+  if (reviewerOwnershipLost(flow.id)) forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
 }
 
 async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, round: Round): Promise<void> {
@@ -305,7 +338,7 @@ async function tickFlow(
     try {
       round.spawnStartedAt = isoNow();
       persistCheckpoint();
-      await launchReviewer(flow, round);
+      await launchReviewer(flow, round, persistCheckpoint);
     } catch (error) {
       round.error = error instanceof Error ? error.message : String(error);
       markNeedsDecision(flow, round.error);

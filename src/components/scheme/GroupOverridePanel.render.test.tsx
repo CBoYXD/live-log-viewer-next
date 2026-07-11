@@ -4,10 +4,39 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { Flow } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 
-import { GroupOverridePanel } from "./GroupOverridePanel";
+import { GroupOverridePanel, resetRuntimeForEngine } from "./GroupOverridePanel";
 import type { SchemeGroup } from "./layout";
 
 const noop = () => undefined;
+
+test("resetRuntimeForEngine clears the model and normalizes effort on an engine switch (issue #118 review F2)", () => {
+  /* codex→claude: model always cleared; a claude-valid effort survives. */
+  {
+    const calls: Record<string, string> = {};
+    resetRuntimeForEngine("claude", {
+      setEngine: (e) => (calls.engine = e),
+      setModel: (m) => (calls.model = m),
+      setEffort: (e) => (calls.effort = e),
+      effort: "high",
+    });
+    expect(calls.engine).toBe("claude");
+    expect(calls.model).toBe("");
+    expect("effort" in calls).toBe(false); // high is valid for claude — kept
+  }
+  /* claude(max)→codex: model cleared AND the codex-invalid max effort reset. */
+  {
+    const calls: Record<string, string> = {};
+    resetRuntimeForEngine("codex", {
+      setEngine: (e) => (calls.engine = e),
+      setModel: (m) => (calls.model = m),
+      setEffort: (e) => (calls.effort = e),
+      effort: "max",
+    });
+    expect(calls.engine).toBe("codex");
+    expect(calls.model).toBe("");
+    expect(calls.effort).toBe(""); // max is invalid for codex — cleared
+  }
+});
 
 const flow = {
   id: "f1",

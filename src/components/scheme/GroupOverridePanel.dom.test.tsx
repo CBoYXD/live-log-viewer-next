@@ -150,6 +150,69 @@ function effortOptions(host: HTMLElement): string[] {
   return Array.from(select.options).map((o) => o.value);
 }
 
+function selectByOption(host: HTMLElement, optionValue: string): HTMLSelectElement {
+  return Array.from(host.querySelectorAll("select")).find((s) =>
+    Array.from(s.options).some((o) => o.value === optionValue),
+  ) as HTMLSelectElement;
+}
+
+function setSelect(select: HTMLSelectElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(dom.HTMLSelectElement.prototype, "value")!.set!;
+  flushSync(() => {
+    setter.call(select, value);
+    select.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event);
+  });
+}
+
+function stagePipeline(effectiveRole: Record<string, unknown>): Pipeline {
+  return {
+    ...(pipelineGroup.pipeline as Pipeline),
+    stages: [
+      (pipelineGroup.pipeline as Pipeline).stages[0]!,
+      { ...(pipelineGroup.pipeline as Pipeline).stages[1]!, role: undefined, effectiveRole },
+    ],
+  } as unknown as Pipeline;
+}
+
+test("switching the engine clears the previous engine's model (issue #118 review F2, codex→claude)", () => {
+  const group = { ...pipelineGroup, pipeline: stagePipeline({ engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", roleId: null, promptScaffold: null }) };
+  const { host, root } = mount(<GroupOverridePanel group={group} onClose={() => undefined} />);
+  const modelInput = host.querySelector('input[placeholder]') as HTMLInputElement;
+  expect(modelInput.value).toBe("gpt-5.6");
+  setSelect(selectByOption(host, "codex"), "claude"); // the engine select offers codex
+  expect(modelInput.value).toBe(""); // the gpt model no longer rides along
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("switching the engine resets an incompatible effort (issue #118 review F2, claude→codex)", () => {
+  const group = { ...pipelineGroup, pipeline: stagePipeline({ engine: "claude", model: "opus", effort: "max", access: "read-write", roleId: null, promptScaffold: null }) };
+  const { host, root } = mount(<GroupOverridePanel group={group} onClose={() => undefined} />);
+  const effort = selectByOption(host, "xhigh");
+  expect(effort.value).toBe("max");
+  setSelect(selectByOption(host, "codex"), "codex"); // switch engine to codex
+  expect(effort.value).toBe(""); // codex has no max tier — cleared to default
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+test("the stage form re-seeds when an override resolves new effective runtime (issue #118 review F5)", () => {
+  const before = { ...pipelineGroup, pipeline: stagePipeline({ engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", roleId: null, promptScaffold: null }) };
+  const { host, root } = mount(<GroupOverridePanel group={before} onClose={() => undefined} />);
+  const modelInput = () => host.querySelector('input[placeholder]') as HTMLInputElement;
+  expect(modelInput().value).toBe("gpt-5.6");
+
+  /* The poll refetches after the override; the same stage id now carries the
+     role's resolved runtime. The form must remount and show the new value, not
+     the stale gpt-5.6 that a later prompt edit would otherwise re-submit. */
+  const after = { ...pipelineGroup, pipeline: stagePipeline({ engine: "claude", model: "fable", effort: "high", access: "read-write", roleId: "architect", promptScaffold: null }) };
+  flushSync(() => root.render(<GroupOverridePanel group={after} onClose={() => undefined} />));
+  expect(modelInput().value).toBe("fable");
+
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 test("the effort control offers only tiers the selected engine accepts (issue #118 review)", () => {
   /* A codex stage must NOT offer max (resolvePipelineRole would 400 codex+max). */
   const codexStage = {
