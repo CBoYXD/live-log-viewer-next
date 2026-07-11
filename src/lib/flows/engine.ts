@@ -425,25 +425,36 @@ async function tickFlow(
 
 /** The disk state a tick started from, per flow, so its later save can tell an
     operator's concurrent lifecycle change apart from the tick's own progress. */
-export type FlowTickBase = { state: FlowState; roundsLen: number; closedAt: string | null };
+export type FlowTickBase = { snapshot: string; state: FlowState; roundsLen: number; closedAt: string | null };
 
 export function flowTickBase(flows: Flow[]): Map<string, FlowTickBase> {
-  return new Map(flows.map((flow) => [flow.id, { state: flow.state, roundsLen: flow.rounds.length, closedAt: flow.closedAt }]));
+  return new Map(flows.map((flow) => [flow.id, {
+    /* Full pre-tick JSON so persistTickFlows can tell "the tick changed nothing"
+       apart from a real tick delta and never write a stale clone over a
+       concurrent operator edit. */
+    snapshot: JSON.stringify(flow),
+    state: flow.state,
+    roundsLen: flow.rounds.length,
+    closedAt: flow.closedAt,
+  }]));
 }
 
 /**
  * Persists the tick's result by MERGING it into the freshest on-disk snapshot,
  * never overwriting the registry with the stale clone (issue #118 review). The
  * tick clones flows at start and then awaits reviewer launch/relay; during that
- * window an operator can close/pause/resume/retry a flow or create a new one. So,
- * starting from disk:
+ * window an operator can close/pause/resume/retry/set-roles a flow or create a
+ * new one. So, starting from disk:
  *   - a flow the tick never held (created concurrently) is kept as-is;
+ *   - a flow the tick did NOT change is kept from disk verbatim, so a concurrent
+ *     operator edit (e.g. set-roles updating a spawn_pending round's frozen
+ *     reviewerRole) is never clobbered by the tick's stale clone;
  *   - a flow whose disk state/rounds/closedAt diverged from the tick's base was
- *     taken over by the operator — the operator wins, the tick's result is
- *     dropped for it (so a concurrent close is never reopened);
- *   - otherwise the tick's result lands, but operator-owned config (roles,
- *     roundLimit, mode) is taken from disk so a config change without a lifecycle
- *     change is never reverted.
+ *     taken over by the operator — the operator wins (a close is never reopened);
+ *   - otherwise the tick's result lands, but operator-owned fields are taken from
+ *     disk: top-level roles/roundLimit/mode, and each unstarted round's
+ *     reviewerRole (the tick never edits an unspawned round's snapshot — only
+ *     set-roles does), so a config change without a lifecycle change survives.
  * Fully synchronous, so no patchFlow can interleave between the read and write.
  */
 export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>): void {
@@ -452,13 +463,24 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
     const tick = tickById.get(diskFlow.id);
     if (!tick) return diskFlow;
     const start = base.get(diskFlow.id);
+    if (!start) return diskFlow;
+    /* The tick touched nothing on this flow → whatever is on disk now wins. */
+    if (JSON.stringify(tick) === start.snapshot) return diskFlow;
     const takenOver =
-      !start ||
       diskFlow.state !== start.state ||
       diskFlow.rounds.length !== start.roundsLen ||
       diskFlow.closedAt !== start.closedAt;
     if (takenOver) return diskFlow;
-    return { ...tick, roles: diskFlow.roles, roundLimit: diskFlow.roundLimit, mode: diskFlow.mode };
+    /* Fence each unstarted round's reviewer snapshot to the disk value: the tick
+       never writes an unspawned round's reviewerRole, so any difference is a
+       concurrent set-roles that must survive the merge. */
+    const rounds = tick.rounds.map((round, index) => {
+      const diskRound = diskFlow.rounds[index];
+      return diskRound && round.spawnStartedAt == null && diskRound.reviewerRole !== undefined
+        ? { ...round, reviewerRole: diskRound.reviewerRole }
+        : round;
+    });
+    return { ...tick, rounds, roles: diskFlow.roles, roundLimit: diskFlow.roundLimit, mode: diskFlow.mode };
   });
   saveFlows(merged);
 }

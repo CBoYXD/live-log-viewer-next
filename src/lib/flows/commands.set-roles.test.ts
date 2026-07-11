@@ -5,7 +5,7 @@ import path from "node:path";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-set-roles-"));
 const { patchFlow } = await import("./commands");
-const { reviewerRoleFor } = await import("./engine");
+const { reviewerRoleFor, flowTickBase, persistTickFlows } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 import type { Flow } from "./types";
 
@@ -106,6 +106,50 @@ test("set-roles reaches a pending manual round so the imminent Spawn uses the ne
   const advanced = patchFlow("f1", { action: "advance" }).flow!;
   expect(advanced.state).toBe("spawning");
   expect(reviewerRoleFor(advanced, advanced.rounds[0]!)).toEqual({ engine: "claude", model: "fable", effort: "high" });
+});
+
+function spawnPendingRound() {
+  return {
+    n: 1, reviewerPath: null, reviewerRole: { engine: "codex", model: "gpt-5.6", effort: "high" },
+    findingsPath: null, triggeredBy: "button", readyNote: null, verdict: null, findingsCount: null,
+    startedAt: "2026-07-05T00:00:00Z", spawnStartedAt: null, relayStartedAt: null, reviewedAt: null,
+    relayedAt: null, error: null,
+  };
+}
+
+test("a concurrent tick save does not revert a set-roles pending-round override (issue #118 review)", () => {
+  /* The tick clones a spawn_pending flow it does not change. */
+  seed({ mode: "manual", state: "spawn_pending", rounds: [spawnPendingRound()] as never });
+  const clone = structuredClone(loadFlows()[0]!);
+  const base = flowTickBase([clone]);
+
+  /* While the tick awaits work on ANOTHER flow, the operator overrides the
+     reviewer; round-7 pushes the new role onto the pending round on disk. */
+  patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
+  expect(loadFlows()[0]!.rounds[0]!.reviewerRole).toEqual({ engine: "claude", model: "fable", effort: "high" });
+
+  /* The tick's later save (triggered by the other flow) must not restore the
+     stale codex round role. */
+  persistTickFlows([clone], base);
+  const after = loadFlows()[0]!;
+  expect(after.rounds[0]!.reviewerRole).toEqual({ engine: "claude", model: "fable", effort: "high" });
+  expect(after.roles.reviewer).toMatchObject({ engine: "claude", model: "fable" });
+});
+
+test("a tick that DID change the flow still fences the pending round's disk-owned snapshot (issue #118 review)", () => {
+  seed({ mode: "manual", state: "spawn_pending", rounds: [spawnPendingRound()] as never });
+  const clone = structuredClone(loadFlows()[0]!);
+  const base = flowTickBase([clone]);
+  /* A tick-owned change that keeps state/rounds the same (e.g. re-homed path). */
+  clone.implementerPath = "/impl-canonical";
+
+  patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
+  persistTickFlows([clone], base);
+
+  const after = loadFlows()[0]!;
+  /* Tick change applied, but the unstarted round keeps the operator's new role. */
+  expect(after.implementerPath).toBe("/impl-canonical");
+  expect(after.rounds[0]!.reviewerRole).toEqual({ engine: "claude", model: "fable", effort: "high" });
 });
 
 test("set-roles leaves a spawning round's frozen snapshot untouched (issue #118 review)", () => {
