@@ -126,6 +126,7 @@ export const en = {
   "accounts.removeConfirmCta": "Confirm",
   "accounts.removeConfirmCancel": "Cancel",
   "accounts.removeBlocked": "{label} still has an active session or sign-in.",
+  "accounts.removeHistoryBlocked": "Migrate the current conversations from {label} before removing this account.",
   "accounts.removeFailed": "Could not remove this account.",
   "accounts.cleanupFailed": "Could not clean up abandoned homes.",
   "accounts.forceRemove": "Force remove",

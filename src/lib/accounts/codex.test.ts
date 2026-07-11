@@ -105,7 +105,7 @@ test("managed Codex account removal deletes its registry record and home, then c
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
-test("a home deletion failure keeps the Codex account registered and retryable", () => {
+test("a home deletion failure leaves a removable Codex orphan after logical removal", () => {
   const account = createManagedCodexAccount("Retry removal");
   const originalRm = fs.rmSync;
   fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
@@ -113,14 +113,15 @@ test("a home deletion failure keeps the Codex account registered and retryable",
     return originalRm(target, options);
   }) as typeof fs.rmSync;
   try {
-    expect(() => removeManagedCodexAccount(account.id)).toThrow("denied");
+    expect(() => removeManagedCodexAccount(account.id)).not.toThrow();
   } finally {
     fs.rmSync = originalRm;
   }
 
-  expect(listCodexAccounts().map((item) => item.id)).toContain(account.id);
+  expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
-  expect(() => removeManagedCodexAccount(account.id)).not.toThrow();
+  expect(cleanupOrphanedCodexHomes()).toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(false);
 });
 
 test("orphan cleanup propagates a Codex accounts-root read failure", () => {

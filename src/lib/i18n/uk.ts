@@ -120,6 +120,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.removeConfirmCta": "Підтвердити",
   "accounts.removeConfirmCancel": "Скасувати",
   "accounts.removeBlocked": "Для {label} ще є активна сесія або вхід.",
+  "accounts.removeHistoryBlocked": "Перенесіть поточні розмови з {label}, перш ніж видаляти цей акаунт.",
   "accounts.removeFailed": "Не вдалося видалити цей акаунт.",
   "accounts.cleanupFailed": "Не вдалося очистити покинуті теки.",
   "accounts.forceRemove": "Видалити примусово",

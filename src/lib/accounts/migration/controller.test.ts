@@ -72,6 +72,22 @@ test("controller runs a trailing cycle when a signal arrives during reconciliati
   expect(maxActiveCycles).toBe(1);
 });
 
+test("controller preserves one trailing cycle when the running cycle fails", async () => {
+  let release = () => {};
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let cycles = 0;
+  const controller = new AccountMigrationController(
+    new AgentRegistry(path.join(stateDir, "failing-trailing-registry.json")),
+    { tick: async () => {} } as never,
+    async () => { cycles += 1; if (cycles === 1) { await blocked; throw new Error("cycle failed"); } },
+  );
+  const first = controller.tick();
+  controller.tick();
+  release();
+  await expect(first).rejects.toThrow("cycle failed");
+  expect(cycles).toBe(2);
+});
+
 test("three controller cycles move depleted Main to a stronger managed account and suppress a bounce", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-account-controller-auto-"));
   try {

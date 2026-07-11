@@ -86,7 +86,7 @@ test("managed account removal deletes its registry record and home, while orphan
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
-test("a home deletion failure keeps the Claude account registered and retryable", () => {
+test("a home deletion failure leaves a removable Claude orphan after logical removal", () => {
   const account = mod.createManagedClaudeAccount("Retry removal");
   const originalRm = fs.rmSync;
   fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
@@ -94,14 +94,15 @@ test("a home deletion failure keeps the Claude account registered and retryable"
     return originalRm(target, options);
   }) as typeof fs.rmSync;
   try {
-    expect(() => mod.removeManagedClaudeAccount(account.id)).toThrow("denied");
+    expect(() => mod.removeManagedClaudeAccount(account.id)).not.toThrow();
   } finally {
     fs.rmSync = originalRm;
   }
 
-  expect(mod.listClaudeAccounts().map((item) => item.id)).toContain(account.id);
+  expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
-  expect(() => mod.removeManagedClaudeAccount(account.id)).not.toThrow();
+  expect(mod.cleanupOrphanedClaudeHomes()).toContain(account.id);
+  expect(fs.existsSync(account.home)).toBe(false);
 });
 
 test("orphan cleanup propagates a Claude accounts-root read failure", () => {

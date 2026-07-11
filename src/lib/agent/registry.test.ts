@@ -28,6 +28,20 @@ function spawnEntry(pathname: string, accountId = "terra") {
 }
 
 describe("agent registry", () => {
+  test("account-retirement compensation preserves unrelated concurrent mutations", () => {
+    const store = registry();
+    store.setEngineRouting("codex", "work");
+    const before = store.snapshot();
+    store.retireAccount("codex", "work", "default");
+    const retired = store.snapshot();
+    store.setAutoBalancePolicy("claude", false, store.autoBalancePolicy("claude").revision);
+
+    store.restoreSnapshot(retired, before);
+
+    expect(store.engineRouting("codex").activeAccountId).toBe("work");
+    expect(store.autoBalancePolicy("claude").enabled).toBeFalse();
+  });
+
   test("writes receipts and a canonical atomic entry", () => {
     const store = registry();
     const receipt = store.beginSpawn("codex", "/repo");
@@ -248,11 +262,12 @@ describe("agent registry", () => {
       host: { kind: "tmux", endpoint: "/tmp", server: { pid: 9, startIdentity: "9:a" }, paneId: "%9", panePid: { pid: 99, startIdentity: "99:a" }, windowName: "codex", agent: { pid: 100, startIdentity: "100:a" }, argv: ["codex"] },
     });
     expect(observed.kind).toBe("settled");
+    const revisionAfterObservedSettlement = store.snapshot().conversationRevision.codex;
     const route = store.settleSpawn(receipt.launchId, spawnEntry(path));
     expect(route).toMatchObject({ kind: "settled", receipt: { completionMode: "route-recovered", accountId: "terra", conversationId: begun.receipt.conversationId } });
     const snapshot = store.snapshot();
     expect(snapshot.conversations[begun.receipt.conversationId]?.generations).toHaveLength(1);
-    expect(snapshot.conversationRevision.codex).toBe(1);
+    expect(snapshot.conversationRevision.codex).toBe(revisionAfterObservedSettlement);
     expect(snapshot.entries["codex:019f4906-3f67-7b72-9fbc-9ec3b5ad1326"]?.launchProfile?.parentConversationId).toBe("conversation_parent");
     expect(snapshot.lineageEdges[begun.receipt.conversationId]).toMatchObject({
       childSessionKey: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },

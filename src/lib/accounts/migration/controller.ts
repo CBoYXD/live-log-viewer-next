@@ -84,10 +84,13 @@ export class AccountMigrationController {
   }
 
   private async runRequestedCycles(): Promise<void> {
+    let failure: unknown = null;
     do {
       this.trailingCycleRequested = false;
-      await (this.cycle?.() ?? this.run());
+      try { await (this.cycle?.() ?? this.run()); }
+      catch (error) { failure ??= error; }
     } while (this.trailingCycleRequested);
+    if (failure) throw failure;
   }
 
   private async run(): Promise<void> {

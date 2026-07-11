@@ -400,22 +400,12 @@ export function removeManagedCodexAccount(id: string): void {
     const home = managedHome(id);
     const exists = fs.existsSync(home);
     if (exists && !managedHomeIsSafe(id, true)) throw new UnsafeCodexHomeError();
-    const quarantine = `${home}.removing.${process.pid}.${Date.now()}`;
-    if (exists) fs.renameSync(home, quarantine);
-    let registryWritten = false;
-    try {
-      writeRegistry({
-        ...registry,
-        active: registry.active === id ? DEFAULT_ID : registry.active,
-        accounts: registry.accounts.filter((account) => account.id !== id),
-      });
-      registryWritten = true;
-      if (exists) fs.rmSync(quarantine, { recursive: true, force: true });
-    } catch (error) {
-      if (exists && fs.existsSync(quarantine) && !fs.existsSync(home)) fs.renameSync(quarantine, home);
-      if (registryWritten) writeRegistry(registry);
-      throw error;
-    }
+    writeRegistry({
+      ...registry,
+      active: registry.active === id ? DEFAULT_ID : registry.active,
+      accounts: registry.accounts.filter((account) => account.id !== id),
+    });
+    if (exists) try { fs.rmSync(home, { recursive: true, force: true }); } catch { /* orphan cleanup retries the canonical managed home */ }
   });
 }
 

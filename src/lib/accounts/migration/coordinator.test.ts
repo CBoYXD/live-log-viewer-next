@@ -265,6 +265,23 @@ describe("durable account migration coordinator", () => {
     expect(result.intent.state).toBe("complete");
   });
 
+  test("delivery placement and Stop invalidate readiness-sensitive previews", async () => {
+    const store = registry();
+    store.reconcileConversations([observation("/revision-history.jsonl", "a", "idle")]);
+    const conversation = store.conversationForPath("/revision-history.jsonl")!;
+    const beforeDelivery = store.engineRouting("codex").revision;
+    store.holdDelivery(conversation.id, "queued", "revision-delivery");
+    expect(store.engineRouting("codex").revision).toBe(beforeDelivery + 1);
+    store.recordDeliveryOutcome(store.pendingDeliveries(conversation.id)[0]!.id, "delivered");
+    const intent = store.commitMigrationIntent({
+      engine: "codex", targetId: "b", origin: "manual", requestId: "revision-stop",
+      expectedRevision: store.engineRouting("codex").revision, scope: "all",
+    });
+    const beforeStop = store.engineRouting("codex").revision;
+    store.setMigrationIntentState(intent.id, "stopped", intent.revision);
+    expect(store.engineRouting("codex").revision).toBe(beforeStop + 1);
+  });
+
   test("preview reads the controller inventory without rewriting the registry", async () => {
     const store = registry();
     store.reconcileConversations([observation("/owned.jsonl", "managed", "idle")]);

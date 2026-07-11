@@ -130,7 +130,7 @@ export type AccountRetryAction =
 export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
-  | "accounts.removeBlocked" | "accounts.removeFailed" | "accounts.cleanupFailed"
+  | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -708,15 +708,16 @@ export function createEngineAccountsStore(
           body: JSON.stringify({ id: accountId, force }),
         });
         if (!response.ok) {
-          const body = await response.json().catch(() => null) as { code?: unknown } | null;
+          const body = await response.json().catch(() => null) as { code?: unknown; blockers?: unknown } | null;
           const blocked = body?.code === "account_removal_blocked";
+          const historyBlocked = blocked && Array.isArray(body?.blockers) && body.blockers.includes("current_conversations");
           patchSnapshot({
             notice: {
               kind: "error",
               operation: "remove",
-              messageKey: blocked ? "accounts.removeBlocked" : "accounts.removeFailed",
+              messageKey: historyBlocked ? "accounts.removeHistoryBlocked" : blocked ? "accounts.removeBlocked" : "accounts.removeFailed",
               target: label,
-              action: blocked ? { type: "retry", kind: "forceRemove", accountId } : null,
+              action: blocked && !historyBlocked ? { type: "retry", kind: "forceRemove", accountId } : null,
             },
           });
           await refresh();

@@ -638,6 +638,20 @@ test("managed account removal retries with force only after the API reports a sa
   unsub();
 });
 
+test("current conversation blockers provide migration guidance without a force loop", async () => {
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeMain, claudeAcct({ id: "work", label: "Work", login: null })] } };
+    if (url === "/api/accounts/claude") return new Response(JSON.stringify({ code: "account_removal_blocked", blockers: ["current_conversations"] }), { status: 409 });
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+  expect(await store.remove("work")).toBeFalse();
+  expect(store.notice).toMatchObject({ messageKey: "accounts.removeHistoryBlocked", action: null });
+  unsub();
+});
+
 test("a blocked removal's force-remove notice survives the follow-up refresh failing", async () => {
   let accountsCalls = 0;
   const { fetcher } = scripted((url) => {

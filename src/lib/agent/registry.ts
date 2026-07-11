@@ -365,6 +365,26 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function restoreOwnedChanges(current: unknown, retired: unknown, previous: unknown): unknown {
+  if (JSON.stringify(retired) === JSON.stringify(previous)) return current;
+  if (JSON.stringify(current) === JSON.stringify(retired)) return previous === undefined ? undefined : clone(previous);
+  if (current && retired && previous && typeof current === "object" && typeof retired === "object" && typeof previous === "object"
+    && !Array.isArray(current) && !Array.isArray(retired) && !Array.isArray(previous)) {
+    const restored: Record<string, unknown> = { ...(current as Record<string, unknown>) };
+    const keys = new Set([...Object.keys(retired), ...Object.keys(previous)]);
+    for (const key of keys) {
+      const value = restoreOwnedChanges(
+        (current as Record<string, unknown>)[key],
+        (retired as Record<string, unknown>)[key],
+        (previous as Record<string, unknown>)[key],
+      );
+      if (value === undefined) delete restored[key]; else restored[key] = value;
+    }
+    return restored;
+  }
+  return current;
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -946,7 +966,13 @@ export class AgentRegistry {
   }
 
   settleSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">, completionMode: NonNullable<SpawnReceipt["completionMode"]> = "route-completed"): SpawnSettlement {
-    return this.mutate((file) => this.settleSpawnInFile(file, launchId, entry, completionMode));
+    return this.mutate((file) => {
+      const paths = new Set([entry.artifactPath]);
+      const signature = migrationReadinessSignature(file, entry.key.engine, paths);
+      const settled = this.settleSpawnInFile(file, launchId, entry, completionMode);
+      advanceMigrationScopeRevision(file, entry.key.engine, signature, paths);
+      return settled;
+    });
   }
 
   completeSpawn(launchId: string, entry: Omit<AgentRegistryEntry, "updatedAt">): AgentRegistryEntry {
@@ -1632,6 +1658,11 @@ export class AgentRegistry {
       const intent = file.migrationIntents[id];
       if (!intent) throw new Error("migration intent is unknown");
       if (expectedRevision !== undefined && intent.revision !== expectedRevision) throw new Error("migration intent revision is stale");
+      const paths = new Set(Object.values(file.conversations)
+        .filter((conversation) => conversation.engine === intent.engine)
+        .map((conversation) => conversation.generations.at(-1)?.path)
+        .filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = migrationReadinessSignature(file, intent.engine, paths);
       intent.state = state;
       intent.stoppedAt = state === "stopped" ? now() : intent.stoppedAt;
       intent.updatedAt = now();
@@ -1658,6 +1689,7 @@ export class AgentRegistry {
           }
         }
       }
+      advanceMigrationScopeRevision(file, intent.engine, signature, paths);
       return clone(intent);
     });
   }
@@ -1747,6 +1779,8 @@ export class AgentRegistry {
       const canonicalId = resolveConversationAlias(file, conversationId);
       const existing = clientMessageId ? Object.values(file.heldDeliveries).find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId) : undefined;
       const conversation = file.conversations[canonicalId];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       const migrationBlocksDelivery = conversation?.migration
         && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       const current = conversation?.generations.at(-1);
@@ -1768,6 +1802,7 @@ export class AgentRegistry {
           delivery.assignedAt = null;
           delivery.error = "delivery target is unavailable and remains recoverable";
         }
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       };
       if (existing) return place(existing);
@@ -1836,8 +1871,7 @@ export class AgentRegistry {
 
   restoreSnapshot(expectedCurrent: RegistryFile, replacement: RegistryFile): void {
     this.mutate((file) => {
-      if (JSON.stringify(file) !== JSON.stringify(expectedCurrent)) throw new Error("agent registry changed during account retirement");
-      Object.assign(file, clone(replacement));
+      Object.assign(file, restoreOwnedChanges(file, expectedCurrent, replacement) as RegistryFile);
     });
   }
 
