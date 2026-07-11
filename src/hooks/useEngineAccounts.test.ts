@@ -672,6 +672,23 @@ test("managed account removal surfaces pending local cleanup with a recovery act
   unsub();
 });
 
+test("orphan cleanup keeps manual guidance when unsafe local data remains", async () => {
+  const { fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeMain] } };
+    if (url === "/api/accounts/claude") {
+      return new Response(JSON.stringify({ removed: [], unresolved: ["unsafe-orphan"] }));
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  const unsub = store.subscribe(() => {});
+  await advance();
+
+  expect(await store.cleanupOrphans()).toBeTrue();
+  expect(store.notice).toMatchObject({ messageKey: "accounts.cleanupManual", action: null });
+  unsub();
+});
+
 test("current conversation blockers provide migration guidance without a force loop", async () => {
   const { fetcher } = scripted((url) => {
     if (url === "/api/accounts") return { claude: { active: "main", accounts: [claudeMain, claudeAcct({ id: "work", label: "Work", login: null })] } };

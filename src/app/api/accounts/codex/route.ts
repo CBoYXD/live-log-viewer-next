@@ -53,7 +53,7 @@ export async function DELETE(req: NextRequest) {
   try { body = await req.json() as { id?: unknown; force?: unknown; cleanupOrphans?: unknown }; } catch { return NextResponse.json({ error: "invalid JSON" }, { status: 400 }); }
   if (body.cleanupOrphans === true) {
     if (body.id !== undefined) return NextResponse.json({ error: "cleanup accepts no account id", code: "invalid_request" }, { status: 400 });
-    try { return NextResponse.json({ removed: cleanupOrphanedCodexHomes() }); }
+    try { return NextResponse.json(cleanupOrphanedCodexHomes()); }
     catch (error) {
       if (error instanceof CorruptCodexAccountsError) return NextResponse.json({ error: "Codex accounts require registry repair", code: "accounts_locked" }, { status: 409 });
       return NextResponse.json({ error: "Codex orphan cleanup failed", code: "cleanup_failed" }, { status: 500 });

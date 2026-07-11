@@ -82,7 +82,7 @@ test("managed account removal deletes its registry record and home, while orphan
 
   expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(false);
-  expect(cleaned).toEqual(["probe-login"]);
+  expect(cleaned).toEqual({ removed: ["probe-login"], unresolved: [] });
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
@@ -103,8 +103,22 @@ test("a home deletion failure leaves a removable Claude orphan after logical rem
   expect(removal).toEqual({ cleanupPending: true });
   expect(mod.listClaudeAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
-  expect(mod.cleanupOrphanedClaudeHomes()).toContain(account.id);
+  expect(mod.cleanupOrphanedClaudeHomes().removed).toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(false);
+});
+
+test("orphan cleanup reports unsafe Claude children for manual recovery", () => {
+  const unsafe = path.join(mod.claudeAccountsRoot(), "unsafe-orphan");
+  const link = path.join(mod.claudeAccountsRoot(), "linked-orphan");
+  fs.mkdirSync(unsafe, { recursive: true, mode: 0o777 });
+  fs.chmodSync(unsafe, 0o777);
+  fs.symlinkSync(unsafe, link);
+
+  const result = mod.cleanupOrphanedClaudeHomes();
+
+  expect(result.unresolved).toEqual(expect.arrayContaining(["unsafe-orphan", "linked-orphan"]));
+  expect(fs.existsSync(unsafe)).toBe(true);
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
 });
 
 test("orphan cleanup propagates a Claude accounts-root read failure", () => {

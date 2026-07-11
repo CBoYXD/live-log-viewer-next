@@ -28,6 +28,39 @@ function spawnEntry(pathname: string, accountId = "terra") {
 }
 
 describe("agent registry", () => {
+  test("startup compaction bounds legacy delivered reservations per conversation", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/legacy-deliveries.jsonl", "default");
+    const snapshot = store.snapshot();
+    for (let index = 0; index < 105; index += 1) {
+      const id = `legacy-${String(index).padStart(3, "0")}`;
+      snapshot.heldDeliveries[id] = {
+        id,
+        conversationId: conversation.id,
+        text: `legacy body ${index}`,
+        createdAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        clientMessageId: id,
+        payloadKind: "text",
+        state: "delivered",
+        generationId: conversation.generations.at(-1)!.id,
+        attempts: 1,
+        assignedAt: null,
+        deliveredAt: `2026-07-11T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        error: null,
+      };
+    }
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const upgraded = new AgentRegistry(store.filename);
+    expect(upgraded.compactDeliveredReservations()).toBe(5);
+    const restarted = new AgentRegistry(store.filename);
+    const retained = Object.values(restarted.snapshot().heldDeliveries);
+    expect(retained).toHaveLength(100);
+    expect(retained.every((delivery) => delivery.text === "")).toBe(true);
+    expect(retained.map((delivery) => delivery.id)).not.toContain("legacy-000");
+    expect(retained.map((delivery) => delivery.id)).toContain("legacy-104");
+  });
+
   test("account-retirement compensation preserves unrelated concurrent mutations", () => {
     const store = registry();
     store.setEngineRouting("codex", "work");

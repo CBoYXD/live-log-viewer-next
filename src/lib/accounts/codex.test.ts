@@ -101,7 +101,7 @@ test("managed Codex account removal deletes its registry record and home, then c
 
   expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(false);
-  expect(cleaned).toEqual(["probe-login"]);
+  expect(cleaned).toEqual({ removed: ["probe-login"], unresolved: [] });
   expect(fs.existsSync(orphan)).toBe(false);
 });
 
@@ -122,8 +122,22 @@ test("a home deletion failure leaves a removable Codex orphan after logical remo
   expect(removal).toEqual({ cleanupPending: true });
   expect(listCodexAccounts().map((item) => item.id)).not.toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(true);
-  expect(cleanupOrphanedCodexHomes()).toContain(account.id);
+  expect(cleanupOrphanedCodexHomes().removed).toContain(account.id);
   expect(fs.existsSync(account.home)).toBe(false);
+});
+
+test("orphan cleanup reports unsafe Codex children for manual recovery", () => {
+  const unsafe = path.join(codexAccountsRoot(), "unsafe-orphan");
+  const link = path.join(codexAccountsRoot(), "linked-orphan");
+  fs.mkdirSync(unsafe, { recursive: true, mode: 0o777 });
+  fs.chmodSync(unsafe, 0o777);
+  fs.symlinkSync(unsafe, link);
+
+  const result = cleanupOrphanedCodexHomes();
+
+  expect(result.unresolved).toEqual(expect.arrayContaining(["unsafe-orphan", "linked-orphan"]));
+  expect(fs.existsSync(unsafe)).toBe(true);
+  expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
 });
 
 test("orphan cleanup propagates a Codex accounts-root read failure", () => {

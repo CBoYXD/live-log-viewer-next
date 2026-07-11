@@ -129,6 +129,7 @@ export const en = {
   "accounts.removeHistoryBlocked": "Migrate the current conversations from {label} before removing this account.",
   "accounts.removeFailed": "Could not remove this account.",
   "accounts.cleanupPending": "{label} was removed. Its local data still needs cleanup.",
+  "accounts.cleanupManual": "Some local account data failed safety checks. Inspect and remove it manually.",
   "accounts.cleanupFailed": "Could not clean up abandoned homes.",
   "accounts.forceRemove": "Force remove",
   "accounts.cleanupOrphans": "Clean up abandoned homes",

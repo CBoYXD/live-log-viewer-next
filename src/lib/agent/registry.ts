@@ -479,6 +479,28 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
   };
 }
 
+function compactDeliveredReservations(file: RegistryFile, onlyConversationId?: ViewerConversationId): number {
+  const groups = new Map<ViewerConversationId, HeldDelivery[]>();
+  for (const delivery of Object.values(file.heldDeliveries)) {
+    if (delivery.state !== "delivered") continue;
+    const canonicalId = resolveConversationAlias(file, delivery.conversationId);
+    if (onlyConversationId && canonicalId !== resolveConversationAlias(file, onlyConversationId)) continue;
+    delivery.text = "";
+    const group = groups.get(canonicalId) ?? [];
+    group.push(delivery);
+    groups.set(canonicalId, group);
+  }
+  let removed = 0;
+  for (const deliveries of groups.values()) {
+    deliveries.sort((left, right) => (right.deliveredAt ?? right.createdAt).localeCompare(left.deliveredAt ?? left.createdAt) || right.id.localeCompare(left.id));
+    for (const expired of deliveries.slice(100)) {
+      delete file.heldDeliveries[expired.id];
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 function conversationOwnsPath(conversation: RegistryConversation, artifactPath: string): boolean {
   return conversation.generations.some((generation) => generation.path === artifactPath)
     || conversation.continuityPaths.includes(artifactPath);
@@ -1843,6 +1865,10 @@ export class AgentRegistry {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
   }
 
+  compactDeliveredReservations(): number {
+    return this.mutate((file) => compactDeliveredReservations(file));
+  }
+
   queueSuccessorCleanup(conversationId: ViewerConversationId, receipt: ProviderReceipt): void {
     this.mutate((file) => {
       const existing = file.pendingSuccessorCleanups[receipt.operationId];
@@ -1905,13 +1931,7 @@ export class AgentRegistry {
       if (state === "delivered") delivery.text = "";
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       const settled = clone(delivery);
-      if (state === "delivered") {
-        const tombstones = Object.values(file.heldDeliveries)
-          .filter((item) => item.conversationId === delivery.conversationId && item.state === "delivered")
-          .sort((left, right) => (left.deliveredAt ?? left.createdAt).localeCompare(right.deliveredAt ?? right.createdAt) || left.id.localeCompare(right.id));
-        const expired = tombstones.filter((item) => item.id !== delivery.id).slice(0, Math.max(0, tombstones.length - 100));
-        for (const item of expired) delete file.heldDeliveries[item.id];
-      }
+      if (state === "delivered") compactDeliveredReservations(file, delivery.conversationId);
       return settled;
     });
   }

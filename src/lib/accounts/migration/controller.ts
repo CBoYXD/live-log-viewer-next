@@ -34,6 +34,7 @@ export async function reconcileAccountMigrationCycle(
   provider: SuccessorProviderPort = new RegisteredSuccessorProvider(),
   delivery: HeldDeliveryPort = deliveryPort,
 ): Promise<void> {
+  registry.compactDeliveredReservations();
   await reconcileMigrations(provider, delivery, registry);
   for (const conversation of Object.values(registry.snapshot().conversations)) {
     if (conversation.migration?.phase === "rolled-back") await drainHeldDeliveries(conversation.id, delivery, registry);

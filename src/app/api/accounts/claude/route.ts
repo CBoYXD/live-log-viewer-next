@@ -70,7 +70,7 @@ export async function DELETE(req: NextRequest) {
   try { body = await req.json() as { id?: unknown; force?: unknown; cleanupOrphans?: unknown }; } catch { return failure(400, "invalid_json", "Invalid JSON"); }
   if (body.cleanupOrphans === true) {
     if (body.id !== undefined) return failure(400, "invalid_request", "Cleanup accepts no account id");
-    try { return NextResponse.json({ removed: cleanupOrphanedClaudeHomes() }); }
+    try { return NextResponse.json(cleanupOrphanedClaudeHomes()); }
     catch (error) {
       if (error instanceof CorruptClaudeAccountsError) return failure(409, "accounts_locked", "Claude accounts require registry repair");
       return failure(500, "cleanup_failed", "Claude orphan cleanup failed");

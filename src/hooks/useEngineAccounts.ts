@@ -131,7 +131,7 @@ export type AccountRetryAction =
 export type AccountNoticeKey =
   | "accounts.refreshFailed" | "accounts.switchFailed" | "accounts.addFailed" | "accounts.loginOpened"
   | "accounts.claudeLoginStarted"
-  | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupPending" | "accounts.cleanupFailed"
+  | "accounts.removeBlocked" | "accounts.removeHistoryBlocked" | "accounts.removeFailed" | "accounts.cleanupPending" | "accounts.cleanupManual" | "accounts.cleanupFailed"
   | ClaudeLoginErrKey;
 
 export interface AccountNotice {
@@ -753,7 +753,11 @@ export function createEngineAccountsStore(
           body: JSON.stringify({ cleanupOrphans: true }),
         });
         if (!response.ok) throw new Error("orphan cleanup failed");
-        patchSnapshot({ notice: null });
+        const body = await response.json().catch(() => null) as { unresolved?: unknown } | null;
+        const unresolved = Array.isArray(body?.unresolved) ? body.unresolved.filter((item): item is string => typeof item === "string") : [];
+        patchSnapshot({ notice: unresolved.length
+          ? { kind: "error", operation: "remove", messageKey: "accounts.cleanupManual", action: null }
+          : null });
       } catch {
         patchSnapshot({ notice: { kind: "error", operation: "remove", messageKey: "accounts.cleanupFailed", action: null } });
         await refresh();

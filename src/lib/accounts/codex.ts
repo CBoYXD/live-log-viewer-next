@@ -411,21 +411,23 @@ export function removeManagedCodexAccount(id: string): { cleanupPending: boolean
 }
 
 /** Removes failed-login homes that have no registry owner. Only safe direct children qualify. */
-export function cleanupOrphanedCodexHomes(): string[] {
+export function cleanupOrphanedCodexHomes(): { removed: string[]; unresolved: string[] } {
   return withRegistryLock(() => {
     cached = null;
     const registry = mutableRegistry();
     const registered = new Set(registry.accounts.map((account) => account.id));
     let entries: fs.Dirent[];
     try { entries = fs.readdirSync(codexAccountsRoot(), { withFileTypes: true }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { removed: [], unresolved: [] }; throw error; }
     const removed: string[] = [];
+    const unresolved: string[] = [];
     for (const entry of entries) {
-      if (!entry.isDirectory() || registered.has(entry.name) || !managedHomeIsSafe(entry.name, true)) continue;
-      fs.rmSync(managedHome(entry.name), { recursive: true, force: true });
-      removed.push(entry.name);
+      if (registered.has(entry.name)) continue;
+      if (!entry.isDirectory() || !managedHomeIsSafe(entry.name, true)) { unresolved.push(entry.name); continue; }
+      try { fs.rmSync(managedHome(entry.name), { recursive: true, force: true }); removed.push(entry.name); }
+      catch { unresolved.push(entry.name); }
     }
-    return removed.sort();
+    return { removed: removed.sort(), unresolved: unresolved.sort() };
   });
 }
 

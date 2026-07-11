@@ -123,6 +123,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.removeHistoryBlocked": "Перенесіть поточні розмови з {label}, перш ніж видаляти цей акаунт.",
   "accounts.removeFailed": "Не вдалося видалити цей акаунт.",
   "accounts.cleanupPending": "{label} видалено. Локальні дані ще потрібно очистити.",
+  "accounts.cleanupManual": "Частина локальних даних акаунта не пройшла перевірку безпеки. Перевірте й видаліть її вручну.",
   "accounts.cleanupFailed": "Не вдалося очистити покинуті теки.",
   "accounts.forceRemove": "Видалити примусово",
   "accounts.cleanupOrphans": "Очистити покинуті теки",

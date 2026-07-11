@@ -124,6 +124,67 @@ test("an image-only migration race stays recoverable without an orphan reservati
   expect(fs.readdirSync(SANDBOX).some((name) => name.endsWith(".png"))).toBe(false);
 });
 
+test("pre-actuation payload failure discards the reservation for retry", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "pre-actuation-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const outcome = await deliverConversationMessage({
+    pid: 1, path: "", conversationId: conversation.id, text: "", images: [{ base64: "aW1hZ2U=", mime: "image/png" }], clientMessageId: "pre-actuation",
+  }, {
+    targetForKnownPid: async () => "%1",
+    buildImagePayload: () => { throw new Error("payload failed"); },
+  });
+
+  expect(outcome).toMatchObject({ ok: false, error: "payload failed" });
+  expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(0);
+});
+
+test("ambiguous actuation keeps images and fences automatic replay", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "ambiguous-actuation-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const imagePath = inboxImage("ambiguous.png");
+  let sends = 0;
+  const message = {
+    pid: 1, path: "", conversationId: conversation.id, text: "", images: [{ base64: "aW1hZ2U=", mime: "image/png" }], clientMessageId: "ambiguous-actuation",
+  };
+  const outcome = await deliverConversationMessage(message, {
+    targetForKnownPid: async () => "%1",
+    buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
+    sendText: async () => { sends += 1; throw new Error("transport lost"); },
+  });
+
+  expect(outcome).toMatchObject({ ok: false, error: "transport lost" });
+  expect(fs.existsSync(imagePath)).toBe(true);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
+  const replay = await deliverConversationMessage(message, { sendText: async () => { sends += 1; } });
+  expect(replay).toMatchObject({ ok: false, status: 409 });
+  expect(sends).toBe(1);
+});
+
+test("successful actuation retains images when settlement persistence fails", async () => {
+  const registry = new AgentRegistry(path.join(SANDBOX, "settlement-failure-registry.json"));
+  setAgentRegistryForTests(registry);
+  const conversation = registry.ensureConversation("codex", "", "default");
+  const imagePath = inboxImage("settled-before-write.png");
+  const originalRecord = registry.recordDeliveryOutcome.bind(registry);
+  registry.recordDeliveryOutcome = (() => { throw new Error("registry unavailable"); }) as typeof registry.recordDeliveryOutcome;
+  try {
+    const outcome = await deliverConversationMessage({
+      pid: 1, path: "", conversationId: conversation.id, text: "", images: [{ base64: "aW1hZ2U=", mime: "image/png" }], clientMessageId: "settlement-failure",
+    }, {
+      targetForKnownPid: async () => "%1",
+      buildImagePayload: () => ({ payload: imagePath, imagePaths: [imagePath] }),
+      sendText: async () => {},
+    });
+    expect(outcome).toMatchObject({ ok: false, error: "registry unavailable" });
+    expect(fs.existsSync(imagePath)).toBe(true);
+    expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{ state: "delivery-uncertain" }]);
+  } finally {
+    registry.recordDeliveryOutcome = originalRecord;
+  }
+});
+
 test("sending to deferred history starts lazy migration and holds the message", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "registry.json"));
   setAgentRegistryForTests(registry);
