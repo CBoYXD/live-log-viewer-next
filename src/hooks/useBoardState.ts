@@ -319,11 +319,20 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
        and the bisection sheds only that mutation. */
     /* Drop a batch that changes nothing optimistically — an idempotent
        reconcile/remap, or a close of an already-hidden path — so it never
-       reaches transport and never bumps a revision. */
+       reaches transport and never bumps a revision. A batch whose replay
+       throws (a cyclic remap) is enqueued regardless: the optimistic
+       fallback would render it indistinguishable from a no-op, and the
+       server verdict plus bisection must isolate the invalid mutation while
+       the valid ones sharing the batch land. */
     const before = optimisticBoard(confirmed, outbox);
     const nextOutbox = [...outbox, ...mutations];
-    const after = optimisticBoard(confirmed, nextOutbox);
-    if (sameArrangement(before, after)) return;
+    let after: BoardProjectStateV1 | null;
+    try {
+      after = applyBoardMutations(confirmed, nextOutbox);
+    } catch {
+      after = null;
+    }
+    if (after !== null && sameArrangement(before, after)) return;
     outbox = nextOutbox;
     refresh();
     void drain();

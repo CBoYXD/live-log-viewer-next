@@ -646,3 +646,36 @@ test("an expired-auth 403 preserves the queued intent and lands after recovery",
   expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
 });
+
+test("a batch whose optimistic replay throws is enqueued for the server verdict", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  const attempts: string[][] = [];
+  /* The real server rejects a cyclic remap at validation; the fake reducer
+     would throw on it, so intercept remap batches with the same verdict. */
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      attempts.push((body.mutations ?? []).map((mutation) => mutation.kind));
+      if (body.mutations?.some((mutation) => mutation.kind === "remap-paths")) {
+        return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* A valid close rides with a cyclic remap: replaying this batch throws, so
+     a no-op comparison against the fallback board would silently drop both. */
+  store.mutate([
+    { kind: "close", path: "/a" },
+    { kind: "remap-paths", pairs: [{ from: "/x", to: "/y" }, { from: "/y", to: "/x" }] },
+  ]);
+  await settle();
+
+  /* Bisection isolates the cyclic remap; the close lands durably. */
+  expect(attempts).toEqual([["close", "remap-paths"], ["close"], ["remap-paths"]]);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot().sync).toBe("current");
+  store.dispose();
+});

@@ -33,11 +33,11 @@ predecessor transcripts with recent mtimes):
   rejected multi-mutation batch is bisected until the offender stands alone;
   only the lone rejected mutation is shed, so valid mutations on either side
   of the poison still land.
-- AC3: `MAX_BOARD_BODY_BYTES` is derived from the true worst case of one
-  maximal validator-legal mutation under full JSON escaping (two 512-path
-  lists of 4096-char control-heavy paths ≈ 25.2 MB → 32 MB cap), so no
-  validator-legal mutation is ever size-refused mid-transport; lists past the
-  item-level caps draw the server's atomic validation error instead. The
+- AC3: `MAX_BOARD_BODY_BYTES` is derived from the largest legal request
+  shape under full JSON escaping: the legacy-seed patch form carries three
+  512-path lists of 4096-char control-heavy paths ≈ 37.7 MB → 48 MB cap, so
+  no validator-legal request is ever size-refused mid-transport; lists past
+  the item-level caps draw the server's atomic validation error. The
   per-item limits (512 paths, 4096 chars each) remain the real guard.
 - AC4: A conversation identity that leaves the capped feed and returns later
   in an unchanged attention state rings no chime; a genuine transition
