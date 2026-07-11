@@ -57,6 +57,9 @@ test("headless codex reviewer launches without CLI sandbox blocking", () => {
   const built = reviewerCommand({ engine: "codex", model: null, effort: "xhigh" }, "review prompt", "/out/review.md", "/repo");
 
   expect(built.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(built.args).toContain("-");
+  expect(built.args).not.toContain("review prompt");
+  expect(built.stdin).toBe("review prompt");
   expect(built.args).not.toContain("--sandbox");
   expect(built.args).not.toContain("read-only");
 });

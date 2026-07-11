@@ -11,7 +11,7 @@ import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
 import { forgetHeadlessReview } from "./exec";
 import { resolveBaseRef } from "./git";
 import { kickoffPrompt } from "./prompts";
-import { loadFlows, loadPresets, saveFlows } from "./store";
+import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
 
 /**
@@ -82,6 +82,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     implementerPath: entry.path,
     implementerConversationId: entry.conversationId ?? null,
     roles,
+    reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
     ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,
@@ -224,6 +225,11 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
     Object.assign(round, {
       reviewerPath: null,
+      reviewerConversationId: null,
+      reviewerRole: null,
+      accountId: null,
+      attemptedAccounts: [],
+      autoRetryCount: 0,
       sessionId: null,
       reviewerPid: null,
       reviewerPane: null,

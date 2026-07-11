@@ -9,7 +9,7 @@ import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
 const { tickFlows } = await import("./engine");
-const { loadFlows, saveFlows } = await import("./store");
+const { loadFlows, saveFlows, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -110,4 +110,74 @@ test("review-flow heuristic claim skips a newer native Codex subagent", async ()
   const after = loadFlows()[0]!;
 
   expect(after.rounds[0]!.reviewerPath).toBe(root.path);
+});
+
+test("headless review retries once after an exit without a verdict, then parks on a repeated failure", async () => {
+  const startedAt = new Date().toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("retry-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f117", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-retry",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: { engine: "claude", model: "fable", effort: "high" },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: 999_999_999,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), "reviewer exited before producing a verdict\n");
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  const retrying = loadFlows()[0]!;
+  expect(retrying.state).toBe("spawning");
+  expect(retrying.stateDetail).toContain("retrying automatically");
+  expect(retrying.rounds[0]).toMatchObject({ autoRetryCount: 1, accountId: null, reviewerRole: null, attemptedAccounts: ["codex:default"], error: null });
+
+  retrying.state = "reviewing";
+  retrying.rounds[0]!.reviewerPid = 999_999_999;
+  retrying.rounds[0]!.spawnStartedAt = startedAt;
+  saveFlows([retrying]);
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), "reviewer exited again\n");
+
+  await tickFlows([implementer]);
+  const parked = loadFlows()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("reviewer verdict was unparseable");
 });

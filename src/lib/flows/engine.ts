@@ -22,12 +22,21 @@ import {
 import { relayPrompt, reviewerPrompt } from "./prompts";
 import { atomicWriteText, findingsPathFor, loadFlows, loadPresets, saveFlows } from "./store";
 import type { Flow, FlowPreset, FlowState, Round } from "./types";
+import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 
 const TERMINAL_STATES = new Set<FlowState>(["approved", "done_comment", "needs_decision", "closed"]);
 const READY_RE = /^REVIEW_READY:\s*(.*)$/m;
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const store = globalThis as unknown as { __llvFlowTick?: boolean };
 const relayStartedThisProcess = new Set<string>();
+const MAX_HEADLESS_NO_VERDICT_RETRIES = 1;
+
+class ReviewerAccountsExhaustedError extends Error {
+  constructor(readonly resetsAt: number | null) {
+    super("reviewer rate limited; all accounts exhausted");
+    this.name = "ReviewerAccountsExhaustedError";
+  }
+}
 
 interface TickResult {
   flows: Flow[];
@@ -51,7 +60,12 @@ function cloneFlows(flows: Flow[]): Flow[] {
       implementer: { ...flow.roles.implementer },
       reviewer: { ...flow.roles.reviewer },
     },
-    rounds: flow.rounds.map((round) => ({ ...round })),
+    reviewerFallback: flow.reviewerFallback ? { ...flow.reviewerFallback } : null,
+    rounds: flow.rounds.map((round) => ({
+      ...round,
+      reviewerRole: round.reviewerRole ? { ...round.reviewerRole } : null,
+      attemptedAccounts: [...(round.attemptedAccounts ?? [])],
+    })),
   }));
 }
 
@@ -78,6 +92,9 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     n: flow.rounds.length + 1,
     reviewerPath: null,
     accountId: null,
+    reviewerRole: null,
+    attemptedAccounts: [],
+    autoRetryCount: 0,
     sessionId: null,
     reviewerPane: null,
     findingsPath: null,
@@ -140,7 +157,7 @@ function isNativeCodexSubagentEntry(entry: FileEntry): boolean {
 function maybeClaimReviewerPathByHeuristic(flow: Flow, entries: FileEntry[], round: Round): boolean {
   if (round.reviewerPath) return false;
   const started = unixMs(round.startedAt) / 1000 - 5;
-  const engine = flow.roles.reviewer.engine;
+  const engine = round.reviewerRole?.engine ?? flow.roles.reviewer.engine;
   const candidates = entries
     .filter(
       (entry) =>
@@ -174,14 +191,16 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
 
 async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   const prompt = reviewerPrompt(flow, round);
-  const account = accountManager.resolveSpawn(flow.roles.reviewer.engine, round.accountId);
-  round.accountId ??= account.accountId;
   flow.state = "reviewing";
   flow.stateDetail = null;
   if (flow.reviewerMode === "pane") {
-    const spec = freshSpecFor(flow.roles.reviewer.engine, flow.cwd, {
-      model: flow.roles.reviewer.model,
-      effort: flow.roles.reviewer.effort,
+    const role = flow.roles.reviewer;
+    const account = accountManager.resolveSpawn(role.engine, round.accountId);
+    round.accountId ??= account.accountId;
+    round.reviewerRole = role;
+    const spec = freshSpecFor(role.engine, flow.cwd, {
+      model: role.model,
+      effort: role.effort,
       codexHome: account.engine === "codex" ? account.home : null,
       claudeConfigDir: account.engine === "claude" ? account.home : null,
       claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null,
@@ -192,7 +211,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
        transcript is still unattributed (codex, or an early stop click). */
     round.reviewerPane = { paneId: pane.paneId, windowName: spec.windowName };
     const transcript = await resolveSpawnedTranscriptPath({
-      engine: flow.roles.reviewer.engine,
+      engine: role.engine,
       knownTranscript: spec.transcript ?? null,
       panePid: pane.panePid ?? null,
       cwd: flow.cwd,
@@ -203,10 +222,23 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     if (!round.reviewerPath && pane.panePid) round.error = null;
     return;
   }
+  const decision = chooseHeadlessReviewer(
+    flow.roles.reviewer,
+    flow.reviewerFallback,
+    round.attemptedAccounts ?? [],
+    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds),
+  );
+  if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
+  if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");
+  const { role, account } = decision;
+  round.reviewerRole = { ...role };
+  round.accountId = account.accountId;
+  const accountKey = `${account.engine}:${account.accountId}`;
+  round.attemptedAccounts = [...new Set([...(round.attemptedAccounts ?? []), accountKey])];
   const launched = startHeadlessReview(
     flow.id,
     round.n,
-    flow.roles.reviewer,
+    role,
     flow.cwd,
     prompt,
     undefined,
@@ -216,6 +248,31 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   if (launched.pid) round.reviewerPid = launched.pid;
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
+}
+
+function retryHeadlessRound(flow: Flow, round: Round): void {
+  forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  Object.assign(round, {
+    reviewerPath: null,
+    reviewerConversationId: null,
+    reviewerRole: null,
+    accountId: null,
+    sessionId: null,
+    reviewerPid: null,
+    reviewerPane: null,
+    findingsPath: null,
+    verdict: null,
+    findingsCount: null,
+    autoRetryCount: (round.autoRetryCount ?? 0) + 1,
+    startedAt: isoNow(),
+    spawnStartedAt: null,
+    relayStartedAt: null,
+    reviewedAt: null,
+    relayedAt: null,
+    error: null,
+  });
+  flow.state = "spawning";
+  flow.stateDetail = `reviewer produced no verdict; retrying automatically (${round.autoRetryCount}/${MAX_HEADLESS_NO_VERDICT_RETRIES})`;
 }
 
 async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, round: Round): Promise<void> {
@@ -272,7 +329,7 @@ async function tickFlow(
   if (!round) return JSON.stringify(flow) !== before;
 
   if (flow.state === "spawning") {
-    const status = headlessReviewStatus(flow.id, round.n, round, flow.roles.reviewer.engine);
+    const status = headlessReviewStatus(flow.id, round.n, round, round.reviewerRole?.engine ?? flow.roles.reviewer.engine);
     /* A restart can land here with the round already launched (state was
        persisted before launchReviewer finished). The detached reviewer is
        still out there — adopt it instead of spawning a duplicate. */
@@ -290,8 +347,13 @@ async function tickFlow(
       persistCheckpoint();
       await launchReviewer(flow, round);
     } catch (error) {
-      round.error = error instanceof Error ? error.message : String(error);
-      markNeedsDecision(flow, round.error);
+      if (error instanceof ReviewerAccountsExhaustedError) {
+        round.error = null;
+        markNeedsDecision(flow, rateLimitStateDetail(error.resetsAt));
+      } else {
+        round.error = error instanceof Error ? error.message : String(error);
+        markNeedsDecision(flow, round.error);
+      }
     }
     return JSON.stringify(flow) !== before;
   }
@@ -303,7 +365,7 @@ async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     if (flow.reviewerMode === "headless") {
-      const status = headlessReviewStatus(flow.id, round.n, round, flow.roles.reviewer.engine);
+      const status = headlessReviewStatus(flow.id, round.n, round, round.reviewerRole?.engine ?? flow.roles.reviewer.engine);
       /* Persist the id the moment any source yields it (the JSON.stringify
          diff in tickFlow flushes it to flows.json): after that the transcript
          claim is deterministic and survives restarts. The banner parse stays
@@ -320,6 +382,8 @@ async function tickFlow(
         const parsed = parseFindings(status.finalOutput);
         if (parsed) {
           applyVerdict(flow, round, parsed);
+        } else if ((round.autoRetryCount ?? 0) < MAX_HEADLESS_NO_VERDICT_RETRIES) {
+          retryHeadlessRound(flow, round);
         } else {
           const rawPath = round.findingsPath ?? findingsPathFor(flow.id, round.n);
           atomicWriteText(rawPath, status.finalOutput || status.stdout || status.stderr);
