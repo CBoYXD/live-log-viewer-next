@@ -326,7 +326,7 @@ test("spawn-time lineage keeps the child grouped after its tmux host disappears"
 test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
   const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
   const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;
-  writeSessionTitle(`uuid:codex:${sessionUuid}`, "My human name", undefined, "2026-07-12T00:00:00.000Z");
+  writeSessionTitle([`uuid:codex:${sessionUuid}`], `uuid:codex:${sessionUuid}`, "My human name", undefined, "2026-07-12T00:00:00.000Z");
   const derived = file(sessionPath);
   derived.title = "auto derived from first prompt";
   scannedFiles = [derived];

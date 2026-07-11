@@ -9,7 +9,7 @@ import type { FileEntry } from "@/lib/types";
 
 /** Longest custom title we store; the derived title uses the same 120 cap. */
 export const MAX_CUSTOM_TITLE = 120;
-/** Bounded store — the oldest overrides are evicted past this many keys, so a
+/** Bounded store — the oldest records are evicted past this many keys, so a
     machine that renames thousands of sessions never grows the file without a
     ceiling. Chosen well above any plausible working set. */
 export const MAX_TITLE_OVERRIDES = 2_000;
@@ -19,12 +19,15 @@ export const MAX_TITLE_OVERRIDES = 2_000;
     its sandbox (see flows/store.ts for the same reasoning). */
 const titlesFile = () => statePath("session-titles.json");
 
-/** One durable rename. `key` is the stable identity the title is filed under
-    (see {@link titleKeysForEntry}); `revision` bumps on every set/clear so a
-    stale editor's write is rejected instead of silently clobbering. */
+/** One durable rename record. `key` is the stable identity the title is filed
+    under (see {@link titleKeysForEntry}). `title` is the custom name, or `null`
+    for a **tombstone** — a cleared override whose `revision` is preserved so a
+    later set never reuses a revision an earlier editor still holds (that would
+    let a stale write slip past the concurrency guard). `revision` bumps on
+    every set and clear. */
 export interface SessionTitleOverride {
   key: string;
-  title: string;
+  title: string | null;
   revision: number;
   updatedAt: string;
 }
@@ -46,14 +49,13 @@ function readJson(filePath: string): unknown {
   }
 }
 
-function isOverride(value: unknown): value is SessionTitleOverride {
+function isRecord(value: unknown): value is SessionTitleOverride {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Partial<SessionTitleOverride>;
   return (
     typeof record.key === "string" &&
     record.key.length > 0 &&
-    typeof record.title === "string" &&
-    record.title.length > 0 &&
+    (record.title === null || (typeof record.title === "string" && record.title.length > 0)) &&
     typeof record.revision === "number" &&
     Number.isInteger(record.revision) &&
     record.revision > 0 &&
@@ -63,11 +65,11 @@ function isOverride(value: unknown): value is SessionTitleOverride {
 
 export function loadSessionTitles(filePath = titlesFile()): SessionTitleOverride[] {
   const raw = readJson(filePath) as TitlesFile | null;
-  return Array.isArray(raw?.titles) ? raw.titles.filter(isOverride) : [];
+  return Array.isArray(raw?.titles) ? raw.titles.filter(isRecord) : [];
 }
 
-export function saveSessionTitles(overrides: SessionTitleOverride[], filePath = titlesFile()): void {
-  atomicWriteJson(filePath, { version: 1, titles: overrides });
+export function saveSessionTitles(records: SessionTitleOverride[], filePath = titlesFile()): void {
+  atomicWriteJson(filePath, { version: 1, titles: records });
 }
 
 /** Sanitize + bound a user title. Returns null when it collapses to empty (an
@@ -75,6 +77,18 @@ export function saveSessionTitles(overrides: SessionTitleOverride[], filePath = 
 export function sanitizeCustomTitle(value: string): string | null {
   const cleaned = cleanTitle(value, MAX_CUSTOM_TITLE);
   return cleaned.length > 0 ? cleaned : null;
+}
+
+/** Only main Claude/Codex sessions are renameable (issue #33 scope, AC9):
+    subagent transcripts (`agent-*.jsonl`) and background/shell tasks are not. */
+export function isRenameableSessionPath(pathname: string): boolean {
+  return !path.basename(pathname).startsWith("agent-");
+}
+
+export function isRenameableSession(entry: Pick<FileEntry, "engine" | "kind" | "path">): boolean {
+  if (entry.engine !== "claude" && entry.engine !== "codex") return false;
+  if (entry.kind && entry.kind !== "session") return false;
+  return isRenameableSessionPath(entry.path);
 }
 
 /** Candidate keys for an entry, most-stable first: the Viewer conversation
@@ -98,12 +112,14 @@ export function preferredTitleKey(entry: Pick<FileEntry, "engine" | "path" | "co
   return titleKeysForEntry(entry)[0]!;
 }
 
-/** Index overrides by key for O(1) overlay lookups. */
-export function indexSessionTitles(overrides: SessionTitleOverride[]): Map<string, SessionTitleOverride> {
-  return new Map(overrides.map((override) => [override.key, override]));
+/** Index records by key for O(1) overlay lookups. */
+export function indexSessionTitles(records: SessionTitleOverride[]): Map<string, SessionTitleOverride> {
+  return new Map(records.map((record) => [record.key, record]));
 }
 
-/** The override that owns an entry's title, checked most-stable key first. */
+/** The record that owns an entry's title, checked most-stable key first —
+    including a tombstone, so the overlay can surface its revision as the base
+    for the next write. */
 export function overrideForEntry(
   entry: Pick<FileEntry, "engine" | "path" | "conversationId">,
   index: Map<string, SessionTitleOverride>,
@@ -115,21 +131,18 @@ export function overrideForEntry(
   return null;
 }
 
-/** Overlay a custom title onto a scanned entry: `title` becomes the override,
-    the derived title moves to `autoTitle` as provenance, and `titleRevision`
-    carries the concurrency token consumers echo back on the next PATCH. */
+/** Overlay a custom title onto a scanned entry. An active record replaces
+    `title` and preserves the derived title on `autoTitle`; a tombstone leaves
+    the title untouched (cleared → auto title stands). Either way `titleRevision`
+    carries the concurrency token consumers echo back on the next PATCH, so a
+    reset-then-rename never reuses a stale revision. */
 export function applyTitleOverride(entry: FileEntry, index: Map<string, SessionTitleOverride>): void {
-  const override = overrideForEntry(entry, index);
-  if (!override) return;
-  if (override.title === entry.title) {
-    // Custom title matches the derived one: still surface the token so the
-    // editor can clear it, but there is no distinct auto title to preserve.
-    entry.titleRevision = override.revision;
-    return;
-  }
+  const record = overrideForEntry(entry, index);
+  if (!record) return;
+  entry.titleRevision = record.revision;
+  if (record.title === null || record.title === entry.title) return;
   entry.autoTitle = entry.title;
-  entry.title = override.title;
-  entry.titleRevision = override.revision;
+  entry.title = record.title;
 }
 
 /**
@@ -139,19 +152,19 @@ export function applyTitleOverride(entry: FileEntry, index: Map<string, SessionT
  * (mirrors {@link import("@/lib/tasks/store").mutateTasks}).
  */
 export function mutateSessionTitles<R>(
-  mutate: (overrides: SessionTitleOverride[]) => { overrides: SessionTitleOverride[] | undefined; result: R },
+  mutate: (records: SessionTitleOverride[]) => { records: SessionTitleOverride[] | undefined; result: R },
   filePath = titlesFile(),
 ): R {
   const outcome = mutate(loadSessionTitles(filePath));
-  if (outcome.overrides) saveSessionTitles(capOverrides(outcome.overrides), filePath);
+  if (outcome.records) saveSessionTitles(capRecords(outcome.records), filePath);
   return outcome.result;
 }
 
-/** Keep the store bounded — evict the least-recently-updated overrides once the
+/** Keep the store bounded — evict the least-recently-updated records once the
     key count exceeds the cap. */
-function capOverrides(overrides: SessionTitleOverride[]): SessionTitleOverride[] {
-  if (overrides.length <= MAX_TITLE_OVERRIDES) return overrides;
-  return [...overrides]
+function capRecords(records: SessionTitleOverride[]): SessionTitleOverride[] {
+  if (records.length <= MAX_TITLE_OVERRIDES) return records;
+  return [...records]
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
     .slice(0, MAX_TITLE_OVERRIDES);
 }
@@ -161,38 +174,53 @@ export type SetTitleOutcome =
   | { ok: false; conflict: SessionTitleOverride | null };
 
 /**
- * Set (non-empty) or clear (null) the override at `key`. When `baseRevision` is
- * supplied it must match the current record's revision, else the write is
- * rejected as a conflict carrying the current server state. A clear removes the
- * record; a set bumps the revision. Returns the effective record (null once
- * cleared).
+ * Set (non-empty) or clear (null) a session's custom title.
+ *
+ * `candidateKeys` are the entry's keys in stable-first priority (see
+ * {@link titleKeysForEntry}); `preferredKey` (their first entry) is where the
+ * result lands. The mutation bases its concurrency check on the **first
+ * existing record among the candidates** — the same record the overlay surfaced
+ * as `titleRevision` — then collapses every candidate-key record into a single
+ * record under `preferredKey`. That migrates a title filed under the UUID/path
+ * onto the conversation key once identity appears, so a later clear can never
+ * miss it (finding: fallback-key overrides couldn't be cleared).
+ *
+ * A clear writes a **tombstone** (title `null`) that preserves the monotonic
+ * revision; a set writes the sanitized title. When `baseRevision` is supplied it
+ * must match the current record's revision, else the write is rejected as a
+ * conflict carrying the current record. Returns the effective active record, or
+ * null once cleared.
  */
 export function writeSessionTitle(
-  key: string,
+  candidateKeys: string[],
+  preferredKey: string,
   title: string | null,
   baseRevision: number | undefined,
   now: string,
   filePath = titlesFile(),
 ): SetTitleOutcome {
-  return mutateSessionTitles<SetTitleOutcome>((overrides) => {
-    const index = overrides.findIndex((override) => override.key === key);
-    const current = index >= 0 ? overrides[index]! : null;
+  const keySet = new Set(candidateKeys);
+  return mutateSessionTitles<SetTitleOutcome>((records) => {
+    let current: SessionTitleOverride | null = null;
+    for (const key of candidateKeys) {
+      const hit = records.find((record) => record.key === key);
+      if (hit) { current = hit; break; }
+    }
     if (baseRevision !== undefined && baseRevision !== (current?.revision ?? 0)) {
-      return { overrides: undefined, result: { ok: false, conflict: current } };
+      return { records: undefined, result: { ok: false, conflict: current } };
     }
     const sanitized = title === null ? null : sanitizeCustomTitle(title);
+    // Drop every candidate-key record; the single new record is re-added under
+    // the preferred key, collapsing duplicates and migrating stale keys.
+    const rest = records.filter((record) => !keySet.has(record.key));
     if (sanitized === null) {
-      if (!current) return { overrides: undefined, result: { ok: true, override: null } };
-      const next = overrides.filter((_, position) => position !== index);
-      return { overrides: next, result: { ok: true, override: null } };
+      // Nothing set, or already a tombstone: clearing again is a no-op that must
+      // not bump the revision (and must not create a tombstone from nothing).
+      if (!current || current.title === null) return { records: undefined, result: { ok: true, override: null } };
+      const tombstone: SessionTitleOverride = { key: preferredKey, title: null, revision: current.revision + 1, updatedAt: now };
+      return { records: [...rest, tombstone], result: { ok: true, override: null } };
     }
-    const record: SessionTitleOverride = {
-      key,
-      title: sanitized,
-      revision: (current?.revision ?? 0) + 1,
-      updatedAt: now,
-    };
-    const next = current ? overrides.map((override, position) => (position === index ? record : override)) : [...overrides, record];
-    return { overrides: next, result: { ok: true, override: record } };
+    const record: SessionTitleOverride = { key: preferredKey, title: sanitized, revision: (current?.revision ?? 0) + 1, updatedAt: now };
+    return { records: [...rest, record], result: { ok: true, override: record } };
   }, filePath);
 }

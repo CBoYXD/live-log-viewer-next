@@ -8,6 +8,8 @@ import type { FileEntry } from "@/lib/types";
 import {
   applyTitleOverride,
   indexSessionTitles,
+  isRenameableSession,
+  isRenameableSessionPath,
   loadSessionTitles,
   MAX_TITLE_OVERRIDES,
   overrideForEntry,
@@ -58,6 +60,11 @@ function entry(over: Partial<FileEntry> = {}): FileEntry {
   } as FileEntry;
 }
 
+/** Single-key write helper (the common case; `preferredKey` is the only key). */
+function write(key: string, title: string | null, baseRevision: number | undefined, now: string) {
+  return writeSessionTitle([key], key, title, baseRevision, now, file);
+}
+
 test("key precedence: conversation id wins, then session uuid, then path", () => {
   expect(titleKeysForEntry(entry({ conversationId: "conversation_abc" }))).toEqual([
     "conversation:conversation_abc",
@@ -65,9 +72,7 @@ test("key precedence: conversation id wins, then session uuid, then path", () =>
     `path:${claudePath}`,
   ]);
   expect(preferredTitleKey(entry({ conversationId: "conversation_abc" }))).toBe("conversation:conversation_abc");
-  // No conversation id: the UUID becomes the preferred key.
   expect(preferredTitleKey(entry())).toBe(`uuid:claude:${UUID}`);
-  // Codex sessions are keyed identically by their rollout UUID.
   expect(preferredTitleKey(entry({ engine: "codex", root: "codex-sessions", path: codexPath }))).toBe(`uuid:codex:${UUID}`);
 });
 
@@ -82,9 +87,17 @@ test("sanitize caps length, strips markdown, and treats blank as a clear", () =>
   expect(sanitizeCustomTitle("x".repeat(400))!.length).toBeLessThanOrEqual(120);
 });
 
-test("set then clear round-trips and survives reload (persistence)", () => {
+test("isRenameableSession/Path admit only main Claude/Codex sessions", () => {
+  expect(isRenameableSessionPath(claudePath)).toBe(true);
+  expect(isRenameableSessionPath("/home/u/.claude/projects/proj/agent-123.jsonl")).toBe(false);
+  expect(isRenameableSession(entry())).toBe(true);
+  expect(isRenameableSession(entry({ kind: "subagent", path: "/home/u/.claude/projects/proj/agent-9.jsonl" }))).toBe(false);
+  expect(isRenameableSession(entry({ engine: "shell", kind: "background" }))).toBe(false);
+});
+
+test("set then clear leaves a tombstone and the label survives a reload (persistence)", () => {
   const key = preferredTitleKey(entry());
-  const set = writeSessionTitle(key, "My name", undefined, "2026-07-12T00:00:00.000Z", file);
+  const set = write(key, "My name", undefined, "2026-07-12T00:00:00.000Z");
   expect(set).toEqual({ ok: true, override: { key, title: "My name", revision: 1, updatedAt: "2026-07-12T00:00:00.000Z" } });
 
   // A fresh load from disk sees the override — the label survives a restart.
@@ -92,33 +105,60 @@ test("set then clear round-trips and survives reload (persistence)", () => {
   expect(reloaded).toHaveLength(1);
   expect(reloaded[0]!.title).toBe("My name");
 
-  const cleared = writeSessionTitle(key, null, undefined, "2026-07-12T00:01:00.000Z", file);
+  const cleared = write(key, null, undefined, "2026-07-12T00:01:00.000Z");
   expect(cleared).toEqual({ ok: true, override: null });
-  expect(loadSessionTitles(file)).toHaveLength(0);
+  // The record persists as a tombstone (title null) preserving the revision.
+  const afterClear = loadSessionTitles(file);
+  expect(afterClear).toHaveLength(1);
+  expect(afterClear[0]!.title).toBeNull();
+  expect(afterClear[0]!.revision).toBe(2);
+});
+
+test("overlay treats a tombstone as cleared but still surfaces its revision", () => {
+  const key = preferredTitleKey(entry());
+  write(key, "temp", undefined, "t1");
+  write(key, null, 1, "t2");
+  const index = indexSessionTitles(loadSessionTitles(file));
+  const file0 = entry();
+  applyTitleOverride(file0, index);
+  // Cleared: the derived title stands, no autoTitle, but the base revision is
+  // exposed so the next set does not spuriously conflict.
+  expect(file0.title).toBe("Auto derived title");
+  expect(file0.autoTitle).toBeUndefined();
+  expect(file0.titleRevision).toBe(2);
+});
+
+test("revision stays monotonic across a clear so a stale write is rejected", () => {
+  const key = preferredTitleKey(entry());
+  write(key, "one", undefined, "t1"); // revision 1
+  write(key, null, 1, "t2"); // tombstone revision 2
+  // A stale editor still holding revision 1 must not overwrite the recreated
+  // record: the new set resumes from the tombstone's revision, not from 1.
+  const stale = write(key, "sneaky", 1, "t3");
+  expect(stale.ok).toBe(false);
+  const fresh = write(key, "proper", 2, "t4");
+  expect(fresh).toMatchObject({ ok: true, override: { title: "proper", revision: 3 } });
 });
 
 test("revision increments on each set and empty save clears", () => {
   const key = preferredTitleKey(entry());
-  expect(writeSessionTitle(key, "one", undefined, "t1", file)).toMatchObject({ ok: true, override: { revision: 1 } });
-  expect(writeSessionTitle(key, "two", undefined, "t2", file)).toMatchObject({ ok: true, override: { revision: 2, title: "two" } });
-  // Empty string is a clear, not a blank card.
-  expect(writeSessionTitle(key, "   ", undefined, "t3", file)).toEqual({ ok: true, override: null });
+  expect(write(key, "one", undefined, "t1")).toMatchObject({ ok: true, override: { revision: 1 } });
+  expect(write(key, "two", undefined, "t2")).toMatchObject({ ok: true, override: { revision: 2, title: "two" } });
+  expect(write(key, "   ", undefined, "t3")).toEqual({ ok: true, override: null });
 });
 
 test("base revision mismatch is a conflict carrying current server state", () => {
   const key = preferredTitleKey(entry());
-  writeSessionTitle(key, "one", undefined, "t1", file);
-  const conflict = writeSessionTitle(key, "two", 0, "t2", file);
+  write(key, "one", undefined, "t1");
+  const conflict = write(key, "two", 0, "t2");
   expect(conflict).toEqual({ ok: false, conflict: { key, title: "one", revision: 1, updatedAt: "t1" } });
-  // The store was not mutated by the rejected write.
   expect(loadSessionTitles(file)[0]!.title).toBe("one");
-  // Retrying against the current revision succeeds.
-  expect(writeSessionTitle(key, "two", 1, "t3", file)).toMatchObject({ ok: true, override: { title: "two", revision: 2 } });
+  expect(write(key, "two", 1, "t3")).toMatchObject({ ok: true, override: { title: "two", revision: 2 } });
 });
 
 test("overlay applies the override and preserves the derived title as autoTitle", () => {
   const key = preferredTitleKey(entry());
-  writeSessionTitle(key, "Human name", undefined, "t1", file);
+  write(key, "Human name", undefined, "t1");
   const index = indexSessionTitles(loadSessionTitles(file));
   const file0 = entry();
   applyTitleOverride(file0, index);
@@ -127,16 +167,36 @@ test("overlay applies the override and preserves the derived title as autoTitle"
   expect(file0.titleRevision).toBe(1);
 });
 
-test("override filed under the UUID adopts onto a later entry that gained a conversation id", () => {
+test("a fallback-key override migrates onto the conversation key and stays cleared", () => {
   // Filed while only the UUID was known.
   const uuidKey = `uuid:claude:${UUID}`;
-  writeSessionTitle(uuidKey, "Sticky", undefined, "t1", file);
-  const index = indexSessionTitles(loadSessionTitles(file));
-  // A conversation id later appears; the same session still resolves the title
-  // via its UUID candidate key.
+  write(uuidKey, "Sticky", undefined, "t1");
+
+  // The conversation id later appears; a clear routed through the full
+  // candidate set bases on the UUID record (revision 1) and migrates it.
   const withId = entry({ conversationId: "conversation_new" });
-  const hit = overrideForEntry(withId, index);
-  expect(hit?.title).toBe("Sticky");
+  const keys = titleKeysForEntry(withId);
+  const cleared = writeSessionTitle(keys, keys[0]!, null, 1, "t2", file);
+  expect(cleared).toEqual({ ok: true, override: null });
+
+  // No active override survives, and the stale UUID record is gone — the next
+  // poll cannot restore the old custom title.
+  const records = loadSessionTitles(file);
+  expect(records.filter((record) => record.title !== null)).toHaveLength(0);
+  expect(records.some((record) => record.key === uuidKey)).toBe(false);
+  const index = indexSessionTitles(records);
+  expect(overrideForEntry(withId, index)?.title ?? null).toBeNull();
+});
+
+test("a fallback-key override is updated in place once the conversation key is preferred", () => {
+  const uuidKey = `uuid:claude:${UUID}`;
+  write(uuidKey, "Sticky", undefined, "t1");
+  const withId = entry({ conversationId: "conversation_new" });
+  const keys = titleKeysForEntry(withId);
+  const updated = writeSessionTitle(keys, keys[0]!, "Renamed", 1, "t2", file);
+  expect(updated).toMatchObject({ ok: true, override: { key: "conversation:conversation_new", title: "Renamed", revision: 2 } });
+  const index = indexSessionTitles(loadSessionTitles(file));
+  expect(overrideForEntry(withId, index)?.title).toBe("Renamed");
 });
 
 test("no override leaves the entry untouched", () => {
@@ -148,17 +208,16 @@ test("no override leaves the entry untouched", () => {
   expect(file0.titleRevision).toBeUndefined();
 });
 
-test("store is capped to the newest overrides", () => {
-  const overrides: SessionTitleOverride[] = Array.from({ length: MAX_TITLE_OVERRIDES + 5 }, (_unused, index) => ({
+test("store is capped to the newest records", () => {
+  const records: SessionTitleOverride[] = Array.from({ length: MAX_TITLE_OVERRIDES + 5 }, (_unused, index) => ({
     key: `path:/s/${index}`,
     title: `t${index}`,
     revision: 1,
     updatedAt: `2026-07-12T00:00:${String(index % 60).padStart(2, "0")}.${String(index).padStart(4, "0")}Z`,
   }));
-  saveSessionTitles(overrides, file);
-  // Trigger the cap via a mutating write.
-  writeSessionTitle("path:/s/new", "fresh", undefined, "2027-01-01T00:00:00.000Z", file);
+  saveSessionTitles(records, file);
+  write("path:/s/new", "fresh", undefined, "2027-01-01T00:00:00.000Z");
   const stored = loadSessionTitles(file);
   expect(stored.length).toBeLessThanOrEqual(MAX_TITLE_OVERRIDES);
-  expect(stored.some((override) => override.title === "fresh")).toBe(true);
+  expect(stored.some((record) => record.title === "fresh")).toBe(true);
 });

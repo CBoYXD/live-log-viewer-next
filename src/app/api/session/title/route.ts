@@ -4,7 +4,8 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { isoNow } from "@/lib/tasks/helpers";
 import {
   MAX_CUSTOM_TITLE,
-  preferredTitleKey,
+  sanitizeCustomTitle,
+  titleKeysForEntry,
   writeSessionTitle,
   type SessionTitleOverride,
 } from "@/lib/session/titleStore";
@@ -54,8 +55,8 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   const target = resolveTitleTarget(body);
   if (!target) return NextResponse.json({ error: "unknown or unsupported session" }, { status: 400 });
 
-  const key = preferredTitleKey(target);
-  const outcome = writeSessionTitle(key, body.title as string | null, body.baseRevision as number | undefined, isoNow());
+  const candidateKeys = titleKeysForEntry(target);
+  const outcome = writeSessionTitle(candidateKeys, candidateKeys[0]!, body.title as string | null, body.baseRevision as number | undefined, isoNow());
   if (!outcome.ok) {
     // Structured 409: the editor adopts the current server record and retries.
     return NextResponse.json(
@@ -65,10 +66,13 @@ export async function PATCH(req: NextRequest): Promise<NextResponse<PatchTitleRe
   }
 
   // Best-effort tmux window rename. Never let a tmux hiccup fail the durable
-  // rename that already committed to disk.
+  // rename that already committed to disk. On a set the window name is the
+  // server-sanitized title (never the raw client string); on a reset the client
+  // supplies the derived title, which we still sanitize before it reaches tmux.
   const pid = typeof body.pid === "number" && Number.isInteger(body.pid) && body.pid > 0 ? body.pid : null;
   if (pid !== null) {
-    const windowName = typeof body.windowName === "string" && body.windowName.trim() ? body.windowName : outcome.override?.title ?? "";
+    const windowName = outcome.override?.title
+      ?? (typeof body.windowName === "string" ? sanitizeCustomTitle(body.windowName) : null);
     if (windowName) await propagateTitleToWindow(pid, windowName);
   }
 

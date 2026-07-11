@@ -74,13 +74,16 @@ test("falls back to the session UUID key when the registry does not own the sess
   expect(json.override.key).toBe(`uuid:claude:${UUID}`);
 });
 
-test("empty title clears the override", async () => {
+test("empty title clears the override (leaving a revision-preserving tombstone)", async () => {
   await patch({ conversationId: "conversation_owner", title: "temp" });
   const res = await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1 });
   expect(res.status).toBe(200);
   const json = (await res.json()) as { ok: boolean; override: null };
   expect(json.override).toBeNull();
-  expect(loadSessionTitles()).toHaveLength(0);
+  // No active override remains; the tombstone keeps the revision monotonic.
+  const records = loadSessionTitles();
+  expect(records.filter((record) => record.title !== null)).toHaveLength(0);
+  expect(records[0]?.revision).toBe(2);
 });
 
 test("revision conflict returns a structured 409 with current server state", async () => {
@@ -102,14 +105,40 @@ test("retrying against the current revision after a conflict succeeds", async ()
   expect(json.override.revision).toBe(2);
 });
 
-test("propagates the title to the tmux window when a live pid is supplied", async () => {
-  await patch({ conversationId: "conversation_owner", title: "Shipping fix", pid: 4242, windowName: "Shipping fix" });
-  expect(renamed).toEqual([{ pid: 4242, name: "Shipping fix" }]);
+test("propagates the server-sanitized title to the tmux window, ignoring a crafted windowName", async () => {
+  // The client asks for one window label but the persisted title is another —
+  // the window must follow the sanitized stored title, not the raw request.
+  await patch({ conversationId: "conversation_owner", title: "**Bold** name", pid: 4242, windowName: "arbitrary label" });
+  expect(renamed).toEqual([{ pid: 4242, name: "Bold name" }]);
+});
+
+test("a reset sanitizes the client-provided window name before it reaches tmux", async () => {
+  await patch({ conversationId: "conversation_owner", title: "temp", pid: 4242 });
+  renamed = [];
+  await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1, pid: 4242, windowName: "**Auto** derived" });
+  expect(renamed).toEqual([{ pid: 4242, name: "Auto derived" }]);
 });
 
 test("does not attempt a window rename without a pid", async () => {
   await patch({ conversationId: "conversation_owner", title: "No pane" });
   expect(renamed).toHaveLength(0);
+});
+
+test("clearing after the registry claims ownership migrates and clears the fallback-key override", async () => {
+  // Filed under the session UUID before the conversation id existed.
+  target = { engine: "claude", path: SESSION_PATH };
+  await patch({ path: SESSION_PATH, title: "Sticky" });
+  expect(loadSessionTitles().find((record) => record.key === `uuid:claude:${UUID}`)?.title).toBe("Sticky");
+
+  // The registry now owns the session; a reset routed through the conversation
+  // key must still clear the UUID-filed record (finding: fallback-key overrides
+  // couldn't be cleared and got restored on the next poll).
+  target = { engine: "claude", path: SESSION_PATH, conversationId: "conversation_owner" };
+  const res = await patch({ conversationId: "conversation_owner", title: "", baseRevision: 1 });
+  expect(res.status).toBe(200);
+  const records = loadSessionTitles();
+  expect(records.filter((record) => record.title !== null)).toHaveLength(0);
+  expect(records.some((record) => record.key === `uuid:claude:${UUID}`)).toBe(false);
 });
 
 test("rejects an unknown conversation id", async () => {

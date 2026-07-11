@@ -162,6 +162,28 @@ test("Reset clears the override back to the auto title", async () => {
   expect(view.host.textContent).toContain("Fix the login bug");
 });
 
+test("a second edit still saves on blur after an earlier cancel (no stale suppression)", async () => {
+  const view = mount(entry());
+  // First edit, then cancel via the Cancel control (arms blur suppression;
+  // unmounting a focused input may not emit the blur that would clear it).
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const cancel = view.host.querySelector('button[aria-label="Cancel"]') as HTMLButtonElement;
+  flushSync(() => cancel.click());
+  await settle();
+  expect(calls).toHaveLength(0);
+
+  // Second edit: a genuine blur must persist the new name.
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "second attempt"));
+  // React binds onBlur to the bubbling focusout event.
+  flushSync(() => dispatch(input, new dom.Event("focusout", { bubbles: true })));
+  await settle();
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.body.title).toBe("second attempt");
+});
+
 test("a revision conflict adopts the server record and retries once", async () => {
   respond = (call) => {
     if (calls.length === 1) {

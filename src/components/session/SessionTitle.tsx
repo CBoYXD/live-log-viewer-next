@@ -56,7 +56,10 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   const opt = optimisticSettled ? null : optimistic;
 
   const autoTitle = file.autoTitle ?? file.title;
-  const hasOverride = opt ? opt.title !== null : file.titleRevision !== undefined;
+  // An active override is signalled by `autoTitle` (the preserved derived
+  // title); a bare `titleRevision` may be a tombstone (cleared) that only
+  // supplies the concurrency base, so it must not light up the Reset control.
+  const hasOverride = opt ? opt.title !== null : file.autoTitle !== undefined;
   const effectiveTitle = opt ? (opt.title ?? autoTitle) : file.title;
   const baseRevision = opt ? opt.revision : file.titleRevision ?? 0;
 
@@ -71,6 +74,10 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   }, [editing]);
 
   const openEditor = () => {
+    // Clear any suppression left armed by a prior close: removing a focused
+    // input does not reliably emit blur, so a stale flag could otherwise make
+    // the next genuine blur a no-op that silently drops the edit.
+    suppressBlur.current = false;
     setValue(effectiveTitle);
     setRetryTitle(undefined);
     setEditing(true);
@@ -152,8 +159,11 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       return;
     }
     // A genuine focus loss while still editing saves the current field value.
+    // Read the live input rather than `value` state so a save triggered in the
+    // same tick as the last keystroke never persists a stale value.
+    const latest = inputRef.current?.value ?? value;
     setEditing(false);
-    void attemptSave(value, true);
+    void attemptSave(latest, true);
   };
 
   const titleKeyDown = (event: React.KeyboardEvent) => {
