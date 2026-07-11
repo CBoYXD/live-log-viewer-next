@@ -336,10 +336,17 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     if (patch === undefined) return { error: "reviewer role override is required", status: 400 };
     const merged = applyRoleOverride(flow.roles.reviewer, patch);
     if (!merged) return { error: "invalid reviewer role override", status: 400 };
-    /* The change lands on the NEXT round only: the current round froze its role
-       (round.reviewerRole) at creation/retry, and the engine reads that snapshot.
-       A round not yet created picks this up when newRound/retry snapshots it. */
     flow.roles = { ...flow.roles, reviewer: merged };
+    /* Manual mode parks a created-but-unspawned round at spawn_pending with its
+       role already frozen (newRound/retry snapshot it). The override must reach
+       THAT round too, or the imminent Spawn launches with the old config while the
+       UI reports success (issue #118 review). A round already spawning/reviewing
+       kept its frozen snapshot — spawnStartedAt is set there, so it is left alone;
+       only a genuinely unstarted pending round is re-snapshotted. */
+    const pending = flow.state === "spawn_pending" || (flow.state === "paused" && flow.pausedState === "spawn_pending")
+      ? round
+      : null;
+    if (pending && pending.spawnStartedAt == null) pending.reviewerRole = { ...merged };
   }
   /* "close" and "cancel-round" never reach this function — the route sends
      them to closeFlow/cancelRound, which also stop a running reviewer. */

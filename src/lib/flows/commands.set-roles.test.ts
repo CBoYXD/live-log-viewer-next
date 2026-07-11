@@ -5,6 +5,7 @@ import path from "node:path";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-set-roles-"));
 const { patchFlow } = await import("./commands");
+const { reviewerRoleFor } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 import type { Flow } from "./types";
 
@@ -81,6 +82,43 @@ test("set-roles does not retarget a round already in flight (Finding 1 freeze)",
       readyNote: null, verdict: null, findingsCount: null, startedAt: "2026-07-05T00:00:00Z",
       spawnStartedAt: "2026-07-05T00:00:01Z", relayStartedAt: null, reviewedAt: null, relayedAt: null, error: null,
     }],
+  });
+  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
+  expect(result.flow!.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
+  expect(result.flow!.roles.reviewer).toMatchObject({ engine: "claude", model: "fable" });
+});
+
+test("set-roles reaches a pending manual round so the imminent Spawn uses the new role (issue #118 review)", () => {
+  /* waiting_ready → spawn_pending → set-roles → advance: the round frozen at
+     spawn_pending must adopt the override, or the reviewer launches with the old
+     engine/model/effort while the UI reports success. */
+  seed({ mode: "manual", state: "waiting_ready", rounds: [] });
+  /* Start review: creates the round (snapshot = codex/gpt-5.6/high) and parks it. */
+  expect(patchFlow("f1", { action: "advance" }).flow!.state).toBe("spawn_pending");
+  expect(loadFlows()[0]!.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
+
+  /* Override the reviewer before spawning. */
+  const overridden = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
+  expect(overridden.flow!.rounds[0]!.reviewerRole).toEqual({ engine: "claude", model: "fable", effort: "high" });
+
+  /* Spawn: the round keeps the overridden snapshot, and that is what the engine
+     launches with (reviewerRoleFor reads the round, not flow.roles). */
+  const advanced = patchFlow("f1", { action: "advance" }).flow!;
+  expect(advanced.state).toBe("spawning");
+  expect(reviewerRoleFor(advanced, advanced.rounds[0]!)).toEqual({ engine: "claude", model: "fable", effort: "high" });
+});
+
+test("set-roles leaves a spawning round's frozen snapshot untouched (issue #118 review)", () => {
+  /* An in-flight round (spawnStartedAt set) must keep its frozen role. */
+  seed({
+    mode: "manual",
+    state: "spawning",
+    rounds: [{
+      n: 1, reviewerPath: null, reviewerRole: { engine: "codex", model: "gpt-5.6", effort: "high" },
+      findingsPath: null, triggeredBy: "button", readyNote: null, verdict: null, findingsCount: null,
+      startedAt: "2026-07-05T00:00:00Z", spawnStartedAt: "2026-07-05T00:00:01Z", relayStartedAt: null,
+      reviewedAt: null, relayedAt: null, error: null,
+    }] as never,
   });
   const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
   expect(result.flow!.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
