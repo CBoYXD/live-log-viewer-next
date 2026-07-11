@@ -32,6 +32,7 @@ function adapter(calls: string[], healthy = true): ViewerBootstrapAdapter {
     startCandidate: async () => { calls.push("start"); },
     verifyCandidate: async () => { calls.push("verify"); return health(healthy); },
     publishTarget: async () => { calls.push("publish"); },
+    targetMatches: () => false,
     retireCandidate: async () => { calls.push("retire"); },
   };
 }
@@ -58,4 +59,20 @@ test("bootstrap refuses to replace an existing release target", async () => {
 
   await expect(bootstrapViewerRelease("origin/main", "bootstrap-3", implementation)).rejects.toThrow("already exists");
   expect(calls).toEqual([]);
+});
+
+test("bootstrap preserves a candidate when publication throws after the target becomes visible", async () => {
+  const calls: string[] = [];
+  const implementation = adapter(calls) as ViewerBootstrapAdapter & { targetMatches(candidate: ViewerReleaseIdentity): boolean };
+  implementation.publishTarget = async () => {
+    calls.push("publish");
+    throw new Error("directory fsync failed");
+  };
+  implementation.targetMatches = (release) => {
+    calls.push("reconcile");
+    return release === candidate;
+  };
+
+  await expect(bootstrapViewerRelease("origin/main", "bootstrap-4", implementation)).resolves.toEqual({ candidate, health: health(true) });
+  expect(calls).toEqual(["resolve", "build", "start", "verify", "publish", "reconcile"]);
 });

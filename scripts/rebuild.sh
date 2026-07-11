@@ -5,7 +5,6 @@ set -euo pipefail
 PORT="${PORT:-8898}"
 REVISION="${LLV_DEPLOY_REVISION:-origin/main}"
 IDEMPOTENCY_KEY="${LLV_DEPLOY_IDEMPOTENCY_KEY:-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
-TOKEN="$(sed -n 's/^LLV_TOKEN=//p' "$HOME/.config/agent-log-viewer/service.env" 2>/dev/null | head -1)"
 
 case "$REVISION" in
   origin/main|[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
@@ -19,13 +18,11 @@ if [ "${#IDEMPOTENCY_KEY}" -gt 200 ]; then
   exit 1
 fi
 
-QUERY=""
-[ -n "$TOKEN" ] && QUERY="?k=$TOKEN"
 BASE="http://127.0.0.1:${PORT}"
 BODY="$(bun -e 'const [revision, idempotencyKey] = process.argv.slice(1); process.stdout.write(JSON.stringify({ revision, idempotencyKey }))' "$REVISION" "$IDEMPOTENCY_KEY")"
 
 echo "deployment key: $IDEMPOTENCY_KEY"
-response="$(curl -sS --max-time 125 -H 'content-type: application/json' -d "$BODY" -w $'\n%{http_code}' "${BASE}/api/runtime/deployments${QUERY}")"
+response="$(curl -sS --max-time 125 -H 'content-type: application/json' -d "$BODY" -w $'\n%{http_code}' "${BASE}/api/runtime/deployments")"
 code="${response##*$'\n'}"
 json="${response%$'\n'*}"
 if [ "$code" != "202" ] && [ "$code" != "409" ]; then
@@ -43,7 +40,7 @@ fi
 
 echo "deployment admitted: $deployment_id"
 while :; do
-  if status_json="$(curl -fsS --max-time 10 "${BASE}/api/runtime/deployments/${deployment_id}${QUERY}" 2>/dev/null)"; then
+  if status_json="$(curl -fsS --max-time 10 "${BASE}/api/runtime/deployments/${deployment_id}" 2>/dev/null)"; then
     read -r phase terminal error < <(bun -e 'const x=JSON.parse(process.argv[1]); console.log(x.phase, x.terminal ? "1" : "0", JSON.stringify(x.error || ""))' "$status_json")
     echo "deployment phase: $phase"
     if [ "$terminal" = "1" ]; then

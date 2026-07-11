@@ -15,6 +15,7 @@ import {
 } from "../src/runtime-host/candidateContainer";
 import { ensureCanonicalMirror } from "../src/runtime-host/canonicalMirror";
 import { allocateBuiltCandidatePort, candidatePortsFromEnvironmentLists, isCandidatePortAvailable } from "../src/runtime-host/candidatePort";
+import { viewerCandidateContainerName, viewerCandidateImageName, viewerComposeSnapshotName } from "../src/runtime-host/deploymentArtifacts";
 import { bootstrapViewerRelease } from "../src/runtime-host/deploymentBootstrap";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
@@ -48,13 +49,13 @@ async function resolveRevision(requested: string): Promise<string> {
   return revision;
 }
 
-function composeConfigFile(revision: string): string {
-  return path.join(deploymentDir, "compose", `${revision}.json`);
+function composeConfigFile(container: string): string {
+  return path.join(deploymentDir, "compose", viewerComposeSnapshotName(container));
 }
 
-function writeComposeConfig(revision: string, config: string): void {
+function writeComposeConfig(container: string, config: string): void {
   viewerComposeServiceFromConfig(config);
-  const filename = composeConfigFile(revision);
+  const filename = composeConfigFile(container);
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
   fs.writeFileSync(temporary, config, { mode: 0o600, flag: "wx" });
@@ -94,13 +95,14 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
   fs.mkdirSync(path.dirname(sourceDir), { recursive: true, mode: 0o700 });
   await command(["git", "--git-dir", mirrorDir, "worktree", "prune"]);
   await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
-  const image = `agent-log-viewer:deploy-${revision}`;
+  const container = viewerCandidateContainerName(deploymentId);
+  const image = viewerCandidateImageName(revision, container);
   try {
     const composeConfig = await command([
       "docker", "compose", "--project-directory", sourceDir, "-f", path.join(sourceDir, "docker-compose.yml"),
       "--profile", "*", "config", "--format", "json",
     ]);
-    writeComposeConfig(revision, composeConfig);
+    writeComposeConfig(container, composeConfig);
     await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
   } finally {
     try { await command(["git", "--git-dir", mirrorDir, "worktree", "remove", "--force", sourceDir]); }
@@ -112,9 +114,9 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
     reservedPorts: managedCandidatePorts,
     isAvailable: isCandidatePortAvailable,
     removeImage: async () => { await command(["docker", "image", "rm", image]); },
-    removeComposeSnapshot: () => { fs.rmSync(composeConfigFile(revision), { force: true }); },
+    removeComposeSnapshot: () => { fs.rmSync(composeConfigFile(container), { force: true }); },
   });
-  return { revision, image, container: `llv-deploy-${deploymentId.replace(/[^a-zA-Z0-9_.-]/g, "-")}`, endpoint: `http://127.0.0.1:${port}` };
+  return { revision, image, container, endpoint: `http://127.0.0.1:${port}` };
 }
 
 async function containerExists(container: string): Promise<boolean> {
@@ -135,7 +137,7 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
     return;
   }
   if (!await isCandidatePortAvailable(port)) throw new Error("candidate Viewer port is unavailable before start");
-  const composeService = viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.revision), "utf8"));
+  const composeService = viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8"));
   const uid = viewerComposeServiceUid(composeService);
   const tmuxEnvironment = viewerCandidateTmuxEnvironment(stateDir, uid, {
     legacyTmuxExternal: composeService.environment.LLV_LEGACY_TMUX_EXTERNAL || "0",
@@ -150,7 +152,7 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
 async function retireRelease(candidate: ViewerReleaseIdentity): Promise<void> {
   if (await containerExists(candidate.container)) await command(["docker", "container", "rm", "-f", candidate.container]);
   try { await command(["docker", "image", "rm", candidate.image]); } catch { /* another retained release may use this image */ }
-  fs.rmSync(composeConfigFile(candidate.revision), { force: true });
+  fs.rmSync(composeConfigFile(candidate.container), { force: true });
 }
 
 async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
@@ -160,6 +162,7 @@ async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
   for (const container of obsoleteManagedViewerContainers(containers, releases.map((item) => item.container))) {
     const image = await command(["docker", "container", "inspect", "--format", "{{.Config.Image}}", container]);
     await command(["docker", "container", "rm", "-f", container]);
+    fs.rmSync(composeConfigFile(container), { force: true });
     if (image && !retainedImages.has(image)) {
       try { await command(["docker", "image", "rm", image]); } catch { /* another container may use this image */ }
     }
@@ -167,7 +170,7 @@ async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
 }
 
 function serviceToken(candidate: ViewerReleaseIdentity): string | null {
-  return viewerAuthenticationTokenFromConfig(fs.readFileSync(composeConfigFile(candidate.revision), "utf8"));
+  return viewerAuthenticationTokenFromConfig(fs.readFileSync(composeConfigFile(candidate.container), "utf8"));
 }
 
 async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
@@ -240,8 +243,19 @@ async function verify(candidate: ViewerReleaseIdentity, endpoint: string, expect
   });
 }
 
+function readTarget(): ViewerReleaseIdentity {
+  return release(JSON.parse(fs.readFileSync(targetFile, "utf8")));
+}
+
+function releasesEqual(left: ViewerReleaseIdentity, right: ViewerReleaseIdentity): boolean {
+  return left.image === right.image
+    && left.container === right.container
+    && left.endpoint === right.endpoint
+    && left.revision === right.revision;
+}
+
 function readCurrentRelease(): ViewerReleaseIdentity | null {
-  try { return release(JSON.parse(fs.readFileSync(targetFile, "utf8"))); }
+  try { return readTarget(); }
   catch { return null; }
 }
 
@@ -272,6 +286,7 @@ async function main(): Promise<unknown> {
       startCandidate,
       verifyCandidate: (candidate) => verify(candidate, candidate.endpoint),
       publishTarget: async (candidate) => { switchTarget(candidate); },
+      targetMatches: (candidate) => releasesEqual(readTarget(), candidate),
       retireCandidate: retireRelease,
     });
   }
