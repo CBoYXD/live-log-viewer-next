@@ -494,9 +494,39 @@ test("a close sharing the rejected batch with a poisoned mutation still lands", 
   store.mutate([{ kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }, { kind: "close", path: "/a" }]);
   await settle();
 
-  /* Rejection sheds only the poisoned head; the close retries alone and lands. */
-  expect(patchAttempts).toBe(2);
+  /* Bisection: the pair is refused, the poisoned reconcile is isolated and
+     shed alone, and the close lands untouched. */
+  expect(patchAttempts).toBe(3);
   expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  store.dispose();
+});
+
+test("a poison-tail batch keeps the valid mutations queued before the offender", async () => {
+  const backing = fakeServer({ proj: boardOf(1, { manual: ["/a"] }) });
+  const attempts: string[][] = [];
+  const fetcher = async (input: string, init?: RequestInit) => {
+    if (init && (init.method ?? "GET") !== "GET") {
+      const body = JSON.parse(String(init.body)) as { mutations?: BoardMutationV1[] };
+      attempts.push((body.mutations ?? []).map((mutation) => mutation.kind));
+      if (body.mutations?.some((mutation) => mutation.kind === "reconcile-roots")) {
+        return { ok: false, status: 400, json: async () => ({ error: "INVALID_REQUEST" }) };
+      }
+    }
+    return backing.fetcher(input, init);
+  };
+  const store = createBoardStore({ project: "proj", fetcher, storage: null, scheduler: idleScheduler().scheduler });
+  await settle();
+
+  /* The adversarial ordering from review: the valid close PRECEDES the
+     poisoned reconcile in one batch. */
+  store.mutate([{ kind: "close", path: "/a" }, { kind: "reconcile-roots", roots: ["/a", "/b"], removeManual: [] }]);
+  await settle();
+
+  /* Bisection retries the first half after the refusal, so the close lands
+     durably before the lone reconcile is shed. */
+  expect(attempts).toEqual([["close", "reconcile-roots"], ["close"], ["reconcile-roots"]]);
+  expect(backing.projects.proj.prefs.hidden).toEqual(["/a"]);
+  expect(store.getSnapshot().sync).toBe("current");
   store.dispose();
 });
 

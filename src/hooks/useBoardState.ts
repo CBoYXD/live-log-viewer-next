@@ -37,15 +37,17 @@ function mutationBytes(mutation: BoardMutationV1): number {
   return typeof TextEncoder === "undefined" ? json.length : new TextEncoder().encode(json).length;
 }
 
-/** The longest outbox prefix that fits both per-PATCH caps. Always at least
+/** The longest outbox prefix that fits both per-PATCH caps (`maxCount` can
+    tighten the count cap while isolating a rejected batch). Always at least
     one mutation, so a single over-budget mutation is attempted (and, refused,
     dropped) rather than wedging the queue. */
-export function patchPrefix(outbox: readonly BoardMutationV1[]): BoardMutationV1[] {
+export function patchPrefix(outbox: readonly BoardMutationV1[], maxCount = MAX_MUTATIONS_PER_PATCH): BoardMutationV1[] {
+  const cap = Math.max(1, Math.min(maxCount, MAX_MUTATIONS_PER_PATCH));
   const prefix: BoardMutationV1[] = [];
   let bytes = 0;
   for (const mutation of outbox) {
     const size = mutationBytes(mutation);
-    if (prefix.length > 0 && (prefix.length >= MAX_MUTATIONS_PER_PATCH || bytes + size > MAX_PATCH_BYTES)) break;
+    if (prefix.length > 0 && (prefix.length >= cap || bytes + size > MAX_PATCH_BYTES)) break;
     prefix.push(mutation);
     bytes += size;
   }
@@ -238,6 +240,10 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
   /* Consecutive revision conflicts: each means a fresh concurrent write, so we
      retry immediately up to a cap before falling back to the backoff timer. */
   let conflictStreak = 0;
+  /* Bisection cap while isolating a rejected batch: a refused multi-mutation
+     PATCH halves the next attempt instead of dropping anything, until the
+     offender stands alone and only it is shed. Reset on any accepted write. */
+  let rejectCap: number | null = null;
   let retryHandle: ReturnType<typeof scheduler.setTimeout> | null = null;
   let retryDelay = RETRY_BASE_MS;
   const listeners = new Set<() => void>();
@@ -348,15 +354,16 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     /* Send the outbox as a stable prefix: mutations appended while this request
        is inflight stay queued and flush on the next drain, so an earlier response
        never drops a later optimistic action. Bounded to the server's per-PATCH
-       mutation and body-size caps; a longer outbox drains over consecutive
-       requests. */
-    const prefix = patchPrefix(outbox);
+       mutation and body-size caps (tightened while bisecting a rejection); a
+       longer outbox drains over consecutive requests. */
+    const prefix = patchPrefix(outbox, rejectCap ?? MAX_MUTATIONS_PER_PATCH);
     const result = await attemptMutations(prefix, confirmed.revision);
     inflight = false;
     if (disposed) return;
     if (result.status === "ok") {
       cancelRetry();
       conflictStreak = 0;
+      rejectCap = null;
       confirmed = result.board;
       outbox = outbox.slice(prefix.length);
       refresh();
@@ -365,14 +372,20 @@ export function createBoardStore(options: BoardStoreOptions): BoardStore {
     }
     if (result.status === "rejected") {
       /* The server refused the batch as a unit without naming the offender.
-         Shed only the first mutation and retry the rest: every acceptable
-         mutation riding in the same batch (a user's close next to a poisoned
-         reconcile) still lands on a later attempt, and the loop terminates
-         because each rejection shrinks the outbox by one. The dropped intent
-         reverts optimistically to the confirmed board on the next refresh. */
+         Bisect instead of guessing: a multi-mutation batch drops nothing and
+         retries its first half, halving until the offender stands alone; only
+         a single rejected mutation is shed. Valid mutations on either side of
+         the poison all land on later attempts, and the loop terminates because
+         every round either halves the attempt or shrinks the outbox. The
+         dropped intent reverts optimistically on the next refresh. */
       cancelRetry();
       conflictStreak = 0;
-      outbox = outbox.slice(1);
+      if (prefix.length === 1) {
+        rejectCap = null;
+        outbox = outbox.slice(1);
+      } else {
+        rejectCap = Math.max(1, Math.floor(prefix.length / 2));
+      }
       refresh();
       if (outbox.length) void drain();
       return;
