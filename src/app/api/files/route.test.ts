@@ -102,6 +102,30 @@ test("an expired snapshot schedules its refresh after the response", async () =>
   expect(scans).toBe(2);
 });
 
+test("a files revision request refreshes the snapshot before responding", async () => {
+  scannedFiles = [file("/sessions/before-revision.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files"));
+
+  scannedFiles = [file("/sessions/after-revision.jsonl")];
+  const response = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "1" },
+  }));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/after-revision.jsonl"]);
+  expect(scans).toBe(2);
+});
+
+test("the project scan cache evicts its least recently used entry", async () => {
+  for (let index = 0; index <= 32; index += 1) {
+    await cachedFileScan(`project-${index}`);
+  }
+  expect(scans).toBe(33);
+
+  await cachedFileScan("project-0");
+  expect(scans).toBe(34);
+});
+
 function file(path: string): FileEntry {
   return {
     path,

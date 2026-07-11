@@ -14,6 +14,7 @@ export type CachedFileScan = {
 };
 
 const FILE_SCAN_FRESH_MS = 1_000;
+const FILE_SCAN_CACHE_MAX_PROJECTS = 32;
 const fileScanCacheStore = globalThis as typeof globalThis & {
   __llvFilesRouteScans?: Map<string, FileScanCacheSlot>;
 };
@@ -35,16 +36,27 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject?: string)
   return refresh;
 }
 
-export async function cachedFileScan(selectedProject?: string, now = Date.now()): Promise<CachedFileScan> {
+export async function cachedFileScan(
+  selectedProject?: string,
+  now = Date.now(),
+  requireFresh = false,
+): Promise<CachedFileScan> {
   const key = selectedProject ?? "";
   const cache = fileScanCache();
   let slot = cache.get(key);
   if (!slot) {
+    if (cache.size >= FILE_SCAN_CACHE_MAX_PROJECTS) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) cache.delete(oldestKey);
+    }
     slot = { refreshedAt: 0 };
+    cache.set(key, slot);
+  } else {
+    cache.delete(key);
     cache.set(key, slot);
   }
 
-  if (!slot.snapshot) {
+  if (!slot.snapshot || requireFresh) {
     const snapshot = await (slot.refresh ?? beginFileScanRefresh(slot, selectedProject));
     return { snapshot: structuredClone(snapshot) };
   }

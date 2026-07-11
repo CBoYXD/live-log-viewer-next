@@ -40,6 +40,13 @@ export function filesApiUrl(project?: string | null): string {
   return project ? "/api/files?project=" + encodeURIComponent(project) : "/api/files";
 }
 
+export function filesRequestHeaders(etag: string, revision?: number): Record<string, string> | undefined {
+  const headers: Record<string, string> = {};
+  if (etag) headers["If-None-Match"] = etag;
+  if (revision !== undefined) headers["x-llv-files-revision"] = String(revision);
+  return Object.keys(headers).length > 0 ? headers : undefined;
+}
+
 /**
  * The recurring `/api/files` cadence given the runtime connection: a healthy
  * live stream removes the timer entirely (`live`, freshness rides
@@ -57,9 +64,10 @@ export function useFiles(project?: string | null): FilesData {
     let lastBody = "";
     let lastEtag = "";
     const url = filesApiUrl(project);
-    const load = async () => {
+    const load = async (revision?: number) => {
       try {
-        const res = await fetch(url, lastEtag ? { headers: { "If-None-Match": lastEtag } } : undefined);
+        const headers = filesRequestHeaders(lastEtag, revision);
+        const res = await fetch(url, headers ? { headers } : undefined);
         /* 304: the server confirms the payload is byte-identical to the last
            one, so there is nothing to read or re-parse. */
         if (res.status === 304) return;
@@ -127,9 +135,9 @@ export function useFiles(project?: string | null): FilesData {
       const applyConnection = () => setCadence(filesPollCadence(bus.getState().connection));
       applyConnection();
       unsubBus = bus.subscribe(applyConnection);
-      unsubFiles = bus.subscribeFilesRevision(() => {
+      unsubFiles = bus.subscribeFilesRevision((revision) => {
         if (filesDebounce) clearTimeout(filesDebounce);
-        filesDebounce = setTimeout(() => void load(), FILES_DEBOUNCE_MS);
+        filesDebounce = setTimeout(() => void load(revision), FILES_DEBOUNCE_MS);
       });
     } else {
       setCadence("poll");
