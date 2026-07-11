@@ -107,7 +107,6 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   const pendingRestoreRef = useRef<{ path: string; fromBottom: number } | null>(null);
   const filePathRef = useRef(file?.path ?? null);
   const controlledFollowRef = useRef(follow);
-  filePathRef.current = file?.path ?? null;
 
   const setMagnet = (value: boolean, withPulse = false) => {
     pendingRestoreRef.current = null;
@@ -238,6 +237,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
   }, [tail.error, tail.size, tail.tickTime, file, onStatus]);
 
   useLayoutEffect(() => {
+    filePathRef.current = file?.path ?? null;
     restoreInitializedPathRef.current = null;
     pendingRestoreRef.current = null;
   }, [file?.path]);
