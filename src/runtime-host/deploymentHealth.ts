@@ -5,8 +5,6 @@ export type ViewerCandidateContainerState = "running" | "exited" | "missing";
 export interface ViewerHealthRequest {
   url: string;
   headers: Record<string, string>;
-  method?: "GET" | "POST";
-  body?: string;
 }
 
 export interface ViewerHealthRequestPlan {
@@ -26,19 +24,17 @@ export function viewerHealthRequestPlan(endpoint: string, token: string | null):
       : null,
     unauthorized: token ? { url: `${endpoint}/`, headers: remoteHeaders } : null,
     capability: {
-      url: `${endpoint}/api/runtime/deployments`,
-      headers: { ...authenticatedHeaders, "content-type": "application/json" },
-      method: "POST",
-      body: "{}",
+      url: `${endpoint}/api/runtime/deployments/capabilities/v1`,
+      headers: authenticatedHeaders,
     },
   };
 }
 
 export function hasViewerDeploymentCapability(status: number, body: string): boolean {
-  if (status !== 400) return false;
+  if (status !== 200) return false;
   try {
-    const response = JSON.parse(body) as { error?: unknown };
-    return response?.error === "idempotencyKey is required";
+    const response = JSON.parse(body) as { capability?: unknown; version?: unknown };
+    return response?.capability === "viewer-deployments" && response.version === 1;
   } catch {
     return false;
   }

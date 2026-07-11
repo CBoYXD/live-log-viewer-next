@@ -5,7 +5,13 @@ import fs from "node:fs";
 import path from "node:path";
 
 import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "../src/lib/runtime/contracts";
-import { obsoleteManagedViewerContainers, viewerCandidateDockerArgs, viewerCandidateTmuxEnvironment } from "../src/runtime-host/candidateContainer";
+import {
+  obsoleteManagedViewerContainers,
+  viewerCandidateDockerArgs,
+  viewerCandidateTmuxEnvironment,
+  viewerComposeServiceFromConfig,
+  viewerComposeServiceUid,
+} from "../src/runtime-host/candidateContainer";
 import { hasViewerDeploymentCapability, viewerHealthRequestPlan, waitForViewerReadiness, type ViewerCandidateContainerState } from "../src/runtime-host/deploymentHealth";
 
 const stateDir = process.env.LLV_STATE_DIR || "/home/latand/.config/agent-log-viewer/state";
@@ -44,6 +50,19 @@ function candidatePort(deploymentId: string): number {
   return Number(process.env.LLV_VIEWER_CANDIDATE_PORT_BASE || 18_000) + slot;
 }
 
+function composeConfigFile(revision: string): string {
+  return path.join(deploymentDir, "compose", `${revision}.json`);
+}
+
+function writeComposeConfig(revision: string, config: string): void {
+  viewerComposeServiceFromConfig(config);
+  const filename = composeConfigFile(revision);
+  fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+  const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, config, { mode: 0o600, flag: "wx" });
+  fs.renameSync(temporary, filename);
+}
+
 function release(value: unknown): ViewerReleaseIdentity {
   if (!value || typeof value !== "object") throw new Error("release identity is invalid");
   const item = value as Partial<ViewerReleaseIdentity>;
@@ -63,6 +82,11 @@ async function buildCandidate(deploymentId: string, revision: string): Promise<V
   await command(["git", "--git-dir", mirrorDir, "worktree", "add", "--detach", sourceDir, revision]);
   const image = `agent-log-viewer:deploy-${revision}`;
   try {
+    const composeConfig = await command([
+      "docker", "compose", "--project-directory", sourceDir, "-f", path.join(sourceDir, "docker-compose.yml"),
+      "config", "--format", "json",
+    ]);
+    writeComposeConfig(revision, composeConfig);
     await command(["docker", "build", "--pull", "--label", `dev.live-log-viewer.revision=${revision}`, "-t", image, sourceDir]);
   } finally {
     try { await command(["git", "--git-dir", mirrorDir, "worktree", "remove", "--force", sourceDir]); }
@@ -86,16 +110,11 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
     await command(["docker", "start", candidate.container]);
     return;
   }
-  const uid = String(process.getuid?.() ?? 1000);
-  const gid = String(process.getgid?.() ?? 1000);
+  const composeService = viewerComposeServiceFromConfig(fs.readFileSync(composeConfigFile(candidate.revision), "utf8"));
+  const uid = viewerComposeServiceUid(composeService);
   const tmuxEnvironment = viewerCandidateTmuxEnvironment(stateDir, uid);
-  await command(viewerCandidateDockerArgs(candidate, {
-    uid,
-    gid,
-    envFile,
-    envFileExists: fs.existsSync(envFile),
+  await command(viewerCandidateDockerArgs(candidate, composeService, {
     runtimeSocket,
-    transcribeBackend: process.env.LLV_TRANSCRIBE_BACKEND || "",
     ...tmuxEnvironment,
   }));
 }
@@ -103,6 +122,7 @@ async function startCandidate(candidate: ViewerReleaseIdentity): Promise<void> {
 async function retireRelease(candidate: ViewerReleaseIdentity): Promise<void> {
   if (await containerExists(candidate.container)) await command(["docker", "container", "rm", "-f", candidate.container]);
   try { await command(["docker", "image", "rm", candidate.image]); } catch { /* another retained release may use this image */ }
+  fs.rmSync(composeConfigFile(candidate.revision), { force: true });
 }
 
 async function retainOnly(releases: ViewerReleaseIdentity[]): Promise<void> {
@@ -127,13 +147,9 @@ function serviceToken(): string | null {
   }
 }
 
-async function fetchStatus(
-  url: string,
-  headers: Record<string, string> = {},
-  init: Pick<RequestInit, "method" | "body"> = {},
-): Promise<{ status: number; text: string }> {
+async function fetchStatus(url: string, headers: Record<string, string> = {}): Promise<{ status: number; text: string }> {
   try {
-    const response = await fetch(url, { ...init, headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
+    const response = await fetch(url, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
     return { status: response.status, text: await response.text() };
   } catch {
     return { status: 0, text: "" };
@@ -160,10 +176,7 @@ async function probeRoutes(endpoint: string, expectedAssetsEndpoint?: string): P
   const root = await fetchStatus(requests.root.url, requests.root.headers);
   const authenticated = requests.authenticated ? await fetchStatus(requests.authenticated.url, requests.authenticated.headers) : null;
   const unauthorized = requests.unauthorized ? await fetchStatus(requests.unauthorized.url, requests.unauthorized.headers) : null;
-  const capability = await fetchStatus(requests.capability.url, requests.capability.headers, {
-    method: requests.capability.method,
-    body: requests.capability.body,
-  });
+  const capability = await fetchStatus(requests.capability.url, requests.capability.headers);
   const deploymentCapable = hasViewerDeploymentCapability(capability.status, capability.text);
   const html = authenticated?.status === 200 ? authenticated.text : root.text;
   const paths = referencedAssets(html);

@@ -7,7 +7,7 @@ import type { ViewerHealthEvidence, ViewerReleaseIdentity } from "@/lib/runtime/
 import { runtimeHostClient, UnixRuntimeHostClient } from "@/lib/runtime/client";
 
 import { ViewerDeploymentCoordinator, type ViewerDeploymentAdapter } from "./deployment";
-import { viewerCandidateDockerArgs } from "./candidateContainer";
+import { viewerCandidateDockerArgs, viewerComposeServiceFromConfig } from "./candidateContainer";
 import { RuntimeHost } from "./host";
 import { RuntimeJournal } from "./journal";
 import { serveRuntimeHost } from "./socket";
@@ -285,10 +285,13 @@ test("newly promoted Viewer environment requests the next deployment through run
   const socketPath = path.join(dir, "runtime.sock");
   const server = serveRuntimeHost(socketPath, new RuntimeHost(store, undefined, coordinator));
   await new Promise<void>((resolve) => server.once("listening", resolve));
-  const args = viewerCandidateDockerArgs(release("current", "current"), {
-    uid: "1000", gid: "1000", envFile: "/config/service.env", envFileExists: false, runtimeSocket: socketPath,
+  const composeService = viewerComposeServiceFromConfig(JSON.stringify({ services: { viewer: {
+    build: {}, command: null, entrypoint: null, environment: {}, image: "viewer:compose", network_mode: "host",
+    pid: "host", privileged: true, restart: "unless-stopped", user: "1000:1000", volumes: [], working_dir: "/app",
+  } } }));
+  const args = viewerCandidateDockerArgs(release("current", "current"), composeService, {
+    runtimeSocket: socketPath,
     legacyTmuxExternal: "1", tmuxTmpdir: "/run/user/1000/agent-log-viewer",
-    transcribeBackend: "",
   });
   const environment = {} as NodeJS.ProcessEnv;
   for (let index = 0; index < args.length; index += 1) {
