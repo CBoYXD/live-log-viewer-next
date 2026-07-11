@@ -1,6 +1,7 @@
 import type { Flow, FlowAnnotation } from "@/lib/flows/types";
 import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
+import type { TmuxEndpointHealth } from "@/lib/tmux";
 import type { Workflow } from "@/lib/workflows/types";
 
 export type RootKey =
@@ -142,6 +143,7 @@ export interface FilesResponse {
   pipelinesError?: string;
   workflows: Workflow[];
   tasks: BoardTask[];
+  systemHealth: { tmux: TmuxEndpointHealth };
 }
 
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
