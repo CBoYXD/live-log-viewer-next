@@ -33,6 +33,7 @@ import { activityDot, cleanTitle, engineBadge, engineEdge, fmtAge } from "@/comp
 
 import type { AgentLink } from "./agentLinks";
 import { PIPELINE_RAIL_COLOR, pipelineRailSegment } from "./agentLinks";
+import { stableNodeDomOrder } from "./domOrder";
 import {
   LOOP_GAP,
   NODE_W,
@@ -847,6 +848,13 @@ export const NodesLayer = memo(function NodesLayer({
   /* Paths still in the scan; a run stage action is disabled once its transcript
      leaves the file set (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
+  /* Activity ranking already reaches the screen through each node's x/y
+     transform. A path-stable sibling order keeps React from moving an existing
+     pane host in the DOM, preserving its scroll, focus, and text selection. */
+  const nodesInDomOrder = useMemo(
+    () => stableNodeDomOrder(layout.nodes),
+    [layout.nodes],
+  );
   /* Flow ids with a rendered deck: a deck exists only for a placed implementer
      node, so derive from the layout's nodes to disable review actions whose
      implementer is unplaced. */
@@ -907,7 +915,7 @@ export const NodesLayer = memo(function NodesLayer({
           />
         ),
       )}
-      {layout.nodes.map((rawNode) => {
+      {nodesInDomOrder.map((rawNode) => {
         const node = withRuntimeActivity(rawNode);
         return lite ? (
           <LiteNodeShell
