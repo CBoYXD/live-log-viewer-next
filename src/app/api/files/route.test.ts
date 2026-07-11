@@ -124,17 +124,33 @@ test("a newer revision waits for a follow-up scan when an older scan is in fligh
   let releaseOlder!: () => void;
   scanGates.push(new Promise<void>((resolve) => { releaseOlder = resolve; }));
   scannedFiles = [file("/sessions/revision-1.jsonl")];
-  const older = cachedFileScan(undefined, Date.now(), 1);
+  const older = cachedFileScan(undefined, Date.now(), true);
   await Promise.resolve();
   expect(scans).toBe(1);
 
   scannedFiles = [file("/sessions/revision-2.jsonl")];
-  const newer = cachedFileScan(undefined, Date.now(), 2);
+  const newer = cachedFileScan(undefined, Date.now(), true);
   releaseOlder();
   await older;
   const result = await newer;
 
   expect(result.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/revision-2.jsonl"]);
+  expect(scans).toBe(2);
+});
+
+test("an arbitrary client revision cannot suppress a later revision refresh", async () => {
+  scannedFiles = [file("/sessions/untrusted-watermark.jsonl")];
+  await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": String(Number.MAX_SAFE_INTEGER) },
+  }));
+
+  scannedFiles = [file("/sessions/genuine-revision.jsonl")];
+  const response = await GET(new Request("http://127.0.0.1/api/files", {
+    headers: { "x-llv-files-revision": "7" },
+  }));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files.map((entry) => entry.path)).toEqual(["/sessions/genuine-revision.jsonl"]);
   expect(scans).toBe(2);
 });
 

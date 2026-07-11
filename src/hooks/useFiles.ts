@@ -65,7 +65,8 @@ export function useFiles(project?: string | null): FilesData {
     let lastBody = "";
     let lastEtag = "";
     const url = filesApiUrl(project);
-    const load = async (revision?: number): Promise<boolean> => {
+    const performLoad = async (revision?: number): Promise<boolean> => {
+      if (!alive) return true;
       try {
         const headers = filesRequestHeaders(lastEtag, revision);
         const res = await fetch(url, headers ? { headers } : undefined);
@@ -103,6 +104,12 @@ export function useFiles(project?: string | null): FilesData {
       } finally {
         if (alive) setData((d) => (d.loaded ? d : { ...d, loaded: true }));
       }
+    };
+    let loadQueue: Promise<void> = Promise.resolve();
+    const load = (revision?: number): Promise<boolean> => {
+      const result = loadQueue.then(() => performLoad(revision));
+      loadQueue = result.then(() => undefined);
+      return result;
     };
     void load();
 

@@ -2,12 +2,13 @@ import { listFilesWithProjectCatalog } from "@/lib/scanner";
 
 type FileScanSnapshot = Awaited<ReturnType<typeof listFilesWithProjectCatalog>>;
 type FileScanRefresh = {
-  revision: number;
+  generation: number;
   promise: Promise<FileScanSnapshot>;
 };
 type FileScanCacheSlot = {
   snapshot?: FileScanSnapshot;
-  snapshotRevision: number;
+  snapshotGeneration: number;
+  requestedGeneration: number;
   refreshedAt: number;
   refresh?: FileScanRefresh;
   refreshScheduled?: boolean;
@@ -29,28 +30,28 @@ function fileScanCache(): Map<string, FileScanCacheSlot> {
   return fileScanCacheStore.__llvFilesRouteScans;
 }
 
-function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject: string | undefined, revision: number): FileScanRefresh {
+function beginFileScanRefresh(slot: FileScanCacheSlot, selectedProject: string | undefined, generation: number): FileScanRefresh {
   let refresh!: FileScanRefresh;
   const promise = listFilesWithProjectCatalog(selectedProject, { persist: false }).then((snapshot) => {
     slot.snapshot = snapshot;
-    slot.snapshotRevision = Math.max(slot.snapshotRevision, revision);
+    slot.snapshotGeneration = Math.max(slot.snapshotGeneration, generation);
     slot.refreshedAt = Date.now();
     return snapshot;
   }).finally(() => {
     if (slot.refresh === refresh) slot.refresh = undefined;
   });
-  refresh = { revision, promise };
+  refresh = { generation, promise };
   slot.refresh = refresh;
   return refresh;
 }
 
-async function refreshThroughRevision(
+async function refreshThroughGeneration(
   slot: FileScanCacheSlot,
   selectedProject: string | undefined,
-  requestedRevision: number,
+  requestedGeneration: number,
 ): Promise<FileScanSnapshot> {
-  while (!slot.snapshot || slot.snapshotRevision < requestedRevision) {
-    const refresh = slot.refresh ?? beginFileScanRefresh(slot, selectedProject, requestedRevision);
+  while (!slot.snapshot || slot.snapshotGeneration < requestedGeneration) {
+    const refresh = slot.refresh ?? beginFileScanRefresh(slot, selectedProject, requestedGeneration);
     await refresh.promise;
   }
   return slot.snapshot;
@@ -59,7 +60,7 @@ async function refreshThroughRevision(
 export async function cachedFileScan(
   selectedProject?: string,
   now = Date.now(),
-  requestedRevision?: number,
+  requireFresh = false,
 ): Promise<CachedFileScan> {
   const key = selectedProject ?? "";
   const cache = fileScanCache();
@@ -69,20 +70,22 @@ export async function cachedFileScan(
       const oldestKey = cache.keys().next().value;
       if (oldestKey !== undefined) cache.delete(oldestKey);
     }
-    slot = { snapshotRevision: 0, refreshedAt: 0 };
+    slot = { snapshotGeneration: 0, requestedGeneration: 0, refreshedAt: 0 };
     cache.set(key, slot);
   } else {
     cache.delete(key);
     cache.set(key, slot);
   }
 
-  if (requestedRevision !== undefined) {
-    const snapshot = await refreshThroughRevision(slot, selectedProject, requestedRevision);
+  if (requireFresh) {
+    const requestedGeneration = slot.requestedGeneration + 1;
+    slot.requestedGeneration = requestedGeneration;
+    const snapshot = await refreshThroughGeneration(slot, selectedProject, requestedGeneration);
     return { snapshot: structuredClone(snapshot) };
   }
 
   if (!slot.snapshot) {
-    const refresh = slot.refresh ?? beginFileScanRefresh(slot, selectedProject, slot.snapshotRevision);
+    const refresh = slot.refresh ?? beginFileScanRefresh(slot, selectedProject, slot.snapshotGeneration);
     const snapshot = await refresh.promise;
     return { snapshot: structuredClone(snapshot) };
   }
@@ -92,7 +95,7 @@ export async function cachedFileScan(
     slot.refreshScheduled = true;
     refreshAfterResponse = async () => {
       try {
-        const refresh = slot.refresh ?? beginFileScanRefresh(slot, selectedProject, slot.snapshotRevision);
+        const refresh = slot.refresh ?? beginFileScanRefresh(slot, selectedProject, slot.snapshotGeneration);
         await refresh.promise;
       } catch (error) {
         console.error("[files] background scan refresh failed", error);
