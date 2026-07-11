@@ -18,10 +18,22 @@ export type ReaperProtection =
   | "observation-pending"
   | "unclassified";
 
+export interface HeadlessReviewerProcess {
+  flowId: string;
+  round: number;
+  pid: number;
+  identity: string;
+  path: string | null;
+}
+
 export interface ReaperAgentReport {
-  paneId: string;
-  panePid: number;
+  targetKind: "tmux" | "process";
+  paneId: string | null;
+  panePid: number | null;
   agentPid: number;
+  processIdentity: string | null;
+  flowId: string | null;
+  round: number | null;
   path: string | null;
   conversationId: string | null;
   class: ReaperClass | null;
@@ -44,6 +56,7 @@ export interface ReaperInput {
   now: number;
   registry: RegistryFile;
   hosts: TranscriptHost[];
+  reviewerProcesses: HeadlessReviewerProcess[];
   files: FileEntry[];
   flows: Flow[];
   manualPaths: ReadonlySet<string>;
@@ -56,7 +69,9 @@ export interface ReaperInput {
 
 export interface ReaperJournalRecord {
   at: string;
-  paneId: string;
+  targetKind: "tmux" | "process";
+  paneId: string | null;
+  agentPid: number;
   path: string | null;
   class: ReaperClass;
   reason: "idle-ttl-exceeded";
@@ -106,12 +121,18 @@ function fileIdleSeconds(now: number, entry: FileEntry | undefined): number | nu
 }
 
 function flowForPath(flows: Flow[], pathname: string): { flow: Flow; round: Round | null; role: "implementer" | "reviewer" } | null {
-  for (const flow of flows) {
-    if (flow.implementerPath === pathname) return { flow, round: null, role: "implementer" };
+  const matches: { flow: Flow; round: Round | null; role: "implementer" | "reviewer"; order: number }[] = [];
+  for (const [order, flow] of flows.entries()) {
+    if (flow.implementerPath === pathname) matches.push({ flow, round: null, role: "implementer", order });
     const round = flow.rounds.find((candidate) => candidate.reviewerPath === pathname);
-    if (round) return { flow, round, role: "reviewer" };
+    if (round) matches.push({ flow, round, role: "reviewer", order });
   }
-  return null;
+  const active = (flow: Flow) => !["approved", "done_comment", "closed"].includes(flow.state);
+  const createdAt = (flow: Flow) => Date.parse(flow.createdAt) || 0;
+  const match = matches.sort((left, right) => Number(active(right.flow)) - Number(active(left.flow))
+    || createdAt(right.flow) - createdAt(left.flow)
+    || right.order - left.order)[0];
+  return match ? { flow: match.flow, round: match.round, role: match.role } : null;
 }
 
 function flowIdleSeconds(now: number, flow: Flow): number | null {
@@ -151,7 +172,7 @@ function deliveryFencesTurn(registry: RegistryFile, conversation: RegistryConver
 export function evaluateReaper(input: ReaperInput): ReaperReport {
   const files = new Map(input.files.map((entry) => [entry.path, entry]));
   const groups = duplicateGroups(input.hosts);
-  const agents = input.hosts.map((host): ReaperAgentReport => {
+  const paneAgents = input.hosts.map((host): ReaperAgentReport => {
     const pathname = host.primaryPath;
     const conversation = pathname ? conversationForPath(input.registry, pathname) : null;
     const profile = pathname ? profileForPath(input.registry, pathname) : null;
@@ -169,10 +190,6 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
       agentClass = "duplicate-resume";
       idleSeconds = 0;
       if (newestDuplicate?.paneId === host.paneId) protectedReasons.push("newest-duplicate");
-    } else if (flowMatch?.role === "reviewer" && flowMatch.flow.reviewerMode === "headless") {
-      agentClass = "headless-reviewer";
-      idleSeconds = reviewerIdleSeconds(input.now, flowMatch.round!);
-      if (!flowMatch.round?.verdict && !flowMatch.round?.error) protectedReasons.push("review-verdict-pending");
     } else if (flowMatch) {
       agentClass = "flow-worker";
       idleSeconds = flowIdleSeconds(input.now, flowMatch.flow);
@@ -201,9 +218,13 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
     else if (ttlSeconds !== null && idleSeconds < ttlSeconds) protectedReasons.push("idle-ttl");
     const eligible = agentClass !== null && protectedReasons.length === 0;
     return {
+      targetKind: "tmux",
       paneId: host.paneId,
       panePid: host.panePid,
       agentPid: host.agentPid,
+      processIdentity: host.agentIdentity,
+      flowId: flowMatch?.flow.id ?? null,
+      round: flowMatch?.round?.n ?? null,
       path: pathname,
       conversationId: conversation?.id ?? null,
       class: agentClass,
@@ -214,6 +235,35 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
       action: eligible && !input.enabled ? "dry-run" : "retained",
     };
   });
+  const reviewerAgents = input.reviewerProcesses.map((process): ReaperAgentReport => {
+    const flow = input.flows.find((candidate) => candidate.id === process.flowId);
+    const round = flow?.rounds.find((candidate) => candidate.n === process.round) ?? null;
+    const idleSeconds = round ? reviewerIdleSeconds(input.now, round) : null;
+    const protectedReasons: ReaperProtection[] = [];
+    if (!flow || !round || flow.reviewerMode !== "headless") protectedReasons.push("unclassified");
+    else if (!round.verdict && !round.error) protectedReasons.push("review-verdict-pending");
+    if (idleSeconds === null) protectedReasons.push("observation-pending");
+    else if (idleSeconds < TTL_SECONDS["headless-reviewer"]) protectedReasons.push("idle-ttl");
+    const eligible = flow !== undefined && round !== null && flow.reviewerMode === "headless" && protectedReasons.length === 0;
+    return {
+      targetKind: "process",
+      paneId: null,
+      panePid: null,
+      agentPid: process.pid,
+      processIdentity: process.identity,
+      flowId: process.flowId,
+      round: process.round,
+      path: process.path,
+      conversationId: null,
+      class: "headless-reviewer",
+      idleSeconds,
+      ttlSeconds: TTL_SECONDS["headless-reviewer"],
+      protectedReasons,
+      eligible,
+      action: eligible && !input.enabled ? "dry-run" : "retained",
+    };
+  });
+  const agents = [...paneAgents, ...reviewerAgents];
   return {
     generatedAt: new Date(input.now).toISOString(),
     mode: input.enabled ? "active" : "dry-run",
@@ -237,7 +287,9 @@ export async function runEvaluatedReaper(
     agent.action = killed ? "reaped" : "kill-failed";
     deps.journal({
       at: new Date().toISOString(),
+      targetKind: agent.targetKind,
       paneId: agent.paneId,
+      agentPid: agent.agentPid,
       path: agent.path,
       class: agent.class,
       reason: "idle-ttl-exceeded",

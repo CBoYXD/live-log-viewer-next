@@ -11,11 +11,19 @@ import { loadFlows } from "@/lib/flows/store";
 import type { Flow } from "@/lib/flows/types";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
-import { readSession } from "@/lib/session/reader";
+import { countUserAuthoredMessages } from "@/lib/session/reader";
 import { killTmuxHostIfMatches, tmuxEndpoint } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-import { evaluateReaper, runEvaluatedReaper, type ReaperInput, type ReaperJournalRecord, type ReaperReport } from "./reaper";
+import {
+  evaluateReaper,
+  runEvaluatedReaper,
+  type HeadlessReviewerProcess,
+  type ReaperAgentReport,
+  type ReaperInput,
+  type ReaperJournalRecord,
+  type ReaperReport,
+} from "./reaper";
 
 const REPORT_FILE = () => statePath("reaper-report.json");
 const STATE_FILE = () => statePath("reaper-state.json");
@@ -89,8 +97,8 @@ function userAuthoredPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, host
   for (const host of hosts) {
     const pathname = host.primaryPath;
     if (!pathname || protectedPaths.has(pathname) || !fs.existsSync(pathname)) continue;
-    const count = readSession(pathname, host.engine).messages.filter((message) => message.role === "user").length;
     const launchPromptAllowance = hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0;
+    const count = countUserAuthoredMessages(pathname, host.engine, launchPromptAllowance + 1);
     if (count > launchPromptAllowance) protectedPaths.add(pathname);
   }
   return protectedPaths;
@@ -148,13 +156,15 @@ function makeInput(
   files: FileEntry[],
   state: ReaperState,
   now: number,
+  overrides: ReaperActuationOverrides = {},
 ): ReaperInput {
   const snapshot = registry.snapshot();
-  const flows = loadFlows();
+  const flows = (overrides.loadFlows ?? loadFlows)();
   return {
     now,
     registry: snapshot,
     hosts,
+    reviewerProcesses: observeHeadlessReviewers(flows, overrides),
     files,
     flows,
     manualPaths: manualPaths(snapshot, hosts, files),
@@ -167,13 +177,87 @@ function makeInput(
   };
 }
 
+function observeHeadlessReviewers(flows: Flow[], overrides: ReaperActuationOverrides): HeadlessReviewerProcess[] {
+  const pidAlive = overrides.pidAlive ?? ((pid: number) => procBackend.pidAlive(pid));
+  const processIdentity = overrides.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
+  const processes: HeadlessReviewerProcess[] = [];
+  for (const flow of flows) {
+    if (flow.reviewerMode !== "headless") continue;
+    for (const round of flow.rounds) {
+      const pid = round.reviewerPid ?? null;
+      const identity = round.reviewerIdentity ?? null;
+      if (!pid || !identity || !pidAlive(pid) || processIdentity(pid) !== identity) continue;
+      processes.push({ flowId: flow.id, round: round.n, pid, identity, path: round.reviewerPath });
+    }
+  }
+  return processes;
+}
+
+interface HeadlessReviewerKillDeps {
+  pidAlive(pid: number): boolean;
+  processIdentity(pid: number): string | null;
+  signal(pid: number, signal: NodeJS.Signals): void;
+  sleep(milliseconds: number): Promise<void>;
+  maxVerifyAttempts: number;
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    process.kill(pid, signal);
+  }
+}
+
+export async function killHeadlessReviewerIfMatches(
+  expected: { pid: number; identity: string },
+  overrides: Partial<HeadlessReviewerKillDeps> = {},
+): Promise<boolean> {
+  const deps: HeadlessReviewerKillDeps = {
+    pidAlive: (pid) => procBackend.pidAlive(pid),
+    processIdentity: (pid) => procBackend.processIdentity(pid),
+    signal: signalProcessGroup,
+    sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    maxVerifyAttempts: 20,
+    ...overrides,
+  };
+  const gone = () => !deps.pidAlive(expected.pid) || deps.processIdentity(expected.pid) !== expected.identity;
+  if (gone()) return false;
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    try {
+      deps.signal(expected.pid, signal);
+    } catch {
+      if (gone()) return true;
+      return false;
+    }
+    for (let attempt = 0; attempt < deps.maxVerifyAttempts; attempt += 1) {
+      if (gone()) return true;
+      if (attempt + 1 < deps.maxVerifyAttempts) await deps.sleep(25);
+    }
+  }
+  return false;
+}
+
 async function actuateCandidate(
   registry: AgentRegistry,
   files: FileEntry[],
   state: ReaperState,
-  paneId: string,
+  agent: ReaperAgentReport,
   overrides: ReaperActuationOverrides = {},
 ): Promise<boolean> {
+  if (agent.targetKind === "process") {
+    if (!agent.flowId || agent.round === null || !agent.processIdentity) return false;
+    const current = evaluateReaper(makeInput(registry, [], files, state, (overrides.now ?? Date.now)(), overrides));
+    const candidate = current.agents.find((item) => item.targetKind === "process"
+      && item.flowId === agent.flowId
+      && item.round === agent.round
+      && item.agentPid === agent.agentPid
+      && item.processIdentity === agent.processIdentity);
+    if (!candidate?.eligible) return false;
+    return (overrides.killProcess ?? killHeadlessReviewerIfMatches)({ pid: agent.agentPid, identity: agent.processIdentity });
+  }
+  const paneId = agent.paneId;
+  if (paneId === null) return false;
   const observeHosts = overrides.readHosts ?? readTranscriptHosts;
   const killHost = overrides.kill ?? killTmuxHostIfMatches;
   const currentTime = overrides.now ?? Date.now;
@@ -193,8 +277,8 @@ async function actuateCandidate(
         && host.agentIdentity === initialHost.agentIdentity
         && host.primaryPath === initialHost.primaryPath);
       if (!freshHost) return false;
-      const current = evaluateReaper(makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime()));
-      const candidate = current.agents.find((agent) => agent.paneId === paneId);
+      const current = evaluateReaper(makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides));
+      const candidate = current.agents.find((item) => item.targetKind === "tmux" && item.paneId === paneId);
       if (!candidate?.eligible) return false;
       const killed = await killHost(evidenceFor(freshHost));
       if (killed && registry.snapshot().entries[`${entry.key.engine}:${entry.key.sessionId}`]?.host?.paneId === paneId) {
@@ -210,6 +294,10 @@ async function actuateCandidate(
 export interface ReaperActuationOverrides {
   readHosts?: (fresh?: boolean) => Promise<TranscriptHostSnapshot>;
   kill?: typeof killTmuxHostIfMatches;
+  loadFlows?: typeof loadFlows;
+  pidAlive?: (pid: number) => boolean;
+  processIdentity?: (pid: number) => string | null;
+  killProcess?: typeof killHeadlessReviewerIfMatches;
   now?: () => number;
 }
 
@@ -223,9 +311,9 @@ export async function runReaperCycle(options: {
   const registry = options.registry ?? agentRegistry();
   const now = options.now ?? Date.now();
   const state = updateObservationState(options.hosts, now);
-  const report = evaluateReaper(makeInput(registry, options.hosts, options.files, state, now));
+  const report = evaluateReaper(makeInput(registry, options.hosts, options.files, state, now, options.actuation));
   const completed = await runEvaluatedReaper(report, {
-    actuate: (agent) => actuateCandidate(registry, options.files, state, agent.paneId, options.actuation),
+    actuate: (agent) => actuateCandidate(registry, options.files, state, agent, options.actuation),
     journal: appendJournal,
   });
   atomicWrite(REPORT_FILE(), completed);

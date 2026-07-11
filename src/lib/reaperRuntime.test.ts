@@ -6,9 +6,10 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry } from "@/lib/agent/registry";
 import type { TranscriptHost, TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
+import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { readReaperReport, runReaperCycle } from "./reaperRuntime";
+import { killHeadlessReviewerIfMatches, readReaperReport, runReaperCycle } from "./reaperRuntime";
 
 const originalStateDir = process.env.LLV_STATE_DIR;
 const originalEnabled = process.env.LLV_REAPER_ENABLED;
@@ -179,6 +180,153 @@ test("a completed Viewer worker spawn discounts its single launch prompt", async
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("authorship at the beginning of a transcript survives a tail larger than the session reader window", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-early-user-"));
+  const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1344.jsonl");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const user = JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "Keep this human session" },
+  }) + "\n";
+  const assistant = JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 60 * 60_000).toISOString(),
+    payload: { type: "agent_message", message: "x".repeat(8 * 1024 * 1024 + 1024) },
+  }) + "\n";
+  fs.writeFileSync(pathname, user + assistant);
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "soak probe" });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: pathname,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 60 * 60_000).toISOString(),
+  }]);
+
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+    });
+
+    expect(report.agents[0]).toMatchObject({
+      class: "probe",
+      eligible: false,
+      protectedReasons: ["user-authored-message"],
+    });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+function headlessFlow(now: number): Flow {
+  return {
+    id: "flow-headless",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd: "/repo",
+    implementerPath: "/implementer.jsonl",
+    roles: {
+      implementer: { engine: "codex", model: null, effort: null },
+      reviewer: { engine: "codex", model: null, effort: null },
+    },
+    baseRef: "base",
+    baseMode: "merge-base",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 1,
+    state: "closed",
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: "/reviewer.jsonl",
+      reviewerPid: 4041,
+      reviewerIdentity: "4041:one",
+      reviewerPane: null,
+      findingsPath: "/findings",
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: "APPROVE",
+      findingsCount: 0,
+      startedAt: new Date(now - 20 * 60_000).toISOString(),
+      spawnStartedAt: new Date(now - 20 * 60_000).toISOString(),
+      reviewedAt: new Date(now - 6 * 60_000).toISOString(),
+      relayedAt: new Date(now - 5 * 60_000).toISOString(),
+      error: null,
+    }],
+    createdAt: new Date(now - 30 * 60_000).toISOString(),
+    closedAt: new Date(now - 5 * 60_000).toISOString(),
+  };
+}
+
+test("a detached headless reviewer is observed and reaped by verified process identity", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-headless-"));
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  process.env.LLV_STATE_DIR = directory;
+  process.env.LLV_REAPER_ENABLED = "1";
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  let kills = 0;
+
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [],
+      now,
+      actuation: {
+        loadFlows: () => [headlessFlow(now)],
+        pidAlive: (pid) => pid === 4041,
+        processIdentity: (pid) => pid === 4041 ? "4041:one" : null,
+        killProcess: async (process) => {
+          expect(process).toEqual({ pid: 4041, identity: "4041:one" });
+          kills += 1;
+          return true;
+        },
+        now: () => now,
+      },
+    });
+
+    expect(report.agents[0]).toMatchObject({
+      targetKind: "process",
+      paneId: null,
+      agentPid: 4041,
+      processIdentity: "4041:one",
+      class: "headless-reviewer",
+      eligible: true,
+      action: "reaped",
+    });
+    expect(kills).toBe(1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("headless reviewer termination rejects pid reuse and verifies process exit", async () => {
+  let alive = true;
+  let identity = "5051:reused";
+  let signals = 0;
+  const deps = {
+    pidAlive: () => alive,
+    processIdentity: () => identity,
+    signal: () => { signals += 1; alive = false; },
+    sleep: async () => {},
+    maxVerifyAttempts: 2,
+  };
+
+  expect(await killHeadlessReviewerIfMatches({ pid: 5051, identity: "5051:original" }, deps)).toBe(false);
+  expect(signals).toBe(0);
+  identity = "5051:original";
+  expect(await killHeadlessReviewerIfMatches({ pid: 5051, identity: "5051:original" }, deps)).toBe(true);
+  expect(signals).toBe(1);
 });
 
 test("a delivery completed before reaper actuation fences the stale idle turn", async () => {

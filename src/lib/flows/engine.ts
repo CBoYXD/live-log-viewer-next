@@ -8,6 +8,7 @@ import { agentRegistry } from "@/lib/agent/registry";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
+import { procBackend } from "@/lib/proc";
 import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
@@ -79,6 +80,8 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     reviewerPath: null,
     accountId: null,
     sessionId: null,
+    reviewerPid: null,
+    reviewerIdentity: null,
     reviewerPane: null,
     findingsPath: null,
     triggeredBy,
@@ -213,7 +216,10 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
     account.engine === "codex" ? { home: account.home, managed: account.kind === "managed" } : null,
     account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
   );
-  if (launched.pid) round.reviewerPid = launched.pid;
+  if (launched.pid) {
+    round.reviewerPid = launched.pid;
+    round.reviewerIdentity = procBackend.processIdentity(launched.pid);
+  }
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
 }

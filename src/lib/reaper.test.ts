@@ -9,7 +9,7 @@ import type { TranscriptHost } from "@/lib/agent/transcriptHost";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
-import { evaluateReaper, runEvaluatedReaper, type ReaperInput } from "./reaper";
+import { evaluateReaper, runEvaluatedReaper, type HeadlessReviewerProcess, type ReaperInput } from "./reaper";
 
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-test-"));
 const NOW = Date.parse("2026-07-12T12:00:00.000Z");
@@ -81,6 +81,7 @@ function input(overrides: Partial<ReaperInput> = {}): ReaperInput {
     now: NOW,
     registry: registryFor(new Map()),
     hosts: [],
+    reviewerProcesses: [],
     files: [],
     flows: [],
     manualPaths: new Set(),
@@ -108,7 +109,14 @@ test("classifies every policy class and applies its exact idle TTL", () => {
   ]);
   const report = evaluateReaper(input({
     registry: registryFor(profiles),
-    hosts: [host(1, duplicate, 8), host(1, duplicate, 9), host(2, implementer), host(3, reviewer), host(4, probe), host(5, dead)],
+    hosts: [host(1, duplicate, 8), host(1, duplicate, 9), host(2, implementer), host(4, probe), host(5, dead)],
+    reviewerProcesses: [{
+      flowId: "flow-1",
+      round: 1,
+      pid: 3003,
+      identity: "3003:one",
+      path: reviewer,
+    } satisfies HeadlessReviewerProcess],
     files: [file(duplicate, 1), file(implementer, 31), file(reviewer, 6), file(probe, 61)],
     flows: [flow("flow-1", implementer, reviewer)],
     mergedFlowIds: new Set(["flow-1"]),
@@ -120,11 +128,37 @@ test("classifies every policy class and applies its exact idle TTL", () => {
     ["%8", "duplicate-resume", 0, true],
     ["%9", "duplicate-resume", 0, false],
     ["%2", "flow-worker", 1800, true],
-    ["%3", "headless-reviewer", 300, true],
     ["%4", "probe", 3600, true],
     ["%5", "dead-transcript", 1800, true],
+    [null, "headless-reviewer", 300, true],
   ]);
   expect(report.agents.find((agent) => agent.paneId === "%9")?.protectedReasons).toContain("newest-duplicate");
+});
+
+test("a newer active flow wins over a closed flow for the same implementer", () => {
+  const pathname = transcript(16);
+  const historical = flow("flow-old", pathname, transcript(116));
+  const active: Flow = {
+    ...flow("flow-new", pathname, transcript(216)),
+    state: "reviewing",
+    closedAt: null,
+    createdAt: new Date(NOW - 10 * 60_000).toISOString(),
+    rounds: [],
+  };
+  const report = evaluateReaper(input({
+    registry: registryFor(new Map([[pathname, emptyLaunchProfile({ cwd: "/repo", role: "worker" })]])),
+    hosts: [host(16, pathname, 16)],
+    files: [file(pathname, 120)],
+    flows: [historical, active],
+    mergedFlowIds: new Set([historical.id]),
+  }));
+
+  expect(report.agents[0]).toMatchObject({
+    class: "flow-worker",
+    flowId: "flow-new",
+    eligible: false,
+  });
+  expect(report.agents[0]?.protectedReasons).toEqual(expect.arrayContaining(["flow-in-progress", "flow-not-merged"]));
 });
 
 test("hard exemptions protect user conversations, mid-turn agents, and manual board placements", () => {

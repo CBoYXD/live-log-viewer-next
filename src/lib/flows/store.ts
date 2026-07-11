@@ -172,6 +172,7 @@ export function loadFlows(): Flow[] {
       reviewerConversationId: round.reviewerConversationId ?? null,
       sessionId: round.sessionId ?? null,
       reviewerPid: round.reviewerPid ?? null,
+      reviewerIdentity: round.reviewerIdentity ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       error: round.error ?? null,

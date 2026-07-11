@@ -226,6 +226,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       reviewerPath: null,
       sessionId: null,
       reviewerPid: null,
+      reviewerIdentity: null,
       reviewerPane: null,
       findingsPath: null,
       verdict: null,
