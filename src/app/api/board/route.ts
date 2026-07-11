@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, RegistryReadError } from "@/lib/agent/registry";
 import type { BoardMutationV1 } from "@/lib/board/mutations";
 import { boardFor, BoardStoreError, mutateBoard, patchBoard } from "@/lib/board/store";
 import { validateBoardPatchRequest } from "@/lib/board/validation";
@@ -29,9 +29,16 @@ function mutationsWithConversationAliases(mutations: readonly BoardMutationV1[])
   }
   if (mentionedPaths.size === 0) return [...mutations];
 
+  let conversations: ReturnType<ReturnType<typeof agentRegistry>["snapshot"]>["conversations"];
+  try {
+    conversations = agentRegistry().snapshot().conversations;
+  } catch (error) {
+    if (error instanceof RegistryReadError) return [...mutations];
+    throw error;
+  }
   const pairs: Array<{ from: string; to: string }> = [];
   const pairedSources = new Set(suppliedRemapSources);
-  for (const conversation of Object.values(agentRegistry().snapshot().conversations)) {
+  for (const conversation of Object.values(conversations)) {
     const paths = [
       ...conversation.generations.map((generation) => generation.path),
       ...conversation.continuityPaths,

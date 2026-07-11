@@ -149,3 +149,20 @@ test("a closed conversation stays hidden when a registry successor arrives witho
     },
   });
 });
+
+test("a corrupt conversation registry cannot block a valid close", async () => {
+  fs.writeFileSync(path.join(path.dirname(testFile), "agent-registry.json"), "{ corrupt", "utf8");
+
+  const response = await PATCH(patch({
+    schemaVersion: 1,
+    project: "corrupt-registry",
+    baseRevision: 0,
+    mutations: [{ kind: "close", path: "/card" }],
+  }));
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    ok: true,
+    board: { revision: 1, prefs: { hidden: ["/card"] } },
+  });
+});
