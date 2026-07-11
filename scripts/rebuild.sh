@@ -21,7 +21,7 @@ BASE="http://127.0.0.1:${PORT}"
 BODY="$(printf '{"revision":"%s","idempotencyKey":"%s"}' "$REVISION" "$IDEMPOTENCY_KEY")"
 
 echo "deployment key: $IDEMPOTENCY_KEY"
-response="$(curl -sS --max-time 15 -H 'content-type: application/json' -d "$BODY" -w $'\n%{http_code}' "${BASE}/api/runtime/deployments${QUERY}")"
+response="$(curl -sS --max-time 125 -H 'content-type: application/json' -d "$BODY" -w $'\n%{http_code}' "${BASE}/api/runtime/deployments${QUERY}")"
 code="${response##*$'\n'}"
 json="${response%$'\n'*}"
 if [ "$code" != "202" ] && [ "$code" != "409" ]; then

@@ -255,6 +255,31 @@ test("Viewer socket requests receive deployment receipts and durable status", as
   store.close();
 });
 
+test("Viewer socket admission outlives the ordinary client timeout during delayed revision resolution", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-deploy-socket-timeout-"));
+  sandboxes.push(dir);
+  const store = new RuntimeJournal(path.join(dir, "runtime.sqlite"), { now: () => 1_000 });
+  const adapter = new FakeDeploymentAdapter();
+  adapter.resolveGate = new Promise<void>((resolve) => setTimeout(resolve, 30));
+  const coordinator = new ViewerDeploymentCoordinator(store, adapter, { pid: 10, startIdentity: "10:1" });
+  const server = serveRuntimeHost(
+    path.join(dir, "runtime.sock"),
+    new RuntimeHost(store, undefined, coordinator),
+    { defaultTimeoutMs: 10, deploymentTimeoutMs: 100 },
+  );
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const client = new UnixRuntimeHostClient(path.join(dir, "runtime.sock"), 10, 100);
+
+  try {
+    const receipt = await client.requestViewerDeployment({ idempotencyKey: "delayed-socket-deploy" });
+    expect(receipt).toMatchObject({ state: "accepted", replayed: false });
+    if (receipt.state === "accepted") await coordinator.waitForDeployment(receipt.deploymentId);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    store.close();
+  }
+});
+
 function stableEndpointForTest(): string {
   return "http://127.0.0.1:8898";
 }

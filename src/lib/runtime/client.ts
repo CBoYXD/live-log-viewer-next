@@ -4,6 +4,7 @@ import type { RuntimeEventInput, RuntimeOperationCommand, RuntimeOperationResult
 import { runtimeHostSocket } from "./flags";
 
 const MAX_RESPONSE_FRAME_BYTES = 8 * 1024 * 1024;
+export const VIEWER_DEPLOYMENT_REQUEST_TIMEOUT_MS = 120_000;
 
 export class RuntimeHostUnavailableError extends Error {
   constructor(message: string, readonly code?: string) {
@@ -24,7 +25,11 @@ export interface RuntimeHostClient {
 }
 
 export class UnixRuntimeHostClient implements RuntimeHostClient {
-  constructor(private readonly socketPath: string, private readonly timeoutMs = 3_000) {}
+  constructor(
+    private readonly socketPath: string,
+    private readonly timeoutMs = 3_000,
+    private readonly deploymentTimeoutMs = VIEWER_DEPLOYMENT_REQUEST_TIMEOUT_MS,
+  ) {}
 
   snapshot(): Promise<RuntimeSnapshot> { return this.call("snapshot") as Promise<RuntimeSnapshot>; }
   events(after: number): Promise<RuntimeReplay> { return this.call("events", { after }) as Promise<RuntimeReplay>; }
@@ -33,7 +38,7 @@ export class UnixRuntimeHostClient implements RuntimeHostClient {
   operation(event: RuntimeEventInput): Promise<unknown> { return this.call("operation", { event }); }
   command(command: RuntimeOperationCommand): Promise<RuntimeOperationResult> { return this.call("command", { command }) as Promise<RuntimeOperationResult>; }
   operationStatus(operationId: string): Promise<RuntimeOperationResult | null> { return this.call("operation-status", { operationId }) as Promise<RuntimeOperationResult | null>; }
-  requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>) as Promise<ViewerDeploymentReceipt>; }
+  requestViewerDeployment(request: ViewerDeploymentRequest): Promise<ViewerDeploymentReceipt> { return this.call("viewer-deployment-request", request as unknown as Record<string, unknown>, this.deploymentTimeoutMs) as Promise<ViewerDeploymentReceipt>; }
   readViewerDeployment(deploymentId: string): Promise<ViewerDeploymentStatus | null> { return this.call("viewer-deployment-read", { deploymentId }) as Promise<ViewerDeploymentStatus | null>; }
 
   private call(method: RuntimeSocketRequest["method"], params?: Record<string, unknown>, timeoutMs = this.timeoutMs, signal?: AbortSignal): Promise<unknown> {

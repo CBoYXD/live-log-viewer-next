@@ -16,7 +16,8 @@ reach a deterministic journaled result across Viewer or runtime-host restarts.
   SHA and rejects shell fragments, Compose arguments, and mutable checkout state.
 - AC3: One durable deployment lease serializes execution; concurrent requests
   receive a stable busy receipt, and idempotency-key replay returns the original
-  deployment receipt and pinned revision.
+  deployment receipt and pinned revision. Admission transport allows bounded
+  canonical mirror resolution without inheriting the ordinary request timeout.
 - AC4: A versioned candidate image and distinct candidate container start on an
   alternate loopback endpoint while the serving release remains available.
 - AC5: Bounded candidate readiness polling stops early after container exit;
