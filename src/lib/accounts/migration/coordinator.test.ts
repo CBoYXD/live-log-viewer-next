@@ -270,9 +270,21 @@ describe("durable account migration coordinator", () => {
     store.reconcileConversations([observation("/revision-history.jsonl", "a", "idle")]);
     const conversation = store.conversationForPath("/revision-history.jsonl")!;
     const beforeDelivery = store.engineRouting("codex").revision;
-    store.holdDelivery(conversation.id, "queued", "revision-delivery");
+    const queued = store.holdDelivery(conversation.id, "queued", "revision-delivery");
     expect(store.engineRouting("codex").revision).toBe(beforeDelivery + 1);
-    store.recordDeliveryOutcome(store.pendingDeliveries(conversation.id)[0]!.id, "delivered");
+    const assignedRevision = store.engineRouting("codex").revision;
+    store.beginDeliveryAttempt(queued.id, queued.generationId!);
+    expect(store.engineRouting("codex").revision).toBe(assignedRevision + 1);
+    const uncertainRevision = store.engineRouting("codex").revision;
+    store.recordDeliveryOutcome(queued.id, "delivered");
+    expect(store.engineRouting("codex").revision).toBe(uncertainRevision + 1);
+    expect(() => store.commitMigrationIntent({
+      engine: "codex", targetId: "b", origin: "manual", requestId: "revision-stale-delivery",
+      expectedRevision: uncertainRevision, scope: "all",
+    })).toThrow(MigrationRevisionError);
+    const deliveredRevision = store.engineRouting("codex").revision;
+    store.recordDeliveryOutcome(queued.id, "delivered");
+    expect(store.engineRouting("codex").revision).toBe(deliveredRevision);
     const intent = store.commitMigrationIntent({
       engine: "codex", targetId: "b", origin: "manual", requestId: "revision-stop",
       expectedRevision: store.engineRouting("codex").revision, scope: "all",

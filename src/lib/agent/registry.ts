@@ -1859,12 +1859,15 @@ export class AgentRegistry {
       const delivery = file.heldDeliveries[id];
       if (!delivery || delivery.state !== "assigned" || delivery.generationId !== generationId) return null;
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       const migrationBlocksDelivery = conversation?.migration
         && ["requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       if (migrationBlocksDelivery || conversation?.generations.at(-1)?.id !== generationId) return null;
       delivery.state = "delivery-uncertain";
       delivery.attempts += 1;
       delivery.error = "delivery started; recovery requires an explicit outcome";
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
     });
   }
@@ -1884,15 +1887,26 @@ export class AgentRegistry {
       const delivery = file.heldDeliveries[id];
       if (!delivery) throw new Error("held delivery is unknown");
       if (delivery.state === "delivered") return clone(delivery);
+      const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       delivery.state = state;
       delivery.deliveredAt = state === "delivered" ? now() : null;
       delivery.error = error?.slice(0, 240) ?? null;
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
     });
   }
 
   discardDelivery(id: string): void {
-    this.mutate((file) => { delete file.heldDeliveries[id]; });
+    this.mutate((file) => {
+      const delivery = file.heldDeliveries[id];
+      const conversation = delivery ? file.conversations[resolveConversationAlias(file, delivery.conversationId)] : undefined;
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      delete file.heldDeliveries[id];
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+    });
   }
 
   requeueHeldDelivery(id: string): HeldDelivery {
@@ -1901,6 +1915,8 @@ export class AgentRegistry {
       if (!delivery) throw new Error("held delivery is unknown");
       if (delivery.state === "delivered") return clone(delivery);
       const conversation = file.conversations[resolveConversationAlias(file, delivery.conversationId)];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
       const migrationBlocksDelivery = conversation?.migration
         && ["waiting-turn", "requested", "preparing", "successor-starting", "verifying"].includes(conversation.migration.phase);
       if (migrationBlocksDelivery) {
@@ -1909,6 +1925,7 @@ export class AgentRegistry {
         delivery.assignedAt = null;
         delivery.deliveredAt = null;
         delivery.error = null;
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       }
       const current = conversation?.generations.at(-1);
@@ -1916,6 +1933,7 @@ export class AgentRegistry {
         delivery.state = "failed";
         delivery.deliveredAt = null;
         delivery.error = "delivery target is unavailable and remains recoverable";
+        if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
         return clone(delivery);
       }
       delivery.state = "assigned";
@@ -1923,6 +1941,7 @@ export class AgentRegistry {
       delivery.assignedAt = now();
       delivery.deliveredAt = null;
       delivery.error = null;
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       return clone(delivery);
     });
   }
