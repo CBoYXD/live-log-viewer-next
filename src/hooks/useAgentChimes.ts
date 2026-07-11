@@ -17,12 +17,21 @@ const CHIME_OF: Partial<Record<PaneState, ChimeKind>> = {
 /** Several agents finishing in one poll ring as a cascade, not a cluster chord. */
 const STAGGER_MS = 220;
 
+/* Upper bound on remembered identities. The retention exists to bridge the
+   FILE_CAP feed window (~400 entries plus hydration), so an order of magnitude
+   above it keeps every plausibly-returning conversation while a long-running
+   tab stays flat: when the bound is hit, the longest-known identities absent
+   from the current poll are evicted first. */
+export const MAX_TRACKED_IDENTITIES = 4096;
+
+/** Only what a future transition decision reads — never the whole FileEntry,
+    whose nested payloads (plans, questions, migration data) would otherwise
+    accumulate for every conversation a long-running tab has ever observed. */
 export interface TrackedConversation {
   state: PaneState;
+  /** The finish chime this poll's entry would ring, derived at map build. */
+  kind: ChimeKind | undefined;
   parent: string | null;
-  /** The entry this identity currently resolves to, so the transition scan
-      reads the live annotation without a second path lookup. */
-  file: FileEntry;
 }
 
 export interface PlannedChime {
@@ -32,10 +41,11 @@ export interface PlannedChime {
 }
 
 export interface ChimePlan {
-  /** Baseline for the next poll: every identity ever seen with its last known
-      state — identities that fell out of the capped feed are retained, so a
-      conversation that merely churned out of the recency cap and returned does
-      not read as a brand-new agent (that was the storm of identical chimes). */
+  /** Baseline for the next poll: identities seen so far with their last known
+      state — identities that fell out of the capped feed are retained (up to
+      {@link MAX_TRACKED_IDENTITIES}), so a conversation that merely churned
+      out of the recency cap and returned does not read as a brand-new agent
+      (that was the storm of identical chimes). */
   tracked: Map<string, TrackedConversation>;
   /** Children that have rung their spawn blip. */
   linked: Set<string>;
@@ -61,7 +71,10 @@ export function planAgentChimes(
      tracked state between generations, so they are skipped outright. */
   const next = new Map<string, TrackedConversation>();
   for (const file of files) {
-    if (!isAuxTask(file) && !isArchivedPredecessor(file)) next.set(conversationIdentity(file), { state: paneState(file), parent: file.parent, file });
+    if (isAuxTask(file) || isArchivedPredecessor(file)) continue;
+    const state = paneState(file);
+    const kind = file.pendingQuestion || file.waitingInput ? "question" : CHIME_OF[state];
+    next.set(conversationIdentity(file), { state, kind, parent: file.parent });
   }
   const nextLinked = new Set(linked);
   const chimes: PlannedChime[] = [];
@@ -70,11 +83,9 @@ export function planAgentChimes(
     return { tracked: next, linked: nextLinked, chimes };
   }
   for (const [id, cur] of next) {
-    const file = cur.file;
-    const kind = file?.pendingQuestion || file?.waitingInput ? "question" : CHIME_OF[cur.state];
     const was = prev.get(id);
-    const finished = kind !== undefined && (was?.state === "live" || was === undefined);
-    if (kind !== undefined && finished) chimes.push({ kind, id });
+    const finished = cur.kind !== undefined && (was?.state === "live" || was === undefined);
+    if (cur.kind !== undefined && finished) chimes.push({ kind: cur.kind, id });
     if (cur.parent && !nextLinked.has(id)) {
       nextLinked.add(id);
       /* Skip the blip when a finish chime just announced this same
@@ -83,7 +94,19 @@ export function planAgentChimes(
       if (!finished) chimes.push({ kind: "spawned", id });
     }
   }
-  return { tracked: new Map([...prev, ...next]), linked: nextLinked, chimes };
+  /* Re-inserting an existing key keeps its original Map position, so eviction
+     walks first-seen order: the oldest identities not in the current feed go
+     first. `linked` is trimmed to the survivors — an evicted child that ever
+     returns is treated as new anyway. */
+  const tracked = new Map([...prev, ...next]);
+  if (tracked.size > MAX_TRACKED_IDENTITIES) {
+    for (const id of tracked.keys()) {
+      if (tracked.size <= MAX_TRACKED_IDENTITIES) break;
+      if (!next.has(id)) tracked.delete(id);
+    }
+    for (const id of nextLinked) if (!tracked.has(id)) nextLinked.delete(id);
+  }
+  return { tracked, linked: nextLinked, chimes };
 }
 
 /**

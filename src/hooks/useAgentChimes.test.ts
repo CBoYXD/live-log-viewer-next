@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 
-import { planAgentChimes, type TrackedConversation } from "./useAgentChimes";
+import { MAX_TRACKED_IDENTITIES, planAgentChimes, type TrackedConversation } from "./useAgentChimes";
 
 /* Deterministic fixtures: `waitingInput` forces paneState "waiting" without
    touching the wall clock; `activity: "live"` forces "live"; everything else
@@ -87,7 +87,28 @@ test("a child joining the tree blips spawned once, even across feed churn", () =
 });
 
 test("a subagent that lived its whole life between polls rings the finish, not the blip", () => {
-  const prev = new Map<string, TrackedConversation>([["/parent", { state: "live", parent: null, file: live("/parent") }]]);
+  const prev = new Map<string, TrackedConversation>([["/parent", { state: "live", kind: undefined, parent: null }]]);
   const plan = planAgentChimes([live("/parent"), waiting("/child", { parent: "/parent" })], prev, new Set());
   expect(plan.chimes).toEqual([{ kind: "question", id: "/child" }]);
+});
+
+test("tracked history stores transition fields only, never the FileEntry", () => {
+  const plan = planAgentChimes([waiting("/a", { parent: "/p" })], null, new Set());
+  expect(plan.tracked.get("/a")).toEqual({ state: "waiting", kind: "question", parent: "/p" });
+});
+
+test("tracked history is bounded: oldest absent identities evict first", () => {
+  const prev = new Map<string, TrackedConversation>();
+  for (let index = 0; index < MAX_TRACKED_IDENTITIES + 10; index += 1) {
+    prev.set(`/old-${index}`, { state: "done", kind: undefined, parent: null });
+  }
+  const linked = new Set(["/old-0", "/old-1"]);
+  const plan = planAgentChimes([live("/current")], prev, linked);
+  expect(plan.tracked.size).toBe(MAX_TRACKED_IDENTITIES);
+  /* The current poll survives; the earliest-known absentees are gone, and the
+     linked set never references an evicted identity. */
+  expect(plan.tracked.has("/current")).toBe(true);
+  expect(plan.tracked.has("/old-0")).toBe(false);
+  expect(plan.linked.has("/old-0")).toBe(false);
+  expect(plan.tracked.has(`/old-${MAX_TRACKED_IDENTITIES + 9}`)).toBe(true);
 });
