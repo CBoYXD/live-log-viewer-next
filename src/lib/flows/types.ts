@@ -46,6 +46,13 @@ export type Round = {
   /** Engine account frozen when this round starts; subsequent polling and retry
       must never silently adopt a newly selected active account. */
   accountId?: string | null;
+  /** Effective role for this attempt. A Codex-configured flow may persist its
+      configured Claude fallback here when every Codex account is exhausted. */
+  reviewerRole?: RoleConfig | null;
+  /** Engine-qualified accounts already tried for this logical round. */
+  attemptedAccounts?: string[];
+  /** Automatic no-verdict retries already consumed by this logical round. */
+  autoRetryCount?: number;
   /** Reviewer session/thread id, persisted as soon as it is known: claude
       pre-chooses it at spawn, codex reports it in the first `--json` event.
       Survives viewer restarts so the transcript claim stays deterministic. */
@@ -80,6 +87,8 @@ export type Flow = {
   implementerPath: string; // transcript path of the attached session
   implementerConversationId?: string | null;
   roles: Record<FlowRoleKey, RoleConfig>;
+  /** Configured cross-engine fallback for unattended reviewer launches. */
+  reviewerFallback?: RoleConfig | null;
   baseRef: string; // resolved git SHA captured at creation
   /** Pinned task specification and acceptance criteria shown to every reviewer. */
   spec?: string;
