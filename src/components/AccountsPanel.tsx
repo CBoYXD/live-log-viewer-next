@@ -79,6 +79,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
   const { t } = useLocale();
   const state = rowState(account, activeId);
   const isActive = account.id === activeId;
+  const selectionDisabled = disabled || !account.authPresent || account.loginPending;
   // Removal deletes the managed home (including its credentials) with no undo,
   // so the unblocked path arms on the first click and only executes on a
   // second, explicit confirm — mirroring the confirm step migration already
@@ -89,7 +90,7 @@ function AccountRow({ account, engine, activeId, onSelect, onRemove, disabled }:
       <button
         type="button"
         aria-current={isActive ? "true" : undefined}
-        disabled={disabled}
+        disabled={selectionDisabled}
         onClick={onSelect}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-bg disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
       >

@@ -122,6 +122,47 @@ test("a failed selection restores the active account and retries the same target
   expect(calls.filter((call) => call.url === "/api/accounts/claude/active")).toHaveLength(2);
 });
 
+test("response loss after server commit reconciles the switch as success", async () => {
+  let committed = "main";
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload({ active: committed });
+    if (url === "/api/accounts/claude/active") {
+      committed = "work";
+      throw new Error("response lost");
+    }
+    return new Response(null, { status: 204 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.select("work")).toBeTrue();
+  expect(store.active).toBe("work");
+  expect(store.notice).toBeNull();
+  expect(calls.filter((call) => call.url === "/api/accounts/claude/active")).toHaveLength(1);
+});
+
+test("signed-out and pending accounts stay unavailable for selection", async () => {
+  const { calls, fetcher } = scripted((url) => {
+    if (url === "/api/accounts") return claudePayload({
+      accounts: [
+        { id: "main", label: "Main", authPresent: true, loginPending: false, loginState: "authenticated", deviceAuth: null },
+        { id: "signed-out", label: "Signed out", authPresent: false, loginPending: false, loginState: "idle", deviceAuth: null },
+        { id: "pending", label: "Pending", authPresent: false, loginPending: true, loginState: "pending", deviceAuth: null },
+      ],
+    });
+    return new Response(null, { status: 200 });
+  });
+  const store = createEngineAccountsStore("claude", { fetcher });
+  store.subscribe(() => {});
+  await advance();
+
+  expect(await store.select("signed-out")).toBeFalse();
+  expect(await store.select("pending")).toBeFalse();
+  expect(calls.some((call) => call.url === "/api/accounts/claude/active")).toBeFalse();
+  expect(store.active).toBe("main");
+});
+
 // ── Issue #61 — Claude login slice (Fable contract C12) ──────────────────────
 
 /** Capture setInterval/clearInterval so a test can read the poll cadence and

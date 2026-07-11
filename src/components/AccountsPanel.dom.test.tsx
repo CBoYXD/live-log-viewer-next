@@ -145,6 +145,23 @@ test("canceling an armed removal backs out without removing the account", async 
   expect([...view.host.querySelectorAll("button")].some((button) => button.textContent === "Remove")).toBe(true);
 });
 
+test("signed-out and pending account rows cannot be selected", async () => {
+  const initial = state(login(), {
+    accounts: [
+      { id: "signed-out", label: "Signed out", kind: "managed", authPresent: false, loginPending: false, loginState: "idle", deviceAuth: null, login: null },
+      { id: "pending", label: "Pending", kind: "managed", authPresent: false, loginPending: true, loginState: "pending", deviceAuth: null, login: login() },
+    ],
+    active: "",
+  });
+  const view = await mount(initial);
+  mounted.push(view);
+  const signedOut = [...view.host.querySelectorAll("button")].find((button) => button.textContent?.includes("Signed out"))!;
+  const pending = [...view.host.querySelectorAll("button")].find((button) => button.textContent?.includes("Pending"))!;
+
+  expect(signedOut.disabled).toBeTrue();
+  expect(pending.disabled).toBeTrue();
+});
+
 test("an account row directly selects the account", async () => {
   let selected: string | null = null;
   const initial = state(login({ phase: "authenticated" }), {

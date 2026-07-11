@@ -455,7 +455,12 @@ export function createEngineAccountsStore(
 
   const select = (id: string): Promise<boolean> => {
     if (!id) return Promise.resolve(false);
-    if (id === snapshot.active) return Promise.resolve(true);
+    const target = snapshot.accounts.find((account) => account.id === id);
+    if (!target?.authPresent || target.loginPending) return Promise.resolve(false);
+    if (id === snapshot.active) {
+      if (snapshot.notice?.operation === "switch") patchSnapshot({ notice: null });
+      return Promise.resolve(true);
+    }
     return runMutation("switch", async () => {
       const previous = snapshot.active;
       patchSnapshot({ active: id, identityVersion: snapshot.identityVersion + 1 });
@@ -468,7 +473,11 @@ export function createEngineAccountsStore(
         if (!response.ok) throw new Error("account selection failed");
       } catch {
         patchSnapshot({ active: previous, identityVersion: snapshot.identityVersion + 1, notice: switchFailure(id) });
-        await refresh();
+        const refreshed = await refresh();
+        if (refreshed && snapshot.active === id) {
+          patchSnapshot({ identityVersion: snapshot.identityVersion + 1, notice: snapshot.notice?.operation === "switch" ? null : snapshot.notice });
+          return true;
+        }
         return false;
       }
       patchSnapshot({ identityVersion: snapshot.identityVersion + 1, notice: snapshot.notice?.operation === "switch" ? null : snapshot.notice });

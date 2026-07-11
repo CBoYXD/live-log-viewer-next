@@ -19,8 +19,9 @@ const { POST } = await import("./codex/active/route");
 const { POST: setClaudeActive } = await import("./claude/active/route");
 const { POST: createClaude } = await import("./claude/route");
 const { updateMigrationAction } = await import("../account-migrations/[intentId]/action");
-const { createManagedClaudeAccount, setActiveClaudeAccount } = await import("@/lib/accounts/claude");
-const { createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
+const { activeClaudeAccountId, createManagedClaudeAccount, setActiveClaudeAccount } = await import("@/lib/accounts/claude");
+const { activeCodexAccountId, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, setCodexAccountLoginPane } = await import("@/lib/accounts/codex");
+const { selectAccount } = await import("@/lib/accounts/manager");
 const { CodexAppServerClient } = await import("@/lib/accounts/codexAppServer");
 const { ManagedCodexRuntime, setManagedCodexRuntimeForTests } = await import("@/lib/accounts/codexRuntime");
 const { AgentRegistry, agentRegistry } = await import("@/lib/agent/registry");
@@ -73,6 +74,14 @@ function activeRequest(body: Record<string, unknown>): NextRequest {
     headers: { host: "127.0.0.1", "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function authenticateCodex(account: { home: string }): void {
+  fs.writeFileSync(path.join(account.home, "auth.json"), "{}", { mode: 0o600 });
+}
+
+function authenticateClaude(account: { home: string }): void {
+  fs.writeFileSync(path.join(account.home, ".credentials.json"), "{}", { mode: 0o600 });
 }
 
 function claudeActiveRequest(id: string): NextRequest {
@@ -235,6 +244,7 @@ test("active mutation rejects cross-origin, unknown, and corrupt catalogs", asyn
 
 test("Codex selection changes routing while preserving every conversation record", async () => {
   const target = createManagedCodexAccount("Routing target");
+  authenticateCodex(target);
   agentRegistry().reconcileConversations([{
     engine: "codex",
     path: "/root.jsonl",
@@ -259,6 +269,7 @@ test("Codex selection changes routing while preserving every conversation record
 
 test("Claude selection also updates only routing and the account catalog", async () => {
   const target = createManagedClaudeAccount("Routing target");
+  authenticateClaude(target);
   const before = agentRegistry().snapshot();
   const response = await setClaudeActive(activeRequest({ id: target.id, mode: "select" }));
   const after = agentRegistry().snapshot();
@@ -279,6 +290,45 @@ test("active routes reject transcript migration modes", async () => {
   expect((await POST(activeRequest({ id: codex.id, mode: "migrate", previewRevision: 0 }))).status).toBe(400);
   expect((await setClaudeActive(activeRequest({ id: claude.id, mode: "preview" }))).status).toBe(400);
   expect(agentRegistry().snapshot()).toEqual(before);
+});
+
+test("active routes reject signed-out accounts before changing either routing store", async () => {
+  const codex = createManagedCodexAccount("Signed-out Codex");
+  const claude = createManagedClaudeAccount("Signed-out Claude");
+  const before = agentRegistry().snapshot();
+
+  const codexResponse = await POST(activeRequest({ id: codex.id, mode: "select" }));
+  const claudeResponse = await setClaudeActive(activeRequest({ id: claude.id, mode: "select" }));
+
+  expect(codexResponse.status).toBe(409);
+  expect(await codexResponse.json()).toMatchObject({ code: "authentication_required" });
+  expect(claudeResponse.status).toBe(409);
+  expect(await claudeResponse.json()).toMatchObject({ code: "authentication_required" });
+  expect(activeCodexAccountId()).toBe("default");
+  expect(activeClaudeAccountId()).toBe("default");
+  expect(agentRegistry().snapshot()).toEqual(before);
+});
+
+test("a routing-store write failure restores both active-account values", () => {
+  const target = createManagedCodexAccount("Rollback target");
+  authenticateCodex(target);
+  let currentRoutingId: string | null = "default";
+  let failTargetWrite = true;
+  const routing = {
+    engineRouting() { return { activeAccountId: currentRoutingId, revision: 0 }; },
+    setEngineRouting(_engine: "claude" | "codex", accountId: string) {
+      currentRoutingId = accountId;
+      if (accountId === target.id && failTargetWrite) {
+        failTargetWrite = false;
+        throw new Error("injected routing write failure");
+      }
+      return 1;
+    },
+  };
+
+  expect(() => selectAccount("codex", target.id, routing)).toThrow("injected routing write failure");
+  expect(activeCodexAccountId()).toBe("default");
+  expect(currentRoutingId).toBe("default");
 });
 
 test("GET retains the latest completed intent with recoverable failures for bulk retry", async () => {

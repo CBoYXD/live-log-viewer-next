@@ -13,8 +13,8 @@ held delivery retains its current ownership and content.
 
 - AC1: The Accounts panel lists Claude and Codex accounts with labels,
   authentication state, active state, and available quota capacity.
-- AC2: Selecting an account updates the engine routing and compatibility account
-  catalog through the existing active-account endpoint.
+- AC2: Selecting an authenticated account updates the engine routing and
+  compatibility account catalog through the existing active-account endpoint.
 - AC3: Account selection leaves conversation records, transcript files,
   migration intents, held deliveries, and running panes unchanged.
 - AC4: Active-account endpoints reject legacy preview and transcript-migration
@@ -27,14 +27,18 @@ held delivery retains its current ownership and content.
   empty/loading states remain visible and actionable in the panel.
 - AC8: Account mutations are serialized, account selection is optimistic, and a
   failed selection restores the prior active account before offering retry.
-- AC9: Quota polling records fresh per-account observations without changing
+- AC9: Signed-out accounts and accounts with an active login remain unavailable
+  as launch targets in the UI and active-account endpoints.
+- AC10: Quota polling records fresh per-account observations without changing
   engine routing or creating transcript-migration intents.
-- AC10: English and Ukrainian account-panel copy describes direct routing and
+- AC11: English and Ukrainian account-panel copy describes direct routing and
   operation progress.
-- AC11: Regression tests cover route-only selection for both engines and assert
+- AC12: Regression tests cover route-only selection for both engines and assert
   unchanged conversations, migration intents, held deliveries, and transcript
   ownership.
-- AC12: `bun test` passes.
-- AC13: `bunx tsc --noEmit` completes without diagnostics.
-- AC14: Verification uses unit and integration tests only; the live Viewer on
+- AC13: A response lost after server commit reconciles as success, and a failed
+  routing-registry write restores both durable active-account values.
+- AC14: `bun test` passes.
+- AC15: `bunx tsc --noEmit` completes without diagnostics.
+- AC16: Verification uses unit and integration tests only; the live Viewer on
   port 8898 receives no account switch or login requests.

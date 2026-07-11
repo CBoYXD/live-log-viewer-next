@@ -1,8 +1,8 @@
-import { accountForSpawn, activeCodexAccountId, codexHomeOwningSessionPath, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount } from "./codex";
-import { activeClaudeAccountId, claudeAccountForSpawn, claudeHomeOwningTranscript, claudeManagedEnvironment, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount } from "./claude";
+import { accountForSpawn, activeCodexAccountId, codexAccountsMutationLocked, codexHomeOwningSessionPath, CorruptCodexAccountsError, createManagedCodexAccount, listCodexAccounts, setActiveCodexAccount, UnknownAccountError } from "./codex";
+import { activeClaudeAccountId, claudeAccountForSpawn, claudeAccountsMutationLocked, claudeHomeOwningTranscript, claudeManagedEnvironment, CorruptClaudeAccountsError, createManagedClaudeAccount, listClaudeAccounts, setActiveClaudeAccount, UnknownClaudeAccountError } from "./claude";
 import type { AccountManager, AccountSummary } from "./contracts";
 import { unavailableLimits } from "./contracts";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
 
 function summary(engine: "claude" | "codex", id: string): AccountSummary {
   const account = (engine === "claude" ? listClaudeAccounts() : listCodexAccounts()).find((item) => item.id === id);
@@ -10,15 +10,58 @@ function summary(engine: "claude" | "codex", id: string): AccountSummary {
   return { id: account.id, label: account.label, kind: account.kind, active: (engine === "claude" ? activeClaudeAccountId() : activeCodexAccountId()) === id, auth: { state: account.authPresent ? "authenticated" : "signed_out", method: null, email: null, plan: null, checkedAt: null }, limits: unavailableLimits(), login: null };
 }
 
+export class AccountAuthenticationRequiredError extends Error {
+  constructor(readonly engine: "claude" | "codex", readonly accountId: string) {
+    super(`${engine} account requires authentication`);
+    this.name = "AccountAuthenticationRequiredError";
+  }
+}
+
+type RoutingStore = Pick<AgentRegistry, "engineRouting" | "setEngineRouting">;
+
+/** Keeps the compatibility catalog and launch-routing registry aligned. */
+export function selectAccount(engine: "claude" | "codex", id: string, routing: RoutingStore = agentRegistry()): AccountSummary {
+  if (engine === "claude" ? claudeAccountsMutationLocked() : codexAccountsMutationLocked()) {
+    if (engine === "claude") throw new CorruptClaudeAccountsError();
+    throw new CorruptCodexAccountsError();
+  }
+  const accounts = engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
+  const account = accounts.find((candidate) => candidate.id === id);
+  if (!account) {
+    if (engine === "claude") throw new UnknownClaudeAccountError(id);
+    throw new UnknownAccountError(id);
+  }
+  if (!account.authPresent) throw new AccountAuthenticationRequiredError(engine, id);
+
+  const previousCatalogId = engine === "claude" ? activeClaudeAccountId() : activeCodexAccountId();
+  const previousRoutingId = routing.engineRouting(engine).activeAccountId;
+  if (engine === "claude") setActiveClaudeAccount(id); else setActiveCodexAccount(id);
+  try {
+    routing.setEngineRouting(engine, id);
+  } catch (error) {
+    const rollbackErrors: unknown[] = [];
+    try {
+      const currentRoutingId = routing.engineRouting(engine).activeAccountId;
+      if (currentRoutingId !== previousRoutingId) routing.setEngineRouting(engine, previousRoutingId ?? previousCatalogId);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    try {
+      if (engine === "claude") setActiveClaudeAccount(previousCatalogId); else setActiveCodexAccount(previousCatalogId);
+    } catch (rollbackError) {
+      rollbackErrors.push(rollbackError);
+    }
+    if (rollbackErrors.length > 0) throw new AggregateError([error, ...rollbackErrors], "account selection rollback failed");
+    throw error;
+  }
+  return summary(engine, id);
+}
+
 /** Narrow boundary used by all launch paths. Filesystem account details remain behind it. */
 export const accountManager: AccountManager = {
   async list() { return { claude: { active: activeClaudeAccountId(), accounts: listClaudeAccounts().map((item) => summary("claude", item.id)) }, codex: { active: activeCodexAccountId(), accounts: listCodexAccounts().map((item) => summary("codex", item.id)) } }; },
   async add(engine, label) { const item = engine === "claude" ? createManagedClaudeAccount(label) : createManagedCodexAccount(label); return summary(engine, item.id); },
-  async select(engine, id) {
-    if (engine === "claude") setActiveClaudeAccount(id); else setActiveCodexAccount(id);
-    agentRegistry().setEngineRouting(engine, id);
-    return summary(engine, id);
-  },
+  async select(engine, id) { return selectAccount(engine, id); },
   async status(engine, id) { return summary(engine, id); },
   async submitLoginInput() { throw new Error("login input is Claude-operation specific"); },
   async cancelLogin() { throw new Error("login cancellation is Claude-operation specific"); },
