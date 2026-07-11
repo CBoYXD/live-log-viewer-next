@@ -390,25 +390,44 @@ async function tickFlow(
   return JSON.stringify(flow) !== before;
 }
 
+/** The disk state a tick started from, per flow, so its later save can tell an
+    operator's concurrent lifecycle change apart from the tick's own progress. */
+export type FlowTickBase = { state: FlowState; roundsLen: number; closedAt: string | null };
+
+export function flowTickBase(flows: Flow[]): Map<string, FlowTickBase> {
+  return new Map(flows.map((flow) => [flow.id, { state: flow.state, roundsLen: flow.rounds.length, closedAt: flow.closedAt }]));
+}
+
 /**
- * Persists the tick's clone WITHOUT clobbering operator-owned config (roles,
- * roundLimit, mode). The tick clones flows at start and then awaits reviewer
- * launch/relay; a set-roles/extend/set-round-limit/set-mode landing in that
- * window saves to disk, and the tick's later save of its stale clone would revert
- * it (issue #118 Finding 2). The tick never writes these fields, so re-read the
- * freshest on-disk value and overlay it before writing. Fully synchronous, so no
- * patchFlow can interleave between the re-read and the write.
+ * Persists the tick's result by MERGING it into the freshest on-disk snapshot,
+ * never overwriting the registry with the stale clone (issue #118 review). The
+ * tick clones flows at start and then awaits reviewer launch/relay; during that
+ * window an operator can close/pause/resume/retry a flow or create a new one. So,
+ * starting from disk:
+ *   - a flow the tick never held (created concurrently) is kept as-is;
+ *   - a flow whose disk state/rounds/closedAt diverged from the tick's base was
+ *     taken over by the operator — the operator wins, the tick's result is
+ *     dropped for it (so a concurrent close is never reopened);
+ *   - otherwise the tick's result lands, but operator-owned config (roles,
+ *     roundLimit, mode) is taken from disk so a config change without a lifecycle
+ *     change is never reverted.
+ * Fully synchronous, so no patchFlow can interleave between the read and write.
  */
-export function persistTickFlows(flows: Flow[]): void {
-  const disk = new Map(loadFlows().map((flow) => [flow.id, flow] as const));
-  for (const flow of flows) {
-    const current = disk.get(flow.id);
-    if (!current) continue;
-    flow.roles = current.roles;
-    flow.roundLimit = current.roundLimit;
-    flow.mode = current.mode;
-  }
-  saveFlows(flows);
+export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>): void {
+  const tickById = new Map(flows.map((flow) => [flow.id, flow] as const));
+  const merged = loadFlows().map((diskFlow) => {
+    const tick = tickById.get(diskFlow.id);
+    if (!tick) return diskFlow;
+    const start = base.get(diskFlow.id);
+    const takenOver =
+      !start ||
+      diskFlow.state !== start.state ||
+      diskFlow.rounds.length !== start.roundsLen ||
+      diskFlow.closedAt !== start.closedAt;
+    if (takenOver) return diskFlow;
+    return { ...tick, roles: diskFlow.roles, roundLimit: diskFlow.roundLimit, mode: diskFlow.mode };
+  });
+  saveFlows(merged);
 }
 
 export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
@@ -419,16 +438,17 @@ export async function tickFlows(entries: FileEntry[]): Promise<TickResult> {
   }
   store.__llvFlowTick = true;
   const flows = cloneFlows(loadFlows());
+  const base = flowTickBase(flows);
   try {
     const entriesByPath = new Map(entries.map((entry) => [entry.path, entry]));
     let changed = false;
     for (const flow of flows) {
       if (TERMINAL_STATES.has(flow.state)) continue;
-      if (await tickFlow(flow, entries, entriesByPath, () => persistTickFlows(flows))) changed = true;
-      if (changed) persistTickFlows(flows);
+      if (await tickFlow(flow, entries, entriesByPath, () => persistTickFlows(flows, base))) changed = true;
+      if (changed) persistTickFlows(flows, base);
     }
     annotateFlowEntries(entries, flows);
-    if (changed) persistTickFlows(flows);
+    if (changed) persistTickFlows(flows, base);
     return { flows, changed };
   } finally {
     store.__llvFlowTick = false;

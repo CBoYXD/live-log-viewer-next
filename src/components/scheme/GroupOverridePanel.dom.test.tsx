@@ -141,3 +141,32 @@ test("an unchanged stage override submits no stale runtime or role (issue #118 r
   flushSync(() => root.unmount());
   host.remove();
 });
+
+function effortOptions(host: HTMLElement): string[] {
+  /* The effort select is the one whose options are exactly the tier list. */
+  const select = Array.from(host.querySelectorAll("select")).find((s) =>
+    Array.from(s.options).some((o) => o.value === "xhigh"),
+  ) as HTMLSelectElement;
+  return Array.from(select.options).map((o) => o.value);
+}
+
+test("the effort control offers only tiers the selected engine accepts (issue #118 review)", () => {
+  /* A codex stage must NOT offer max (resolvePipelineRole would 400 codex+max). */
+  const codexStage = {
+    ...(pipelineGroup.pipeline as Pipeline),
+    stages: [
+      (pipelineGroup.pipeline as Pipeline).stages[0]!,
+      { ...(pipelineGroup.pipeline as Pipeline).stages[1]!, effectiveRole: { engine: "codex", model: "gpt-5.6", effort: "high", access: "read-write", roleId: "builder", promptScaffold: null } },
+    ],
+  } as unknown as Pipeline;
+  const codex = mount(<GroupOverridePanel group={{ ...pipelineGroup, pipeline: codexStage }} onClose={() => undefined} />);
+  expect(effortOptions(codex.host)).toEqual(["", "low", "medium", "high", "xhigh"]);
+  flushSync(() => codex.root.unmount());
+  codex.host.remove();
+
+  /* The claude build stage in the base fixture does offer max. */
+  const claude = mount(<GroupOverridePanel group={pipelineGroup} onClose={() => undefined} />);
+  expect(effortOptions(claude.host)).toContain("max");
+  flushSync(() => claude.root.unmount());
+  claude.host.remove();
+});

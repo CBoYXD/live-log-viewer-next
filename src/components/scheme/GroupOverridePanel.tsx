@@ -3,6 +3,7 @@
 import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { ENGINE_EFFORTS } from "@/lib/agent/efforts";
 import type { FlowEngine } from "@/lib/flows/types";
 import type { PipelineStage } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
@@ -12,11 +13,6 @@ import { patchPipeline, PIPELINE_ROLE_OPTIONS, stageOverrideBody } from "@/compo
 
 import type { SchemeGroup } from "./layout";
 
-/* Effort tiers offered on the override selects. Empty = the engine default; the
-   backend blanks a blank effort back to null, so the two agree. Claude accepts
-   `max`; codex tops out at `xhigh`, but an unsupported tier just falls back at
-   spawn, so one shared list keeps the control simple. */
-const EFFORTS = ["", "low", "medium", "high", "xhigh", "max"] as const;
 const ENGINES: FlowEngine[] = ["claude", "codex"];
 
 /** How many attempts a pipeline stage has already run — 0 means it is still in
@@ -73,16 +69,21 @@ const primaryBtn =
 const ghostBtn =
   "inline-flex flex-1 items-center justify-center gap-1 rounded-full border border-line bg-bg px-3 py-1 text-[11px] font-bold text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
 
-function EffortSelect({ value, onChange, label }: { value: string; onChange: (value: string) => void; label: string }) {
+/* The effort tiers offered depend on the selected engine — codex tops out at
+   xhigh, claude adds max — so the control can never present a combination the
+   API rejects (issue #118 review: codex + max was a guaranteed 400). A stale
+   value outside the engine's list falls back to the default option. */
+function EffortSelect({ engine, value, onChange, label }: { engine: FlowEngine; value: string; onChange: (value: string) => void; label: string }) {
   const { t } = useLocale();
+  const tiers = ENGINE_EFFORTS[engine];
+  const safe = value && tiers.includes(value) ? value : "";
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-1">
       <span className={fieldLabel}>{label}</span>
-      <select className={inputBase} value={value} onChange={(event) => onChange(event.target.value)}>
-        {EFFORTS.map((effort) => (
-          <option key={effort || "default"} value={effort}>
-            {effort || t("groupOverride.effortDefault")}
-          </option>
+      <select className={inputBase} value={safe} onChange={(event) => onChange(event.target.value)}>
+        <option value="">{t("groupOverride.effortDefault")}</option>
+        {tiers.map((effort) => (
+          <option key={effort} value={effort}>{effort}</option>
         ))}
       </select>
     </label>
@@ -146,8 +147,8 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
 
       <span className="text-[10.5px] font-bold text-ink">{t("groupOverride.reviewerRole")}</span>
       <div className="flex items-end gap-1.5">
-        <EngineSelect value={engine} onChange={setEngine} />
-        <EffortSelect value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
+        <EngineSelect value={engine} onChange={(next) => { setEngine(next); if (effort && !ENGINE_EFFORTS[next].includes(effort)) setEffort(""); }} />
+        <EffortSelect engine={engine} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
       </div>
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.model")}</span>
@@ -309,8 +310,8 @@ function StageForm({
         </select>
       </label>
       <div className="flex items-end gap-1.5">
-        <EngineSelect value={engine} onChange={setEngine} />
-        <EffortSelect value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
+        <EngineSelect value={engine} onChange={(next) => { setEngine(next); if (effort && !ENGINE_EFFORTS[next].includes(effort)) setEffort(""); }} />
+        <EffortSelect engine={engine} value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
       </div>
       <label className="flex flex-col gap-1">
         <span className={fieldLabel}>{t("groupOverride.model")}</span>
