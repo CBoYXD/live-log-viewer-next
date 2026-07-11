@@ -255,6 +255,9 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       findingsPath: null,
       verdict: null,
       findingsCount: null,
+      /* A retry launches a fresh reviewer, so it re-freezes the current reviewer
+         role — this is where a prior set-roles override takes effect. */
+      reviewerRole: { ...flow.roles.reviewer },
       /* A user note travels to the fresh reviewer as the round's ready note. */
       readyNote: noteFromRequest(req) ?? round.readyNote,
       startedAt: isoNow(),
@@ -298,23 +301,16 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.stateDetail = null;
   } else if (req.action === "set-roles") {
     if (flow.state === "closed") return { error: "flow is closed", status: 409 };
-    if (!req.roles || typeof req.roles !== "object" || Array.isArray(req.roles)) {
-      return { error: "roles override is required", status: 400 };
-    }
-    const next = { ...flow.roles };
-    let touched = false;
-    for (const key of ["implementer", "reviewer"] as const) {
-      const patch = req.roles[key];
-      if (patch === undefined) continue;
-      const merged = applyRoleOverride(flow.roles[key], patch);
-      if (!merged) return { error: `invalid ${key} role override`, status: 400 };
-      next[key] = merged;
-      touched = true;
-    }
-    if (!touched) return { error: "roles override is required", status: 400 };
-    /* The change lands on the next spawned reviewer; a round in flight keeps the
-       role it froze at spawn. */
-    flow.roles = next;
+    /* Reviewer-only: the implementer is an attached live session that cannot be
+       reseated in place, so it is not overridable here (see PatchFlowRequest). */
+    const patch = req.roles && typeof req.roles === "object" && !Array.isArray(req.roles) ? req.roles.reviewer : undefined;
+    if (patch === undefined) return { error: "reviewer role override is required", status: 400 };
+    const merged = applyRoleOverride(flow.roles.reviewer, patch);
+    if (!merged) return { error: "invalid reviewer role override", status: 400 };
+    /* The change lands on the NEXT round only: the current round froze its role
+       (round.reviewerRole) at creation/retry, and the engine reads that snapshot.
+       A round not yet created picks this up when newRound/retry snapshots it. */
+    flow.roles = { ...flow.roles, reviewer: merged };
   }
   /* "close" and "cancel-round" never reach this function — the route sends
      them to closeFlow/cancelRound, which also stop a running reviewer. */

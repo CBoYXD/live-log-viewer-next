@@ -561,6 +561,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "groupOverride.setLimit": "Задати",
   "groupOverride.extend": "+1 раунд",
   "groupOverride.nextStage": "Наступний етап",
+  "groupOverride.role": "Роль",
+  "groupOverride.noRole": "Без ролі",
   "groupOverride.stagePrompt": "Промпт етапу",
   "groupOverride.applyStage": "Оновити етап",
   "groupOverride.noEditableStage": "Немає майбутнього етапу для змін — усі етапи вже стартували.",

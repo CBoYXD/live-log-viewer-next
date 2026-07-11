@@ -65,8 +65,13 @@ test("the flow override panel exposes next-reviewer role, note, rounds and lifec
 test("the pipeline override panel edits the next unstarted stage and keeps stage controls", () => {
   const html = renderToStaticMarkup(<GroupOverridePanel group={pipelineGroup} onClose={noop} />);
   expect(html).toContain('data-group-override="pipeline"');
-  /* The upcoming (zero-attempt) stage is editable: prompt + model + apply. */
+  /* The upcoming (zero-attempt) stage is editable: role + prompt + model + apply. */
   expect(html).toContain("Next stage");
+  expect(html).toContain("Role");
+  expect(html).toContain("No role");
+  /* Role options are offered and deployer is excluded (pipeline-disallowed). */
+  expect(html).toContain(">architect<");
+  expect(html).not.toContain(">deployer<");
   expect(html).toContain("Stage prompt");
   expect(html).toContain("Build it");
   expect(html).toContain("Update stage");

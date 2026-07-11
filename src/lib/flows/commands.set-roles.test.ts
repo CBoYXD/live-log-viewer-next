@@ -46,13 +46,36 @@ test("set-roles re-configures the reviewer for the next round and persists", () 
   expect(loadFlows()[0]!.roles.reviewer.model).toBe("fable");
 });
 
-test("set-roles can reseat the engine of both roles at once", () => {
+test("set-roles can reseat the reviewer engine", () => {
   seed();
-  const result = patchFlow("f1", {
-    action: "set-roles",
-    roles: { implementer: { engine: "claude", model: "opus" }, reviewer: { engine: "claude", model: "fable" } },
+  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
+  expect(result.flow!.roles.reviewer).toMatchObject({ engine: "claude", model: "fable" });
+  /* The implementer is never touched — it is not overridable (Finding 2). */
+  expect(result.flow!.roles.implementer).toEqual({ engine: "codex", model: "gpt-5.6", effort: "medium" });
+});
+
+test("set-roles ignores an implementer key and requires a reviewer override", () => {
+  seed();
+  /* The type no longer permits implementer, but a raw client can still send one;
+     it must not silently reseat anything, and with no reviewer key it is a 400. */
+  expect(patchFlow("f1", { action: "set-roles", roles: { implementer: { engine: "claude" } } as never }).status).toBe(400);
+  expect(loadFlows()[0]!.roles.implementer).toEqual({ engine: "codex", model: "gpt-5.6", effort: "medium" });
+});
+
+test("set-roles does not retarget a round already in flight (Finding 1 freeze)", () => {
+  /* A round is reviewing with a frozen codex reviewer role; set-roles → claude
+     must not touch that round's snapshot, only the flow-level next-round role. */
+  seed({
+    state: "reviewing",
+    rounds: [{
+      n: 1, reviewerPath: "/rev", reviewerRole: { engine: "codex", model: "gpt-5.6", effort: "high" },
+      accountId: null, sessionId: null, reviewerPane: null, findingsPath: null, triggeredBy: "button",
+      readyNote: null, verdict: null, findingsCount: null, startedAt: "2026-07-05T00:00:00Z",
+      spawnStartedAt: "2026-07-05T00:00:01Z", relayStartedAt: null, reviewedAt: null, relayedAt: null, error: null,
+    }],
   });
-  expect(result.flow!.roles.implementer).toMatchObject({ engine: "claude", model: "opus" });
+  const result = patchFlow("f1", { action: "set-roles", roles: { reviewer: { engine: "claude", model: "fable" } } });
+  expect(result.flow!.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: "gpt-5.6", effort: "high" });
   expect(result.flow!.roles.reviewer).toMatchObject({ engine: "claude", model: "fable" });
 });
 

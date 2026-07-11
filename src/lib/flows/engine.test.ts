@@ -111,3 +111,69 @@ test("review-flow heuristic claim skips a newer native Codex subagent", async ()
 
   expect(after.rounds[0]!.reviewerPath).toBe(root.path);
 });
+
+test("a mid-flight round is polled with its frozen reviewer role, not a raced set-roles (issue #118 Finding 1)", async () => {
+  const startedAt = "2026-02-02T00:00:00.000Z";
+  const started = Date.parse(startedAt) / 1000;
+  const cwd = "/repo";
+  const implementerId = "029f421e-02e1-73e0-9b77-bebde063f20c";
+  const reviewerId = "029f421e-02e1-73e0-9b77-bebde063f20b";
+  const implementer = writeCodexEntry(`rollout-impl2-${implementerId}.jsonl`, { id: implementerId, cwd }, started - 100);
+  /* The reviewer candidate is a CODEX session, matching the round's frozen role. */
+  const reviewerCandidate = writeCodexEntry(`rollout-rev2-${reviewerId}.jsonl`, { id: reviewerId, cwd }, started + 5);
+  const flow: Flow = {
+    id: "flow-freeze",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    /* The live flow role has already been switched to claude by a set-roles that
+       raced the running reviewer — the round must ignore it. */
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "claude", model: "fable", effort: null },
+    },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "pane",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [
+      {
+        n: 1,
+        reviewerPath: null,
+        sessionId: null,
+        reviewerPid: null,
+        /* Frozen at spawn: this reviewer is codex. */
+        reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+        reviewerPane: { paneId: "%3", windowName: "codex-rev" },
+        findingsPath: null,
+        triggeredBy: "marker",
+        readyNote: null,
+        verdict: null,
+        findingsCount: null,
+        startedAt,
+        spawnStartedAt: startedAt,
+        relayStartedAt: null,
+        reviewedAt: null,
+        relayedAt: null,
+        error: null,
+      },
+    ],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  saveFlows([flow]);
+
+  await tickFlows([implementer, reviewerCandidate]);
+  const after = loadFlows()[0]!;
+
+  /* The heuristic claimed the codex candidate: it used the round's frozen codex
+     role. Had it read flow.roles.reviewer (now claude), no claude entry exists
+     and the reviewer path would still be null. */
+  expect(after.rounds[0]!.reviewerPath).toBe(reviewerCandidate.path);
+  expect(after.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: null, effort: "xhigh" });
+});

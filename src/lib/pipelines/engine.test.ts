@@ -617,6 +617,43 @@ test("override-stage validates the target and requires a change", async () => {
   expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", prompt: "  " }, ports)).status).toBe(400);
 });
 
+test("override-stage swaps the stage role through the registry and resets unpinned runtime (issue #118 review F3)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  /* build was builder/codex; switch it to architect with no runtime pins → the
+     new role's registry defaults (claude/fable/high + scaffold) apply. */
+  const res = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" } }, ports);
+  expect(res.error).toBeUndefined();
+  const build = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(build.role).toEqual({ roleId: "architect" });
+  expect(build.effectiveRole).toMatchObject({ roleId: "architect", engine: "claude", model: "fable", effort: "high", promptScaffold: "Architect guidance" });
+  /* Input fields stay consistent with the effectiveRole so the record persists. */
+  expect(build.engine).toBe("claude");
+  expect(build.model).toBe("fable");
+
+  /* An explicit runtime pin still wins over the role default. */
+  const pinned = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "reviewer" }, effort: "low" }, ports);
+  expect(pinned.error).toBeUndefined();
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!.effectiveRole).toMatchObject({ roleId: "reviewer", effort: "low" });
+
+  /* Clearing the role falls back to the Builder default. */
+  const cleared = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: null }, ports);
+  expect(cleared.error).toBeUndefined();
+  const roleless = loadPipelines()[0]!.stages.find((stage) => stage.id === "build")!;
+  expect(roleless.role).toBeUndefined();
+  expect(roleless.effectiveRole).toMatchObject({ roleId: null, engine: "codex" });
+});
+
+test("override-stage rejects an unknown/disallowed role and an incompatible role+model (issue #118 review F3)", async () => {
+  const { ports } = harness();
+  const created = await create(ports);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "wizard" as never } }, ports)).status).toBe(400);
+  expect((await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "deployer" } }, ports)).error).toContain("not allowed in a pipeline");
+  /* architect resolves to claude; a codex-only model must fail canonical bounds. */
+  const bad = await patchPipeline(created.id, { action: "override-stage", stageId: "build", role: { roleId: "architect" }, model: "gpt-5.6-sol" }, ports);
+  expect(bad.status).toBe(400);
+});
+
 test("override-stage enforces the same prompt-size ceiling as creation (issue #118 review F5)", async () => {
   const { ports } = harness();
   const { MAX_STAGE_PROMPT_LENGTH } = await import("./limits");

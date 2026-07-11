@@ -4,11 +4,11 @@ import { Pause, Play, RefreshCw, Square, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { FlowEngine } from "@/lib/flows/types";
-import type { PipelineStage } from "@/lib/pipelines/types";
+import type { PipelineRoleId, PipelineStage } from "@/lib/pipelines/types";
 import { useLocale } from "@/lib/i18n";
 
 import { flowPresentation, patchFlow } from "@/components/flows/flowModel";
-import { patchPipeline } from "@/components/pipelines/pipelineModel";
+import { patchPipeline, PIPELINE_ROLE_OPTIONS } from "@/components/pipelines/pipelineModel";
 
 import type { SchemeGroup } from "./layout";
 
@@ -292,12 +292,22 @@ function StageForm({
 }) {
   const { t } = useLocale();
   const pipeline = group.pipeline!;
+  const [roleId, setRoleId] = useState(stage.role?.roleId ?? "");
   const [engine, setEngine] = useState<FlowEngine>(stage.effectiveRole.engine);
   const [model, setModel] = useState(stage.effectiveRole.model ?? "");
   const [effort, setEffort] = useState(stage.effectiveRole.effort ?? "");
   const [prompt, setPrompt] = useState(stage.prompt);
   return (
     <>
+      <label className="flex flex-col gap-1">
+        <span className={fieldLabel}>{t("groupOverride.role")}</span>
+        <select className={inputBase} value={roleId} onChange={(event) => setRoleId(event.target.value)}>
+          <option value="">{t("groupOverride.noRole")}</option>
+          {PIPELINE_ROLE_OPTIONS.map((id) => (
+            <option key={id} value={id}>{id}</option>
+          ))}
+        </select>
+      </label>
       <div className="flex items-end gap-1.5">
         <EngineSelect value={engine} onChange={setEngine} />
         <EffortSelect value={effort} onChange={setEffort} label={t("groupOverride.effort")} />
@@ -326,6 +336,8 @@ function StageForm({
           void run(t("groupOverride.savedStage"), () =>
             patchPipeline(pipeline.id, "override-stage", {
               stageId: stage.id,
+              /* null clears the role back to the Builder default; the id assigns it. */
+              role: roleId ? { roleId: roleId as PipelineRoleId } : null,
               engine,
               model: model.trim() || null,
               effort: effort || null,

@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { flushSync } from "react-dom";
 
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 
 import { GroupsLayer } from "./nodes";
 import { GroupOverridePanel } from "./GroupOverridePanel";
@@ -96,6 +97,44 @@ test("starting the next round from the panel submits the note via advance, not o
 
   const patch = calls.find((call) => call.url.includes("/api/flows/f1"));
   expect(patch?.body).toMatchObject({ action: "advance", note: "check the retry path" });
+
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
+const pipelineGroup: SchemeGroup = {
+  key: "group::pipeline::p1", kind: "pipeline", id: "p1", hue: 24, members: ["/plan"],
+  label: "Pipe one", x: 0, y: 0, w: 10, h: 10,
+  pipeline: {
+    id: "p1",
+    task: "Ship it",
+    state: "running",
+    stages: [
+      { id: "plan", kind: "run", role: { roleId: "architect" }, prompt: "Plan", next: "build", effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-only", roleId: "architect", promptScaffold: null } },
+      { id: "build", kind: "run", role: { roleId: "architect" }, prompt: "Build it", next: null, effectiveRole: { engine: "claude", model: "fable", effort: "high", access: "read-write", roleId: "architect", promptScaffold: null } },
+    ],
+    runs: [
+      { stageId: "plan", attempts: [{ agentPath: "/plan", state: "running" }] },
+      { stageId: "build", attempts: [] },
+    ],
+  } as unknown as Pipeline,
+};
+
+test("applying a stage override submits the selected role via override-stage (issue #118 review F3)", async () => {
+  const { host, root } = mount(<GroupOverridePanel group={pipelineGroup} onClose={() => undefined} />);
+  /* The role select (the one offering "No role") seeds from the stage's role. */
+  const roleSelect = Array.from(host.querySelectorAll("select")).find((select) =>
+    Array.from(select.options).some((option) => option.value === "architect"),
+  ) as HTMLSelectElement;
+  expect(roleSelect?.value).toBe("architect");
+
+  const apply = Array.from(host.querySelectorAll("button")).find((b) => b.textContent?.includes("Update stage")) as HTMLButtonElement;
+  expect(apply).toBeTruthy();
+  flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+  await Promise.resolve();
+
+  const patch = calls.find((call) => call.url.includes("/api/pipelines/p1"));
+  expect(patch?.body).toMatchObject({ action: "override-stage", stageId: "build", role: { roleId: "architect" } });
 
   flushSync(() => root.unmount());
   host.remove();

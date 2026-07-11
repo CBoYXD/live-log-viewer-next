@@ -43,6 +43,13 @@ export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
   reviewerConversationId?: string | null;
+  /** Reviewer role frozen when this round is created/retried (issue #118). The
+      engine launches, recovers and polls the reviewer through this snapshot, so a
+      mid-flight `set-roles` (which mutates flow.roles.reviewer) can never change
+      the engine/model of a round already spawning or reviewing. Absent on rounds
+      persisted before this field existed — the engine falls back to
+      flow.roles.reviewer for those. */
+  reviewerRole?: RoleConfig | null;
   /** Engine account frozen when this round starts; subsequent polling and retry
       must never silently adopt a newly selected active account. */
   accountId?: string | null;
@@ -144,10 +151,14 @@ export type PatchFlowRequest = {
   /** for advance/retry-round: a user note the next reviewer sees as the
       round's ready note */
   note?: string;
-  /** for set-roles: a partial override of the implementer/reviewer role config
-      applied to subsequent rounds without recreating the flow (issue #118).
-      Only the provided fields change; a running round keeps its frozen role. */
-  roles?: Partial<Record<FlowRoleKey, Partial<RoleConfig>>>;
+  /** for set-roles: a partial override of the REVIEWER role config, applied to
+      the next round without recreating the flow (issue #118). Only the provided
+      fields change, and a round already in flight keeps the role it froze at
+      spawn (see Round.reviewerRole). The implementer is intentionally not
+      overridable: it is an already-attached live session whose engine/account
+      cannot be reseated in place, so accepting an implementer override would be a
+      no-op reported as success. Reseating the implementer is a separate feature. */
+  roles?: { reviewer?: Partial<RoleConfig> };
 };
 
 /** Per-transcript annotation piggybacked on /api/files entries. */

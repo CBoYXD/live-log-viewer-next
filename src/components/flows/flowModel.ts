@@ -235,7 +235,7 @@ export async function patchFlow(
     mode?: "auto" | "manual";
     rounds?: number;
     note?: string;
-    roles?: Partial<Record<FlowRoleKey, Partial<RoleConfig>>>;
+    roles?: { reviewer?: Partial<RoleConfig> };
   },
 ): Promise<string | null> {
   try {

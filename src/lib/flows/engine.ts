@@ -21,7 +21,7 @@ import {
 } from "./findings";
 import { relayPrompt, reviewerPrompt } from "./prompts";
 import { atomicWriteText, findingsPathFor, loadFlows, loadPresets, saveFlows } from "./store";
-import type { Flow, FlowPreset, FlowState, Round } from "./types";
+import type { Flow, FlowPreset, FlowState, RoleConfig, Round } from "./types";
 
 const TERMINAL_STATES = new Set<FlowState>(["approved", "done_comment", "needs_decision", "closed"]);
 const READY_RE = /^REVIEW_READY:\s*(.*)$/m;
@@ -51,7 +51,10 @@ function cloneFlows(flows: Flow[]): Flow[] {
       implementer: { ...flow.roles.implementer },
       reviewer: { ...flow.roles.reviewer },
     },
-    rounds: flow.rounds.map((round) => ({ ...round })),
+    rounds: flow.rounds.map((round) => ({
+      ...round,
+      reviewerRole: round.reviewerRole ? { ...round.reviewerRole } : round.reviewerRole,
+    })),
   }));
 }
 
@@ -73,12 +76,23 @@ function detectReadyMarker(flow: Flow, entry: FileEntry): string | null {
   return message.text.match(READY_RE)?.[1]?.trim() ?? null;
 }
 
+/** The reviewer role a round runs under: its frozen snapshot when present,
+    falling back to the live flow role for rounds persisted before the snapshot
+    existed. Every engine read of the reviewer engine/model/effort goes through
+    here so a mid-flight set-roles cannot retarget an in-flight round (#118). */
+export function reviewerRoleFor(flow: Flow, round: Round): RoleConfig {
+  return round.reviewerRole ?? flow.roles.reviewer;
+}
+
 export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNote: string | null): Round {
   return {
     n: flow.rounds.length + 1,
     reviewerPath: null,
     accountId: null,
     sessionId: null,
+    /* Freeze the reviewer role now, so a later set-roles only affects the round
+       after this one. */
+    reviewerRole: { ...flow.roles.reviewer },
     reviewerPane: null,
     findingsPath: null,
     triggeredBy,
@@ -140,7 +154,7 @@ function isNativeCodexSubagentEntry(entry: FileEntry): boolean {
 function maybeClaimReviewerPathByHeuristic(flow: Flow, entries: FileEntry[], round: Round): boolean {
   if (round.reviewerPath) return false;
   const started = unixMs(round.startedAt) / 1000 - 5;
-  const engine = flow.roles.reviewer.engine;
+  const engine = reviewerRoleFor(flow, round).engine;
   const candidates = entries
     .filter(
       (entry) =>
@@ -174,14 +188,17 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
 
 async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   const prompt = reviewerPrompt(flow, round);
-  const account = accountManager.resolveSpawn(flow.roles.reviewer.engine, round.accountId);
+  /* The frozen per-round role, so a set-roles between spawn and launch cannot
+     retarget this reviewer's engine/model/effort. */
+  const role = reviewerRoleFor(flow, round);
+  const account = accountManager.resolveSpawn(role.engine, round.accountId);
   round.accountId ??= account.accountId;
   flow.state = "reviewing";
   flow.stateDetail = null;
   if (flow.reviewerMode === "pane") {
-    const spec = freshSpecFor(flow.roles.reviewer.engine, flow.cwd, {
-      model: flow.roles.reviewer.model,
-      effort: flow.roles.reviewer.effort,
+    const spec = freshSpecFor(role.engine, flow.cwd, {
+      model: role.model,
+      effort: role.effort,
       codexHome: account.engine === "codex" ? account.home : null,
       claudeConfigDir: account.engine === "claude" ? account.home : null,
       claudeProjectsDir: account.engine === "claude" ? account.transcriptRoot : null,
@@ -192,7 +209,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
        transcript is still unattributed (codex, or an early stop click). */
     round.reviewerPane = { paneId: pane.paneId, windowName: spec.windowName };
     const transcript = await resolveSpawnedTranscriptPath({
-      engine: flow.roles.reviewer.engine,
+      engine: role.engine,
       knownTranscript: spec.transcript ?? null,
       panePid: pane.panePid ?? null,
       cwd: flow.cwd,
@@ -206,7 +223,7 @@ async function launchReviewer(flow: Flow, round: Round): Promise<void> {
   const launched = startHeadlessReview(
     flow.id,
     round.n,
-    flow.roles.reviewer,
+    role,
     flow.cwd,
     prompt,
     undefined,
@@ -272,7 +289,7 @@ async function tickFlow(
   if (!round) return JSON.stringify(flow) !== before;
 
   if (flow.state === "spawning") {
-    const status = headlessReviewStatus(flow.id, round.n, round, flow.roles.reviewer.engine);
+    const status = headlessReviewStatus(flow.id, round.n, round, reviewerRoleFor(flow, round).engine);
     /* A restart can land here with the round already launched (state was
        persisted before launchReviewer finished). The detached reviewer is
        still out there — adopt it instead of spawning a duplicate. */
@@ -303,7 +320,7 @@ async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     if (flow.reviewerMode === "headless") {
-      const status = headlessReviewStatus(flow.id, round.n, round, flow.roles.reviewer.engine);
+      const status = headlessReviewStatus(flow.id, round.n, round, reviewerRoleFor(flow, round).engine);
       /* Persist the id the moment any source yields it (the JSON.stringify
          diff in tickFlow flushes it to flows.json): after that the transcript
          claim is deterministic and survives restarts. The banner parse stays

@@ -1,6 +1,7 @@
 import { getLocale, translate, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 import type { Flow, FlowEngine } from "@/lib/flows/types";
+import { PIPELINE_DISALLOWED_ROLE_IDS } from "@/lib/pipelines/types";
 import type {
   CreatePipelineRequest,
   Pipeline,
@@ -18,6 +19,13 @@ import type {
 } from "@/lib/pipelines/types";
 
 export const PIPELINES_CHANGED_EVENT = "llv:pipelines-changed";
+
+/** Client-safe list of the pipeline role ids an operator may assign to a stage,
+    minus the ones a pipeline may not use (deployer needs interactive deploy
+    confirmation). Mirrors the server's PIPELINE_ROLE_IDS; the API re-validates. */
+export const PIPELINE_ROLE_OPTIONS: readonly PipelineRoleId[] = (
+  ["orchestrator", "reviewer", "verifier", "builder", "architect", "cleaner", "prod-auditor", "deployer"] as const
+).filter((roleId) => !PIPELINE_DISALLOWED_ROLE_IDS.includes(roleId));
 
 /**
  * A node can seed a pipeline (its transcript becomes the src lineage of stage 0)

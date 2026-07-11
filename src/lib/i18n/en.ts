@@ -586,6 +586,8 @@ export const en = {
   "groupOverride.setLimit": "Set",
   "groupOverride.extend": "+1 round",
   "groupOverride.nextStage": "Next stage",
+  "groupOverride.role": "Role",
+  "groupOverride.noRole": "No role",
   "groupOverride.stagePrompt": "Stage prompt",
   "groupOverride.applyStage": "Update stage",
   "groupOverride.noEditableStage": "No upcoming stage to edit — every stage has already started.",
