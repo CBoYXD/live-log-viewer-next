@@ -75,6 +75,8 @@ export type Round = {
   findingsPath: string | null; // round artifact file once written
   triggeredBy: "marker" | "button";
   readyNote: string | null; // text after REVIEW_READY:
+  /** Clean commit reviewed in this round. Null prevents merge-authorized cleanup. */
+  reviewHeadSha?: string | null;
   verdict: ReviewVerdict | null;
   findingsCount: number | null;
   startedAt: string;

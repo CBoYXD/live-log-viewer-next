@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,7 +9,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { tickFlows } = await import("./engine");
+const { newRound, tickFlows } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 
 afterAll(() => {
@@ -43,6 +44,26 @@ function writeCodexEntry(name: string, payload: Record<string, unknown>, mtime: 
   fs.writeFileSync(pathname, JSON.stringify({ type: "session_meta", payload }) + "\n");
   return entryFor(pathname, mtime);
 }
+
+test("a review round captures only a clean commit SHA", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-reviewed-head-"));
+  try {
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "flow@example.test"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Flow Test"], { cwd: directory }).status).toBe(0);
+    fs.writeFileSync(path.join(directory, "work.txt"), "committed\n");
+    expect(spawnSync("git", ["add", "work.txt"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "reviewed"], { cwd: directory }).status).toBe(0);
+    const headSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
+    const flow = { cwd: directory, rounds: [] } as unknown as Flow;
+
+    expect(newRound(flow, "marker", null).reviewHeadSha).toBe(headSha);
+    fs.writeFileSync(path.join(directory, "work.txt"), "uncommitted\n");
+    expect(newRound(flow, "marker", null).reviewHeadSha).toBeNull();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("review-flow heuristic claim skips a newer native Codex subagent", async () => {
   const startedAt = "2026-01-01T00:00:00.000Z";

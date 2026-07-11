@@ -12,6 +12,7 @@ import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
+import { resolveCleanFlowHead } from "./git";
 import {
   fallbackReviewFromTranscript,
   lastAssistantMessage,
@@ -85,6 +86,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     findingsPath: null,
     triggeredBy,
     readyNote,
+    reviewHeadSha: resolveCleanFlowHead(flow.cwd),
     verdict: null,
     findingsCount: null,
     startedAt: isoNow(),

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -421,11 +422,12 @@ test("persisted GitHub merge evidence survives a deleted checkout and allows flo
   }
 });
 
-test("a squash-merged GitHub PR becomes durable evidence before checkout deletion", () => {
+test("a squash-merged GitHub PR becomes durable evidence before checkout deletion", async () => {
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   const flow = {
     ...headlessFlow(now),
     id: "flow-squash",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: "b".repeat(40) }],
     mergeEvidence: {
       repository: "Latand/live-log-viewer-next",
       headRef: "feature/squashed",
@@ -440,7 +442,7 @@ test("a squash-merged GitHub PR becomes durable evidence before checkout deletio
   let saves = 0;
   const mergedAt = new Date(now - 60_000).toISOString();
 
-  expect(refreshMergedFlowIds([flow], {
+  expect(await refreshMergedFlowIds([flow], {
     now: () => now,
     resolveMergeIdentity: () => null,
     probePullRequest: () => { probes += 1; return { number: 321, mergedAt, headRefOid: "b".repeat(40) }; },
@@ -452,7 +454,7 @@ test("a squash-merged GitHub PR becomes durable evidence before checkout deletio
   expect(saves).toBe(1);
 
   flow.cwd = "/deleted/worktree";
-  expect(refreshMergedFlowIds([flow], {
+  expect(await refreshMergedFlowIds([flow], {
     now: () => now + 60 * 60_000,
     resolveMergeIdentity: () => null,
     probePullRequest: () => { throw new Error("durable evidence should avoid a refresh"); },
@@ -462,13 +464,14 @@ test("a squash-merged GitHub PR becomes durable evidence before checkout deletio
   expect(saves).toBe(1);
 });
 
-test("a changed checkout SHA clears prior positive merge evidence", () => {
+test("a changed checkout SHA clears prior positive merge evidence", async () => {
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   const oldSha = "a".repeat(40);
   const newSha = "b".repeat(40);
   const flow = {
     ...headlessFlow(now),
     id: "flow-new-head",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: oldSha }],
     mergeEvidence: {
       repository: "Latand/live-log-viewer-next",
       headRef: "feature/reused",
@@ -480,7 +483,7 @@ test("a changed checkout SHA clears prior positive merge evidence", () => {
     },
   } satisfies Flow;
 
-  expect(refreshMergedFlowIds([flow], {
+  expect(await refreshMergedFlowIds([flow], {
     now: () => now,
     resolveMergeIdentity: () => ({ repository: "Latand/live-log-viewer-next", headRef: "feature/reused", headSha: newSha }),
     probePullRequest: () => null,
@@ -488,18 +491,18 @@ test("a changed checkout SHA clears prior positive merge evidence", () => {
     saveFlows: () => {},
   })).toEqual(new Set());
   expect(flow.mergeEvidence).toMatchObject({
-    headSha: newSha,
-    prNumber: null,
+    headSha: oldSha,
     mergedAt: null,
     source: null,
   });
 });
 
-test("a numbered PR merge with a different head SHA cannot authorize cleanup", () => {
+test("a numbered PR merge with a different head SHA cannot authorize cleanup", async () => {
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   const flow = {
     ...headlessFlow(now),
     id: "flow-pr-head-mismatch",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: "c".repeat(40) }],
     mergeEvidence: {
       repository: "Latand/live-log-viewer-next",
       headRef: "feature/mismatch",
@@ -511,7 +514,7 @@ test("a numbered PR merge with a different head SHA cannot authorize cleanup", (
     },
   } satisfies Flow;
 
-  expect(refreshMergedFlowIds([flow], {
+  expect(await refreshMergedFlowIds([flow], {
     now: () => now,
     resolveMergeIdentity: () => null,
     probePullRequest: () => ({ number: 400, mergedAt: new Date(now - 60_000).toISOString(), headRefOid: "d".repeat(40) }),
@@ -519,6 +522,105 @@ test("a numbered PR merge with a different head SHA cannot authorize cleanup", (
     saveFlows: () => {},
   })).toEqual(new Set());
   expect(flow.mergeEvidence?.mergedAt).toBeNull();
+});
+
+test("approved uncommitted work cannot inherit merge status from its base HEAD", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-dirty-flow-"));
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  try {
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "reaper@example.test"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Reaper Test"], { cwd: directory }).status).toBe(0);
+    fs.writeFileSync(path.join(directory, "tracked.txt"), "base\n");
+    expect(spawnSync("git", ["add", "tracked.txt"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "base"], { cwd: directory }).status).toBe(0);
+    const headSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
+    fs.writeFileSync(path.join(directory, "tracked.txt"), "approved but uncommitted\n");
+    const flow = {
+      ...headlessFlow(now),
+      id: "flow-dirty-approved",
+      cwd: directory,
+      baseRef: headSha,
+      state: "approved",
+      rounds: [{ ...headlessFlow(now).rounds[0]!, verdict: "APPROVE", reviewHeadSha: null }],
+      mergeEvidence: {
+        repository: null,
+        headRef: "main",
+        headSha,
+        prNumber: null,
+        mergedAt: null,
+        checkedAt: null,
+        source: null,
+      },
+    } satisfies Flow;
+
+    expect(await refreshMergedFlowIds([flow], {
+      now: () => now,
+      resolveMergeIdentity: () => null,
+      probePullRequest: async () => null,
+      saveFlows: () => {},
+    })).toEqual(new Set());
+    expect(flow.mergeEvidence?.mergedAt).toBeNull();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("merge probes are concurrent and a stalled probe times out fail closed", async () => {
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  const stalled = {
+    ...headlessFlow(now),
+    id: "flow-stalled-probe",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: "e".repeat(40) }],
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/stalled",
+      headSha: "e".repeat(40),
+      prNumber: null,
+      mergedAt: null,
+      checkedAt: null,
+      source: null,
+    },
+  } satisfies Flow;
+  const responsive = {
+    ...headlessFlow(now),
+    id: "flow-responsive-probe",
+    rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: "f".repeat(40) }],
+    mergeEvidence: {
+      repository: "Latand/live-log-viewer-next",
+      headRef: "feature/responsive",
+      headSha: "f".repeat(40),
+      prNumber: null,
+      mergedAt: null,
+      checkedAt: null,
+      source: null,
+    },
+  } satisfies Flow;
+  let active = 0;
+  let peak = 0;
+  const startedAt = performance.now();
+
+  const merged = await refreshMergedFlowIds([stalled, responsive], {
+    now: () => now,
+    resolveMergeIdentity: () => null,
+    probePullRequest: async (evidence) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      if (evidence.headRef === "feature/stalled") return new Promise(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return { number: 501, mergedAt: new Date(now - 60_000).toISOString(), headRefOid: evidence.headSha };
+    },
+    localBranchMerged: () => false,
+    mergeProbeTimeoutMs: 25,
+    mergeProbeConcurrency: 2,
+    saveFlows: () => {},
+  });
+
+  expect(merged).toEqual(new Set([responsive.id]));
+  expect(peak).toBe(2);
+  expect(performance.now() - startedAt).toBeLessThan(200);
+  expect(stalled.mergeEvidence?.mergedAt).toBeNull();
 });
 
 test("a delivery completed before reaper actuation fences the stale idle turn", async () => {

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -69,63 +69,160 @@ function updateObservationState(hosts: TranscriptHost[], now: number): ReaperSta
   return state;
 }
 
-function localBranchMerged(flow: Flow): boolean {
+function checkoutClean(flow: Flow): boolean | null {
+  const result = spawnSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
+    cwd: flow.cwd,
+    encoding: "utf8",
+    timeout: 2_000,
+  });
+  if (result.status !== 0) return null;
+  return result.stdout.trim().length === 0;
+}
+
+function localBranchMerged(flow: Flow, reviewedHeadSha: string): boolean {
+  if (checkoutClean(flow) !== true) return false;
+  const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: flow.cwd, encoding: "utf8", timeout: 2_000 });
+  if (head.status !== 0 || head.stdout.trim() !== reviewedHeadSha) return false;
   for (const branch of ["origin/main", "origin/master", "main", "master"]) {
-    const result = spawnSync("git", ["merge-base", "--is-ancestor", "HEAD", branch], { cwd: flow.cwd, stdio: "ignore" });
+    const result = spawnSync("git", ["merge-base", "--is-ancestor", reviewedHeadSha, branch], {
+      cwd: flow.cwd,
+      stdio: "ignore",
+      timeout: 2_000,
+    });
     if (result.status === 0) return true;
   }
   return false;
 }
 
-function probePullRequest(evidence: FlowMergeEvidence): { number: number; mergedAt: string | null; headRefOid: string | null } | null {
-  if (!evidence.repository || !evidence.headRef) return null;
+type PullRequestProbe = { number: number; mergedAt: string | null; headRefOid: string | null };
+
+const MERGE_PROBE_TIMEOUT_MS = 5_000;
+const MERGE_PROBE_CONCURRENCY = 4;
+
+function probePullRequest(evidence: FlowMergeEvidence, timeoutMs = MERGE_PROBE_TIMEOUT_MS): Promise<PullRequestProbe | null> {
+  if (!evidence.repository || !evidence.headRef) return Promise.resolve(null);
   const args = evidence.prNumber
     ? ["pr", "view", String(evidence.prNumber), "--repo", evidence.repository, "--json", "number,mergedAt,headRefOid"]
     : ["pr", "list", "--repo", evidence.repository, "--head", evidence.headRef, "--state", "all", "--json", "number,mergedAt,headRefOid", "--limit", "1"];
-  const result = spawnSync("gh", args, { encoding: "utf8" });
-  if (result.status !== 0) return null;
-  try {
-    const parsed = JSON.parse(result.stdout) as unknown;
-    const item = (Array.isArray(parsed) ? parsed[0] : parsed) as { number?: unknown; mergedAt?: unknown; headRefOid?: unknown } | undefined;
-    if (!item || !Number.isInteger(item.number)) return null;
-    const mergedAt = typeof item.mergedAt === "string" && item.mergedAt ? item.mergedAt : null;
-    const headRefOid = typeof item.headRefOid === "string" && item.headRefOid ? item.headRefOid : null;
-    if (mergedAt && (!evidence.headSha || headRefOid !== evidence.headSha)) return null;
-    return { number: item.number as number, mergedAt, headRefOid };
-  } catch {
-    return null;
-  }
+  return new Promise((resolve) => {
+    const child = spawn("gh", args, { stdio: ["ignore", "pipe", "ignore"] });
+    let stdout = "";
+    let settled = false;
+    const finish = (value: PullRequestProbe | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(null);
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (stdout.length <= 1024 * 1024) stdout += chunk;
+    });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      if (code !== 0 || stdout.length > 1024 * 1024) return finish(null);
+      try {
+        const parsed = JSON.parse(stdout) as unknown;
+        const item = (Array.isArray(parsed) ? parsed[0] : parsed) as { number?: unknown; mergedAt?: unknown; headRefOid?: unknown } | undefined;
+        if (!item || !Number.isInteger(item.number)) return finish(null);
+        const mergedAt = typeof item.mergedAt === "string" && item.mergedAt ? item.mergedAt : null;
+        const headRefOid = typeof item.headRefOid === "string" && item.headRefOid ? item.headRefOid : null;
+        if (mergedAt && (!evidence.headSha || headRefOid !== evidence.headSha)) return finish(null);
+        finish({ number: item.number as number, mergedAt, headRefOid });
+      } catch {
+        finish(null);
+      }
+    });
+  });
 }
 
 const MERGE_CHECK_INTERVAL_MS = 5 * 60_000;
 
-export function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOverrides = {}): Set<string> {
+function reviewedHeadSha(flow: Flow, evidence: FlowMergeEvidence | null): string | null {
+  const reviewed = [...flow.rounds].reverse().find((round) => round.verdict === "APPROVE");
+  if (reviewed?.reviewHeadSha) return reviewed.reviewHeadSha;
+  return evidence?.source === "github-pr" && evidence.mergedAt ? evidence.headSha : null;
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), timeoutMs);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      () => { clearTimeout(timer); resolve(fallback); },
+    );
+  });
+}
+
+async function mapWithConcurrency<T>(items: T[], concurrency: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await task(items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+}
+
+export async function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOverrides = {}): Promise<Set<string>> {
   const now = (overrides.now ?? Date.now)();
   const merged = new Set<string>();
   let changed = false;
-  for (const flow of flows) {
+  const timeoutMs = overrides.mergeProbeTimeoutMs ?? MERGE_PROBE_TIMEOUT_MS;
+  const concurrency = Math.max(1, overrides.mergeProbeConcurrency ?? MERGE_PROBE_CONCURRENCY);
+  await mapWithConcurrency(flows, concurrency, async (flow) => {
     let evidence = flow.mergeEvidence ?? null;
+    const clean = (overrides.checkoutClean ?? checkoutClean)(flow);
+    if (clean === false) {
+      if (evidence?.mergedAt || evidence?.source) {
+        evidence.mergedAt = null;
+        evidence.checkedAt = null;
+        evidence.source = null;
+        changed = true;
+      }
+      return;
+    }
+    const reviewedSha = reviewedHeadSha(flow, evidence);
+    if (!reviewedSha) return;
     const identity = (overrides.resolveMergeIdentity ?? resolveFlowMergeIdentity)(flow.cwd);
     if (identity) {
-      if (!evidence) {
-        evidence = { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null };
-        flow.mergeEvidence = evidence;
-        changed = true;
-      } else if (evidence.repository !== identity.repository || evidence.headRef !== identity.headRef || evidence.headSha !== identity.headSha) {
-        evidence = { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null };
+      if (identity.headSha !== reviewedSha) {
+        if (evidence?.mergedAt || evidence?.source) {
+          evidence.mergedAt = null;
+          evidence.checkedAt = null;
+          evidence.source = null;
+          changed = true;
+        }
+        return;
+      }
+      if (!evidence || evidence.repository !== identity.repository || evidence.headRef !== identity.headRef || evidence.headSha !== reviewedSha) {
+        evidence = { ...identity, headSha: reviewedSha, prNumber: null, mergedAt: null, checkedAt: null, source: null };
         flow.mergeEvidence = evidence;
         changed = true;
       }
+    } else if (evidence?.headSha !== reviewedSha) {
+      evidence = evidence ? { ...evidence, headSha: reviewedSha, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
+      flow.mergeEvidence = evidence;
+      changed = true;
     }
     if (evidence?.mergedAt) {
       merged.add(flow.id);
-      continue;
+      return;
     }
     const checkedAt = evidence?.checkedAt ? Date.parse(evidence.checkedAt) : Number.NaN;
-    if (Number.isFinite(checkedAt) && now - checkedAt < MERGE_CHECK_INTERVAL_MS) continue;
+    if (Number.isFinite(checkedAt) && now - checkedAt < MERGE_CHECK_INTERVAL_MS) return;
     let confirmed: FlowMergeEvidence | null = null;
     if (evidence?.repository && evidence.headRef) {
-      const pullRequest = (overrides.probePullRequest ?? probePullRequest)(evidence);
+      const probe = overrides.probePullRequest
+        ? Promise.resolve(overrides.probePullRequest(evidence))
+        : probePullRequest(evidence, timeoutMs);
+      const pullRequest = await withTimeout(probe, timeoutMs, null);
       if (pullRequest?.mergedAt && pullRequest.headRefOid === evidence.headSha) {
         confirmed = {
           ...evidence,
@@ -141,7 +238,7 @@ export function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOv
         changed = true;
       }
     }
-    if (!confirmed && (overrides.localBranchMerged ?? localBranchMerged)(flow)) {
+    if (!confirmed && (overrides.localBranchMerged ?? localBranchMerged)(flow, reviewedSha)) {
       confirmed = {
         repository: evidence?.repository ?? null,
         headRef: evidence?.headRef ?? null,
@@ -157,7 +254,7 @@ export function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActuationOv
       merged.add(flow.id);
       changed = true;
     }
-  }
+  });
   if (changed) (overrides.saveFlows ?? saveFlows)(flows);
   return merged;
 }
@@ -246,14 +343,14 @@ function appendJournal(record: ReaperJournalRecord): void {
   fs.appendFileSync(filename, JSON.stringify(record) + "\n", { encoding: "utf8", mode: 0o600 });
 }
 
-function makeInput(
+async function makeInput(
   registry: AgentRegistry,
   hosts: TranscriptHost[],
   files: FileEntry[],
   state: ReaperState,
   now: number,
   overrides: ReaperActuationOverrides = {},
-): ReaperInput {
+): Promise<ReaperInput> {
   const snapshot = registry.snapshot();
   const flows = (overrides.loadFlows ?? loadFlows)();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
@@ -271,7 +368,7 @@ function makeInput(
     manualPaths: manualPaths(snapshot, hosts, files),
     userAuthoredPaths: authorship.userAuthoredPaths,
     missingTranscriptPaths,
-    mergedFlowIds: refreshMergedFlowIds(flows, overrides),
+    mergedFlowIds: await refreshMergedFlowIds(flows, overrides),
     firstObservedAt: state.firstObservedAt,
     enabled: process.env.LLV_REAPER_ENABLED === "1",
   };
@@ -347,7 +444,7 @@ async function actuateCandidate(
 ): Promise<boolean> {
   if (agent.targetKind === "process") {
     if (!agent.flowId || agent.round === null || !agent.processIdentity) return false;
-    const current = evaluateReaper(makeInput(registry, [], files, state, (overrides.now ?? Date.now)(), overrides));
+    const current = evaluateReaper(await makeInput(registry, [], files, state, (overrides.now ?? Date.now)(), overrides));
     const candidate = current.agents.find((item) => item.targetKind === "process"
       && item.flowId === agent.flowId
       && item.round === agent.round
@@ -377,7 +474,7 @@ async function actuateCandidate(
         && host.agentIdentity === initialHost.agentIdentity
         && host.primaryPath === initialHost.primaryPath);
       if (!freshHost) return false;
-      const current = evaluateReaper(makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides));
+      const current = evaluateReaper(await makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides));
       const candidate = current.agents.find((item) => item.targetKind === "tmux" && item.paneId === paneId);
       if (!candidate?.eligible) return false;
       const killed = await killHost(evidenceFor(freshHost));
@@ -399,8 +496,11 @@ export interface ReaperActuationOverrides {
   processIdentity?: (pid: number) => string | null;
   killProcess?: typeof killHeadlessReviewerIfMatches;
   resolveMergeIdentity?: typeof resolveFlowMergeIdentity;
-  probePullRequest?: typeof probePullRequest;
+  probePullRequest?: (evidence: FlowMergeEvidence) => PullRequestProbe | null | Promise<PullRequestProbe | null>;
   localBranchMerged?: typeof localBranchMerged;
+  checkoutClean?: typeof checkoutClean;
+  mergeProbeTimeoutMs?: number;
+  mergeProbeConcurrency?: number;
   saveFlows?: typeof saveFlows;
   now?: () => number;
 }
@@ -415,7 +515,7 @@ export async function runReaperCycle(options: {
   const registry = options.registry ?? agentRegistry();
   const now = options.now ?? Date.now();
   const state = updateObservationState(options.hosts, now);
-  const report = evaluateReaper(makeInput(registry, options.hosts, options.files, state, now, options.actuation));
+  const report = evaluateReaper(await makeInput(registry, options.hosts, options.files, state, now, options.actuation));
   const completed = await runEvaluatedReaper(report, {
     actuate: (agent) => actuateCandidate(registry, options.files, state, agent, options.actuation),
     journal: appendJournal,

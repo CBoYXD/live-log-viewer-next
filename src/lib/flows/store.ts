@@ -173,6 +173,7 @@ export function loadFlows(): Flow[] {
       sessionId: round.sessionId ?? null,
       reviewerPid: round.reviewerPid ?? null,
       reviewerIdentity: round.reviewerIdentity ?? null,
+      reviewHeadSha: round.reviewHeadSha ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
       error: round.error ?? null,

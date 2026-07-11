@@ -9,7 +9,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
 import { forgetHeadlessReview } from "./exec";
-import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
+import { resolveBaseRef, resolveCleanFlowHead, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
 import { loadFlows, loadPresets, saveFlows } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
@@ -237,6 +237,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       findingsCount: null,
       /* A user note travels to the fresh reviewer as the round's ready note. */
       readyNote: noteFromRequest(req) ?? round.readyNote,
+      reviewHeadSha: resolveCleanFlowHead(flow.cwd),
       startedAt: isoNow(),
       spawnStartedAt: null,
       relayStartedAt: null,
