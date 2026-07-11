@@ -221,6 +221,15 @@ export async function refreshMergedFlowIds(flows: Flow[], overrides: ReaperActua
     const reviewedSha = reviewedHeadSha(flow, evidence);
     if (!reviewedSha) return;
     const identity = (overrides.resolveMergeIdentity ?? resolveFlowMergeIdentity)(flow.cwd);
+    if (!identity && fs.existsSync(flow.cwd)) {
+      if (evidence?.mergedAt || evidence?.source) {
+        evidence.mergedAt = null;
+        evidence.checkedAt = null;
+        evidence.source = null;
+        markChanged(flow);
+      }
+      return;
+    }
     if (identity) {
       if (identity.headSha !== reviewedSha) {
         if (evidence?.mergedAt || evidence?.source) {

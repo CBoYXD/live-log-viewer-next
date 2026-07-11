@@ -231,13 +231,18 @@ function registeredHostForPath(
 
 function sameRegisteredHost(left: TmuxHostEvidence | null, right: TmuxHostEvidence): boolean {
   return Boolean(left
+    && left.kind === right.kind
+    && left.endpoint === right.endpoint
     && left.paneId === right.paneId
     && left.server.pid === right.server.pid
     && left.server.startIdentity === right.server.startIdentity
     && left.panePid.pid === right.panePid.pid
     && left.panePid.startIdentity === right.panePid.startIdentity
     && left.agent.pid === right.agent.pid
-    && left.agent.startIdentity === right.agent.startIdentity);
+    && left.agent.startIdentity === right.agent.startIdentity
+    && left.windowName === right.windowName
+    && left.argv.length === right.argv.length
+    && left.argv.every((argument, index) => argument === right.argv[index]));
 }
 
 /** Closes the registry-owned pane for one root conversation. The registry
@@ -271,7 +276,7 @@ export async function killConversation(filePath: string, overrides: KillConversa
       if (!killed) return failure("the registered pane changed or its process did not exit", 409);
       if (overrides.registry || !overrides.registrySnapshot) {
         const current = registry.snapshot().entries[`${refreshed.key.engine}:${refreshed.key.sessionId}`];
-        if (sameRegisteredHost(current?.host ?? null, refreshed.host)) registry.markUnhosted(refreshed.key);
+        if (current?.artifactPath === filePath && sameRegisteredHost(current.host, refreshed.host)) registry.markUnhosted(refreshed.key);
       }
       forgetResumePane(filePath);
       return { ok: true, target: refreshed.host.paneId };

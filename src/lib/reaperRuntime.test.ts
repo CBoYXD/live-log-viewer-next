@@ -579,6 +579,46 @@ test("approved uncommitted work cannot inherit merge status from its base HEAD",
   }
 });
 
+test("a clean detached checkout cannot retain stale merge authorization", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-detached-head-"));
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  try {
+    expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.email", "reaper@example.test"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["config", "user.name", "Reaper Test"], { cwd: directory }).status).toBe(0);
+    fs.writeFileSync(path.join(directory, "tracked.txt"), "reviewed\n");
+    expect(spawnSync("git", ["add", "tracked.txt"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["commit", "-m", "reviewed"], { cwd: directory }).status).toBe(0);
+    const reviewedSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
+    fs.writeFileSync(path.join(directory, "tracked.txt"), "replacement\n");
+    expect(spawnSync("git", ["commit", "-am", "replacement"], { cwd: directory }).status).toBe(0);
+    expect(spawnSync("git", ["checkout", "--detach", "HEAD"], { cwd: directory }).status).toBe(0);
+    const flow = {
+      ...headlessFlow(now),
+      id: "flow-detached-head",
+      cwd: directory,
+      rounds: [{ ...headlessFlow(now).rounds[0]!, reviewHeadSha: reviewedSha }],
+      mergeEvidence: {
+        repository: "Latand/live-log-viewer-next",
+        headRef: "feature/reviewed",
+        headSha: reviewedSha,
+        prNumber: 605,
+        mergedAt: new Date(now - 60_000).toISOString(),
+        checkedAt: new Date(now - 60_000).toISOString(),
+        source: "github-pr",
+      },
+    } satisfies Flow;
+
+    expect(await refreshMergedFlowIds([flow], {
+      now: () => now,
+      saveFlows: () => {},
+    })).toEqual(new Set());
+    expect(flow.mergeEvidence?.mergedAt).toBeNull();
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("merge probes are concurrent and a stalled probe times out fail closed", async () => {
   const now = Date.parse("2026-07-12T12:00:00.000Z");
   const stalled = {

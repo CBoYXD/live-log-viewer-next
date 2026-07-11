@@ -157,6 +157,49 @@ test("conversation kill refreshes the registry host inside the session lock", as
   expect(unhosted).toHaveLength(1);
 });
 
+test("conversation kill preserves replacement ownership with matching process fields", async () => {
+  const pathname = "/transcripts/owned-before-kill.jsonl";
+  const replacementPath = "/transcripts/replacement-owner.jsonl";
+  const registry = new AgentRegistry(path.join(SANDBOX, "kill-replacement-registry.json"));
+  const key = { engine: "codex" as const, sessionId: "019f4e76-66b4-7f87-94b2-cfa9bf722222" };
+  registry.upsert({
+    key,
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "default",
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", role: "worker" }),
+    status: "idle",
+    host: KILL_HOST,
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const replacement: TmuxHostEvidence = {
+    ...KILL_HOST,
+    endpoint: "/run/user/1000/replacement-tmux",
+    windowName: "replacement-worker",
+    argv: ["codex", "exec", "replacement"],
+  };
+
+  const outcome = await killConversation(pathname, {
+    pathAllowed: () => true,
+    listFiles: async () => [],
+    registry,
+    killHost: async () => {
+      const entry = registry.snapshot().entries[`codex:${key.sessionId}`]!;
+      registry.upsert({ ...entry, artifactPath: replacementPath, host: replacement, status: "live" });
+      return true;
+    },
+  });
+
+  expect(outcome).toEqual({ ok: true, target: "%7" });
+  expect(registry.snapshot().entries[`codex:${key.sessionId}`]).toMatchObject({
+    artifactPath: replacementPath,
+    status: "live",
+    host: replacement,
+  });
+});
+
 test("image-only reservations stay request-local and never drain without the client payload", async () => {
   const registry = new AgentRegistry(path.join(SANDBOX, "image-reservation-registry.json"));
   const observation: ConversationObservation = {
