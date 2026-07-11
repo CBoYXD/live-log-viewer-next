@@ -197,7 +197,7 @@ export function startHeadlessReview(
   if (runs.has(key)) return { pid: null, sessionId: null, reviewerPath: null };
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  fs.rmSync(outputPath, { force: true });
+  clearHeadlessReviewArtifacts(flowId, round);
   const built = reviewerCommand(role, prompt, outputPath, cwd, codexAccount, claudeAccount);
   /* Detached + file-backed stdio: the reviewer must not die with the viewer.
      A plain child shares the dev server's process group, so Ctrl+C on the
@@ -241,6 +241,13 @@ export function startHeadlessReview(
     run.exit = { code, signal };
   });
   return { pid: child.pid ?? null, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
+}
+
+/** Removes attempt-scoped process output before a logical round is relaunched. */
+export function clearHeadlessReviewArtifacts(flowId: string, round: number): void {
+  for (const artifact of [outputPathFor(flowId, round), stdoutPathFor(flowId, round), stderrPathFor(flowId, round)]) {
+    fs.rmSync(artifact, { force: true });
+  }
 }
 
 function readOptional(filePath: string | null): string {

@@ -8,7 +8,7 @@ import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
-import { forgetHeadlessReview } from "./exec";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview } from "./exec";
 import { resolveBaseRef } from "./git";
 import { kickoffPrompt } from "./prompts";
 import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
@@ -223,6 +223,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
   } else if (req.action === "retry-round") {
     if (flow.state !== "needs_decision" || !round) return { error: "flow cannot retry from its current state", status: 409 };
     forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    clearHeadlessReviewArtifacts(flow.id, round.n);
     Object.assign(round, {
       reviewerPath: null,
       reviewerConversationId: null,

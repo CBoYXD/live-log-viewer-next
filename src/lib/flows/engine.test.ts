@@ -9,7 +9,7 @@ import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
 const { tickFlows } = await import("./engine");
-const { loadFlows, saveFlows, stdoutPathFor } = await import("./store");
+const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -162,6 +162,8 @@ test("headless review retries once after an exit without a verdict, then parks o
   };
   fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
   fs.writeFileSync(stdoutPathFor(flow.id, 1), "reviewer exited before producing a verdict\n");
+  fs.writeFileSync(stderrPathFor(flow.id, 1), "stale stderr\n");
+  fs.writeFileSync(outputPathFor(flow.id, 1), "stale last message without verdict\n");
   saveFlows([flow]);
 
   await tickFlows([implementer]);
@@ -169,11 +171,21 @@ test("headless review retries once after an exit without a verdict, then parks o
   expect(retrying.state).toBe("spawning");
   expect(retrying.stateDetail).toContain("retrying automatically");
   expect(retrying.rounds[0]).toMatchObject({ autoRetryCount: 1, accountId: null, reviewerRole: null, attemptedAccounts: ["codex:default"], error: null });
+  expect(fs.existsSync(stdoutPathFor(flow.id, 1))).toBeFalse();
+  expect(fs.existsSync(stderrPathFor(flow.id, 1))).toBeFalse();
+  expect(fs.existsSync(outputPathFor(flow.id, 1))).toBeFalse();
 
-  retrying.state = "reviewing";
-  retrying.rounds[0]!.reviewerPid = 999_999_999;
   retrying.rounds[0]!.spawnStartedAt = startedAt;
   saveFlows([retrying]);
+  await tickFlows([implementer]);
+  const interrupted = loadFlows()[0]!;
+  expect(interrupted.state).toBe("needs_decision");
+  expect(interrupted.stateDetail).toBe("reviewer spawn was interrupted by a restart");
+
+  interrupted.state = "reviewing";
+  interrupted.rounds[0]!.reviewerPid = 999_999_999;
+  interrupted.rounds[0]!.spawnStartedAt = startedAt;
+  saveFlows([interrupted]);
   fs.writeFileSync(stdoutPathFor(flow.id, 1), "reviewer exited again\n");
 
   await tickFlows([implementer]);

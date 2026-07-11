@@ -12,7 +12,7 @@ import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-import { forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
 import {
   fallbackReviewFromTranscript,
   lastAssistantMessage,
@@ -266,6 +266,7 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
 
 function retryHeadlessRound(flow: Flow, round: Round): void {
   forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  clearHeadlessReviewArtifacts(flow.id, round.n);
   Object.assign(round, {
     reviewerPath: null,
     reviewerConversationId: null,
