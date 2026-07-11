@@ -46,6 +46,7 @@ const GLUE_SETTLE_MS = 300;
 /* Scroll state per stable conversation, surviving pane remounts and native
    generation changes during account migration. */
 interface ViewportAnchor {
+  path: string;
   key: string;
   offset: number;
 }
@@ -72,11 +73,11 @@ function feedRows(scroller: HTMLElement): HTMLElement[] {
   return Array.from(scroller.querySelectorAll<HTMLElement>("[data-feed-key]"));
 }
 
-function viewportAnchor(scroller: HTMLElement): ViewportAnchor | null {
+function viewportAnchor(scroller: HTMLElement, path: string): ViewportAnchor | null {
   const viewportTop = scroller.getBoundingClientRect().top;
   const row = feedRows(scroller).find((candidate) => candidate.getBoundingClientRect().bottom > viewportTop);
   const key = row?.dataset.feedKey;
-  return row && key ? { key, offset: row.getBoundingClientRect().top - viewportTop } : null;
+  return row && key ? { path, key, offset: row.getBoundingClientRect().top - viewportTop } : null;
 }
 
 function rowForAnchor(scroller: HTMLElement, key: string): HTMLElement | null {
@@ -181,12 +182,13 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
       pendingRestoreRef.current = null;
       return false;
     }
-    if (pending.anchor) {
-      const row = rowForAnchor(el, pending.anchor.key);
+    const anchor = pending.anchor?.path === pending.path ? pending.anchor : null;
+    if (anchor) {
+      const row = rowForAnchor(el, anchor.key);
       if (row) {
         const currentOffset = row.getBoundingClientRect().top - el.getBoundingClientRect().top;
         glueAtRef.current = Date.now();
-        el.scrollTop += currentOffset - pending.anchor.offset;
+        el.scrollTop += currentOffset - anchor.offset;
         pending.applied = true;
         return true;
       }
@@ -196,7 +198,7 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
     el.scrollTop = Math.max(0, maxScroll - pending.fromBottom);
     if (maxScroll < pending.fromBottom) return false;
     pending.applied = true;
-    if (!pending.anchor) pendingRestoreRef.current = null;
+    if (!anchor) pendingRestoreRef.current = null;
     return true;
   };
 
@@ -416,11 +418,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             if (settling) glue();
             else setMagnet(false);
           }
-          if (memoryKey && !settling) {
+          if (memoryKey && file && !settling) {
             rememberScroll(memoryKey, {
               magnet: magnetRef.current,
               fromBottom: Math.max(0, el.scrollHeight - el.clientHeight - el.scrollTop),
-              anchor: magnetRef.current ? null : viewportAnchor(el),
+              anchor: magnetRef.current ? null : viewportAnchor(el, file.path),
             });
           }
           if (el.scrollTop < 120 && canRevealOlder && !tail.loadingOlder && !tail.loading) revealOlder();
@@ -465,11 +467,11 @@ export function LogFeed({ file, showSvc, lineFilter, onStatus, paused, follow, s
             {compact ? null : <TaskHeader file={file} />}
             {feed.items.length ? (
               <>
-                {visibleItems.map(({ key, item }) =>
+                {visibleItems.map(({ anchorKey, key, item }) =>
                   /* Session-stable keys: a row keeps its DOM node while the
                      window slides. Compact panes live on the zoomable canvas:
                      off-screen rows skip layout/paint via content-visibility. */
-                  <div key={key} data-feed-key={key} className={compact ? "feed-cv" : undefined}>
+                  <div key={key} data-feed-key={anchorKey ?? undefined} className={compact ? "feed-cv" : undefined}>
                     <FeedItem item={item} />
                   </div>,
                 )}
