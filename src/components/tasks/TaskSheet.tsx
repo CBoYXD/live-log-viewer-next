@@ -259,7 +259,7 @@ function TaskDetailView({
             return (
               <div
                 key={(assignment.path ?? "spawning") + index}
-                className={`flex h-7 items-center gap-1.5 rounded-[6px] px-1.5 ${
+                className={`flex min-h-11 items-center gap-1.5 rounded-[6px] px-1.5 ${
                   failed ? "bg-[#faeee9] text-[#a04a2e]" : file ? "bg-bg" : "bg-bg opacity-60"
                 }`}
                 title={failed ? t("tasks.chipFailedTitle", { error: assignment.error ?? "" }) : undefined}
@@ -275,7 +275,7 @@ function TaskDetailView({
                 {assignment.path && (failed || !file) ? (
                   <button
                     type="button"
-                    className="shrink-0 rounded px-1 text-[10px] font-bold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                    className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded px-2 text-[11px] font-bold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     onClick={() => {
                       void (async () => {
                         if (!draft.trim()) {

@@ -35,11 +35,14 @@ function StackRow({
   flows: readonly Flow[];
   onSelect: (file: FileEntry) => void;
 }) {
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   return (
     <div className="min-w-0">
       <button
-        className="flex h-7 w-full items-center gap-2 rounded-[8px] px-2 text-left text-[11px] font-bold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`flex w-full items-center gap-2 rounded-[8px] px-2 text-left text-[11px] font-bold text-ink hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          isMobile ? "min-h-11" : "h-7"
+        }`}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
@@ -57,7 +60,9 @@ function StackRow({
               <button
                 key={file.path}
                 data-flip-key={file.path}
-                className="inline-flex h-7 max-w-[340px] items-center gap-1.5 rounded-full border border-line bg-bg px-2 text-[11px] font-semibold text-ink hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                className={`inline-flex max-w-[340px] items-center gap-1.5 rounded-full border border-line bg-bg text-[11px] font-semibold text-ink hover:border-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                  isMobile ? "min-h-11 px-3" : "h-7 px-2"
+                }`}
                 title={cleanTitle(file.title)}
                 onClick={() => onSelect(file)}
               >

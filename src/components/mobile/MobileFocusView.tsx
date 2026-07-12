@@ -335,15 +335,20 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           the safe-area insets keep the pane off the screen edges symmetrically. */}
       <div className="relative flex min-h-0 flex-1 flex-col py-1.5 pl-[max(0.375rem,env(safe-area-inset-left))] pr-[max(0.375rem,env(safe-area-inset-right))] pb-[max(0.375rem,env(safe-area-inset-bottom))]">
         {activeNode ? (
-          <div key={activeNode.file.path} className="relative flex min-h-0 flex-1">
-            <BranchPane
-              file={activeNode.file}
-              tasks={activeNode.tasks}
-              isRoot={activeNode.isRoot}
-              onClose={() => onClose(activeNode.file.path)}
-              dragHandle={swipeHandle}
-            />
-            {onHandoff && canHandoff(activeNode.file) ? <HandoffHandle file={activeNode.file} onHandoff={() => onHandoff(activeNode.file)} /> : null}
+          <div key={activeNode.file.path} className="flex min-h-0 flex-1 flex-col">
+            <div className="relative flex min-h-0 flex-1">
+              <BranchPane
+                file={activeNode.file}
+                tasks={activeNode.tasks}
+                isRoot={activeNode.isRoot}
+                onClose={() => onClose(activeNode.file.path)}
+                dragHandle={swipeHandle}
+              />
+            </div>
+            {/* Docked in flow below the pane (finding 1): reserves its own 44px
+                row instead of the scheme's floating handle, so it never overlaps
+                the WorkerStacks footer under the focus view. */}
+            {onHandoff && canHandoff(activeNode.file) ? <HandoffHandle file={activeNode.file} onHandoff={() => onHandoff(activeNode.file)} docked /> : null}
           </div>
         ) : activeDeck ? (
           <div key={activeDeck.key} className="relative min-h-0 flex-1">
