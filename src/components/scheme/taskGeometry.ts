@@ -1017,6 +1017,36 @@ export function routeTaskEdges(
     }
   }
 
+  /* Detours superimpose even when the source edges don't share a corridor:
+     several fan-out edges forced around one pane land on the *same* routed
+     corridor and compound into an opaque rail (issue #17). Run last, after the
+     reduction has settled, so it has the final say: walk edges in key order on
+     their exact corridors (the detour's straight middle run), and when one sits
+     within a lane of an already-placed corridor on the same axis and overlaps its
+     extent, step its lane out until it clears. Deterministic and bounded. */
+  if (edges.length <= CROSS_REDUCE_MAX) {
+    const placed: RouteCorridor[] = [];
+    const clashes = (c: RouteCorridor): boolean =>
+      placed.some((p) => p.axis === c.axis && Math.abs(p.pos - c.pos) < LANE_BOW - 1 && Math.min(p.hi, c.hi) > Math.max(p.lo, c.lo));
+    for (const edge of order) {
+      let corridor = state.get(edge.key)!.route.corridor;
+      if (corridor && clashes(corridor)) {
+        const laneBase = lanes.get(edge.key) ?? 0;
+        const obstacles = edgeObstacles(edge, cards, containers);
+        for (const step of CORRIDOR_LANES) {
+          const route = routeTaskEdge(edge, obstacles, laneBase + step);
+          if (route.corridor && !clashes(route.corridor)) {
+            const pts = sampleRoutePoints(route.d);
+            state.set(edge.key, { route, pts, box: boundsOf(pts) });
+            corridor = route.corridor;
+            break;
+          }
+        }
+      }
+      if (corridor) placed.push(corridor);
+    }
+  }
+
   /* Fade the residual: for every pair still crossing after the pass, mark the
      higher-key edge so it reads as passing behind — a crossing is never left
      silently solid (issue #17). Broad-phased, and deterministic: the pair is
