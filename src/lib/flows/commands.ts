@@ -11,7 +11,7 @@ import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
 import { clearHeadlessReviewArtifacts, forgetHeadlessReview } from "./exec";
-import { resolveBaseRef } from "./git";
+import { resolveBaseRef, resolveFlowMergeIdentity } from "./git";
 import { kickoffPrompt } from "./prompts";
 import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
@@ -128,6 +128,11 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     state: "waiting_ready",
     pausedState: null,
     stateDetail: null,
+    mergeEvidence: (() => {
+      const identity = resolveFlowMergeIdentity(cwd);
+      return identity ? { ...identity, prNumber: null, mergedAt: null, checkedAt: null, source: null } : null;
+    })(),
+    kickoffDelivery: null,
     rounds: [],
     createdAt: isoNow(),
     closedAt: null,
@@ -135,7 +140,9 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
   flows.push(flow);
   saveFlows(flows);
   try {
-    await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+    const deliveryPath = await sendToImplementer(flow, new Map(entries.map((item) => [item.path, item])), kickoffPrompt(flow.spec));
+    flow.kickoffDelivery = { path: deliveryPath, deliveredAt: isoNow() };
+    saveFlows(flows);
   } catch (error) {
     flow.state = "paused";
     flow.pausedState = "waiting_ready";
@@ -172,7 +179,7 @@ function noteFieldFromRequest(req: PatchFlowRequest): string | null | undefined 
  * the handle existed.
  */
 async function stopReviewer(flow: Flow, round: Round): Promise<void> {
-  forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  forgetHeadlessReview(flow.id, round.n, round);
   if (flow.reviewerMode !== "pane") return;
   try {
     const pane = round.reviewerPane;
@@ -208,6 +215,7 @@ export async function cancelRound(id: string): Promise<{ flow?: Flow; error?: st
   }
   await stopReviewer(flow, round);
   round.error = "cancelled by user";
+  round.terminalAt = isoNow();
   flow.state = "needs_decision";
   flow.stateDetail = "round cancelled by user";
   saveFlows(flows);
@@ -224,7 +232,11 @@ export async function closeFlow(id: string): Promise<{ flow?: Flow; error?: stri
   const flow = flows.find((item) => item.id === id);
   if (!flow) return { error: "flow not found", status: 404 };
   const round = lastRound(flow);
-  if (round && round.verdict === null && !round.error) await stopReviewer(flow, round);
+  if (round && round.verdict === null && !round.error) {
+    await stopReviewer(flow, round);
+    round.error = "flow closed by user";
+    round.terminalAt = isoNow();
+  }
   flow.state = "closed";
   flow.closedAt = isoNow();
   flow.stateDetail = null;
@@ -274,7 +286,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
     flow.stateDetail = null;
   } else if (req.action === "retry-round") {
     if (flow.state !== "needs_decision" || !round) return { error: "flow cannot retry from its current state", status: 409 };
-    forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    forgetHeadlessReview(flow.id, round.n, round);
     clearHeadlessReviewArtifacts(flow.id, round.n);
     /* The note travels to the fresh reviewer. An omitted field keeps the round's
        existing note; a string replaces it; an explicit empty clears it. */
@@ -287,6 +299,7 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
       autoRetryCount: 0,
       sessionId: null,
       reviewerPid: null,
+      reviewerIdentity: null,
       reviewerPane: null,
       findingsPath: null,
       verdict: null,
@@ -295,10 +308,13 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
          role — this is where a prior set-roles override takes effect. */
       reviewerRole: { ...flow.roles.reviewer },
       readyNote: noteField === undefined ? round.readyNote : noteField,
+      reviewHeadSha: null,
       startedAt: isoNow(),
       spawnStartedAt: null,
       relayStartedAt: null,
+      relayDelivery: null,
       reviewedAt: null,
+      terminalAt: null,
       relayedAt: null,
       error: null,
     });

@@ -14,6 +14,7 @@ import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { clearHeadlessReviewArtifacts, forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
+import { resolveCleanFlowHead } from "./git";
 import {
   fallbackReviewFromTranscript,
   lastAssistantMessage,
@@ -105,6 +106,8 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     attemptedAccounts: [],
     autoRetryCount: 0,
     sessionId: null,
+    reviewerPid: null,
+    reviewerIdentity: null,
     /* Freeze the reviewer role now, so a later set-roles only affects the round
        after this one (#118); prepareReviewerLaunch re-freezes it at launch to pick
        up an override applied before the spawn. */
@@ -113,20 +116,36 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     findingsPath: null,
     triggeredBy,
     readyNote,
+    reviewHeadSha: null,
     verdict: null,
     findingsCount: null,
     startedAt: isoNow(),
     spawnStartedAt: null,
     relayStartedAt: null,
+    relayDelivery: null,
     reviewedAt: null,
+    terminalAt: null,
     relayedAt: null,
     error: null,
   };
 }
 
+export function captureReviewHead(flow: Flow, round: Round): string {
+  const headSha = resolveCleanFlowHead(flow.cwd);
+  if (!headSha) throw new Error("review requires a clean committed HEAD");
+  round.reviewHeadSha = headSha;
+  return headSha;
+}
+
 function markNeedsDecision(flow: Flow, detail: string): void {
   flow.state = "needs_decision";
   flow.stateDetail = detail;
+}
+
+function markRoundError(round: Round, error: string): string {
+  round.error = error;
+  round.terminalAt = isoNow();
+  return error;
 }
 
 function roundKey(flow: Flow, round: Round): string {
@@ -140,13 +159,14 @@ function currentConversationPath(conversationId: string | null | undefined, fall
   return agentRegistry().canonicalPath(fallback);
 }
 
-export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<void> {
+export async function sendToImplementer(flow: Flow, entriesByPath: Map<string, FileEntry>, text: string): Promise<string> {
   const entry = entriesByPath.get(currentConversationPath(flow.implementerConversationId, flow.implementerPath));
   if (!entry) throw new Error("implementer transcript is missing from scanner");
   const spec = resumeSpecFor(entry.root, entry.path, { model: entry.launchModel ?? entry.model, effort: entry.effort });
   if (!spec) throw new Error("implementer session cannot be resumed");
   const outcome = await deliverToTranscriptHost({ entry, spec, payload: text });
   if (!outcome.ok) throw new Error(outcome.error);
+  return entry.path;
 }
 
 function sessionIdFromHeadlessStdout(stdout: string): string | null {
@@ -194,6 +214,7 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
   round.verdict = parsed.verdict;
   round.findingsCount = parsed.findingsCount;
   round.reviewedAt = isoNow();
+  round.terminalAt = round.reviewedAt;
   if (flow.mode === "manual") {
     flow.state = "relay_pending";
   } else {
@@ -288,6 +309,8 @@ function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch
 }
 
 async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReviewerLaunch, persistCheckpoint: () => void): Promise<void> {
+  captureReviewHead(flow, round);
+  persistCheckpoint();
   const prompt = reviewerPrompt(flow, round);
   const { role, account } = prepared;
   flow.state = "reviewing";
@@ -337,7 +360,10 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
     account.engine === "codex" ? { home: account.home, managed: account.kind === "managed" } : null,
     account.engine === "claude" ? { home: account.home, projectsDir: account.transcriptRoot, managed: account.kind === "managed" } : null,
   );
-  if (launched.pid) round.reviewerPid = launched.pid;
+  if (launched.pid) {
+    round.reviewerPid = launched.pid;
+    round.reviewerIdentity = launched.identity;
+  }
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
   /* Same ownership guard as the pane branch: persist the pid, and if a concurrent
@@ -347,13 +373,13 @@ async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReview
   persistCheckpoint();
   const headlessDisk = loadFlows().find((item) => item.id === flow.id);
   if (!reviewerLaunchPersisted(headlessDisk, round)) {
-    forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    forgetHeadlessReview(flow.id, round.n, round);
     if (headlessDisk && headlessDisk.state !== "closed") abandonLaunch(flow.id, round.n);
   }
 }
 
 function retryHeadlessRound(flow: Flow, round: Round): void {
-  forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  forgetHeadlessReview(flow.id, round.n, round);
   clearHeadlessReviewArtifacts(flow.id, round.n);
   Object.assign(round, {
     reviewerPath: null,
@@ -362,10 +388,12 @@ function retryHeadlessRound(flow: Flow, round: Round): void {
     accountId: null,
     sessionId: null,
     reviewerPid: null,
+    reviewerIdentity: null,
     reviewerPane: null,
     findingsPath: null,
     verdict: null,
     findingsCount: null,
+    reviewHeadSha: null,
     autoRetryCount: (round.autoRetryCount ?? 0) + 1,
     startedAt: isoNow(),
     spawnStartedAt: null,
@@ -382,8 +410,10 @@ async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, 
   if (!round.findingsPath) throw new Error("round has no findings artifact");
   const findings = fs.readFileSync(round.findingsPath, "utf8");
   flow.state = "relaying";
-  await sendToImplementer(flow, entriesByPath, relayPrompt(round, findings));
-  round.relayedAt = isoNow();
+  const deliveryPath = await sendToImplementer(flow, entriesByPath, relayPrompt(round, findings));
+  const deliveredAt = isoNow();
+  round.relayDelivery = { path: deliveryPath, deliveredAt };
+  round.relayedAt = deliveredAt;
   if (round.verdict === "APPROVE") {
     flow.state = "approved";
     flow.closedAt = isoNow();
@@ -473,8 +503,7 @@ async function tickFlow(
         round.error = null;
         markNeedsDecision(flow, rateLimitStateDetail(error.resetsAt));
       } else {
-        round.error = error instanceof Error ? error.message : String(error);
-        markNeedsDecision(flow, round.error);
+        markNeedsDecision(flow, markRoundError(round, error instanceof Error ? error.message : String(error)));
       }
     }
     return JSON.stringify(flow) !== before;
@@ -500,7 +529,7 @@ async function tickFlow(
       if (!round.reviewerPath && !round.sessionId) maybeClaimReviewerPathByHeuristic(flow, entries, round);
       if (status?.status === "running") return JSON.stringify(flow) !== before;
       if (status) {
-        forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+        forgetHeadlessReview(flow.id, round.n, round);
         const parsed = parseFindings(status.finalOutput);
         if (parsed) {
           applyVerdict(flow, round, parsed);
@@ -510,8 +539,7 @@ async function tickFlow(
           const rawPath = round.findingsPath ?? findingsPathFor(flow.id, round.n);
           atomicWriteText(rawPath, status.finalOutput || status.stdout || status.stderr);
           round.findingsPath = rawPath;
-          round.error = status.status === "timeout" ? "reviewer timed out" : status.stderr.trim() || "reviewer verdict was unparseable";
-          markNeedsDecision(flow, round.error);
+          markNeedsDecision(flow, markRoundError(round, status.status === "timeout" ? "reviewer timed out" : status.stderr.trim() || "reviewer verdict was unparseable"));
         }
         return JSON.stringify(flow) !== before;
       }
@@ -548,7 +576,7 @@ async function tickFlow(
       persistCheckpoint();
       await relayFindings(flow, entriesByPath, round);
     } catch (error) {
-      round.error = error instanceof Error ? error.message : String(error);
+      markRoundError(round, error instanceof Error ? error.message : String(error));
       flow.state = "paused";
       flow.pausedState = "relaying";
       flow.stateDetail = round.error;

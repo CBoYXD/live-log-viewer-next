@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,6 +6,7 @@ import path from "node:path";
 import { resolveBinary } from "@/lib/agent/cli";
 import { claudeManagedEnvironment, claudeSettingsPath } from "@/lib/accounts/claude";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
+import { procBackend } from "@/lib/proc";
 
 import type { FlowEngine, RoleConfig, Round } from "./types";
 import { outputPathFor, stderrPathFor, stdoutPathFor } from "./store";
@@ -25,6 +26,7 @@ export interface HeadlessRunResult {
 
 export interface HeadlessReviewLaunch {
   pid: number | null;
+  identity: string | null;
   sessionId: string | null;
   reviewerPath: string | null;
 }
@@ -42,6 +44,7 @@ export interface HeadlessReviewRuntime { command?: string; }
    headlessReviewStatus must stay derivable from the round + artifacts alone. */
 interface LiveRun {
   child: ChildProcess;
+  identity: string | null;
   startedAt: number;
   exit: { code: number | null; signal: NodeJS.Signals | null } | null;
   timer: NodeJS.Timeout;
@@ -51,18 +54,6 @@ const runs = new Map<string, LiveRun>();
 
 function runKey(flowId: string, round: number): string {
   return `${flowId}:${round}`;
-}
-
-function killOrphanReviewProcess(outputPath: string): void {
-  const res = spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
-  if (res.error || res.status !== 0) return;
-  for (const line of res.stdout.split("\n")) {
-    if (!line.includes(outputPath) || !/\bcodex\b/.test(line)) continue;
-    const match = /^\s*(\d+)\s+/.exec(line);
-    const pid = match ? Number(match[1]) : 0;
-    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
-    killTree(pid);
-  }
 }
 
 function pidAlive(pid: number | null | undefined): boolean {
@@ -75,10 +66,16 @@ function pidAlive(pid: number | null | undefined): boolean {
   }
 }
 
+function processMatches(pid: number | null | undefined, identity: string | null | undefined): pid is number {
+  return Boolean(pid && identity && pidAlive(pid) && procBackend.processIdentity(pid) === identity);
+}
+
 /** SIGTERM the reviewer's process group (detached spawn = group leader),
     escalating to SIGKILL; falls back to the single pid when no group exists. */
-function killTree(pid: number, escalateMs = 3_000): void {
+function killTree(pid: number, identity: string | null, escalateMs = 3_000): void {
+  if (!processMatches(pid, identity)) return;
   const signalTree = (sig: NodeJS.Signals) => {
+    if (!processMatches(pid, identity)) return;
     try {
       process.kill(-pid, sig);
     } catch {
@@ -91,7 +88,7 @@ function killTree(pid: number, escalateMs = 3_000): void {
   };
   signalTree("SIGTERM");
   setTimeout(() => {
-    if (pidAlive(pid)) signalTree("SIGKILL");
+    if (processMatches(pid, identity)) signalTree("SIGKILL");
   }, escalateMs).unref();
 }
 
@@ -194,7 +191,7 @@ export function startHeadlessReview(
   runtime?: HeadlessReviewRuntime,
 ): HeadlessReviewLaunch {
   const key = runKey(flowId, round);
-  if (runs.has(key)) return { pid: null, sessionId: null, reviewerPath: null };
+  if (runs.has(key)) return { pid: null, identity: null, sessionId: null, reviewerPath: null };
   const outputPath = outputPathFor(flowId, round);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   clearHeadlessReviewArtifacts(flowId, round);
@@ -222,12 +219,14 @@ export function startHeadlessReview(
     fs.closeSync(stderrFd);
   }
   child.unref();
+  const identity = child.pid ? procBackend.processIdentity(child.pid) : null;
   const run: LiveRun = {
     child,
+    identity,
     startedAt: Date.now(),
     exit: null,
     timer: setTimeout(() => {
-      if (!run.exit && child.pid) killTree(child.pid);
+      if (!run.exit && child.pid) killTree(child.pid, run.identity);
     }, timeoutMs),
   };
   run.timer.unref();
@@ -240,7 +239,7 @@ export function startHeadlessReview(
     clearTimeout(run.timer);
     run.exit = { code, signal };
   });
-  return { pid: child.pid ?? null, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
+  return { pid: child.pid ?? null, identity, sessionId: built.sessionId, reviewerPath: built.reviewerPath };
 }
 
 /** Removes attempt-scoped process output before a logical round is relaunched. */
@@ -273,23 +272,24 @@ function readOptional(filePath: string | null): string {
 export function headlessReviewStatus(
   flowId: string,
   round: number,
-  persisted: Pick<Round, "reviewerPid" | "spawnStartedAt">,
+  persisted: Pick<Round, "reviewerPid" | "reviewerIdentity" | "spawnStartedAt">,
   engine: FlowEngine,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 ): HeadlessRunResult | null {
   const run = runs.get(runKey(flowId, round));
   const stdout = readOptional(stdoutPathFor(flowId, round));
   const pid = run?.child.pid ?? persisted.reviewerPid ?? null;
+  const identity = run?.identity ?? persisted.reviewerIdentity ?? null;
   if (!run && pid === null && !stdout) return null;
   const stderr = readOptional(stderrPathFor(flowId, round));
   const scanned = scanEventStream(stdout);
   const startedAt = run?.startedAt ?? Date.parse(persisted.spawnStartedAt ?? "");
   const elapsed = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
-  const alive = run ? run.exit === null && pidAlive(pid) : pidAlive(pid);
+  const alive = run ? run.exit === null && processMatches(pid, identity) : processMatches(pid, identity);
   if (alive) {
     /* Re-arm the timeout across restarts: the in-memory timer died with the
        old process, so the reconstruction path enforces the budget itself. */
-    if (!run && elapsed >= timeoutMs && pid) killTree(pid);
+    if (!run && elapsed >= timeoutMs && pid) killTree(pid, identity);
     return { status: "running", stdout, stderr, finalOutput: "", sessionId: scanned.sessionId, code: null, signal: null };
   }
   const outputPath = engine === "codex" ? outputPathFor(flowId, round) : null;
@@ -301,17 +301,19 @@ export function headlessReviewStatus(
   return { status, stdout, stderr, finalOutput, sessionId: scanned.sessionId, code: exit?.code ?? null, signal: exit?.signal ?? null };
 }
 
-export function forgetHeadlessReview(flowId: string, round: number, persistedPid?: number | null): void {
+export function forgetHeadlessReview(
+  flowId: string,
+  round: number,
+  persisted: Pick<Round, "reviewerPid" | "reviewerIdentity"> = { reviewerPid: null, reviewerIdentity: null },
+): void {
   const key = runKey(flowId, round);
   const run = runs.get(key);
   runs.delete(key);
-  const pid = run?.child.pid ?? persistedPid ?? null;
+  const pid = run?.child.pid ?? persisted.reviewerPid ?? null;
+  const identity = run?.identity ?? persisted.reviewerIdentity ?? null;
   if (run) clearTimeout(run.timer);
   if (pid) {
-    if (pidAlive(pid)) killTree(pid);
+    killTree(pid, identity);
     return;
   }
-  /* No pid survived (round predates pid persistence) — fall back to matching
-     the codex process by its --output-last-message argument. */
-  killOrphanReviewProcess(outputPathFor(flowId, round));
 }

@@ -123,6 +123,7 @@ test("flow specs persist in the versioned state file and legacy flow entries loa
       implementerConversationId: null,
       reviewerFallback: configuredReviewerFallback(),
       pausedState: null,
+      kickoffDelivery: null,
     }]);
   } finally {
     if (previousState === undefined) delete process.env.LLV_STATE_DIR;

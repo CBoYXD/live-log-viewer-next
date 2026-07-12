@@ -30,6 +30,11 @@ export type FlowState =
 
 export type ReviewVerdict = "APPROVE" | "REQUEST_CHANGES" | "COMMENT";
 
+export type ViewerFlowDelivery = {
+  path: string;
+  deliveredAt: string;
+};
+
 export type FlowBlock = {
   reason: "rate_limited";
   /** Stable address for a future continue-on-account action. */
@@ -37,6 +42,16 @@ export type FlowBlock = {
   /** Exhausted account. A successor action can exclude it from targets. */
   accountId: string | null;
   resetAt: number | null;
+};
+
+export type FlowMergeEvidence = {
+  repository: string | null;
+  headRef: string | null;
+  headSha: string | null;
+  prNumber: number | null;
+  mergedAt: string | null;
+  checkedAt: string | null;
+  source: "github-pr" | "git-ancestor" | null;
 };
 
 export type Round = {
@@ -68,6 +83,9 @@ export type Round = {
       stdio), so after a restart the engine re-attaches through this pid and
       the on-disk stdout/last-message artifacts instead of giving up. */
   reviewerPid?: number | null;
+  /** Process start identity captured with reviewerPid. Reaper actuation
+      requires both values so PID reuse cannot inherit reviewer ownership. */
+  reviewerIdentity?: string | null;
   /** Pane-mode reviewers: the tmux pane the round booted, captured at spawn
       so cancel-round can stop it even before the scanner attributes the
       transcript. The window name guards against pane-id reuse. */
@@ -75,12 +93,18 @@ export type Round = {
   findingsPath: string | null; // round artifact file once written
   triggeredBy: "marker" | "button";
   readyNote: string | null; // text after REVIEW_READY:
+  /** Clean commit reviewed in this round. Null prevents merge-authorized cleanup. */
+  reviewHeadSha?: string | null;
   verdict: ReviewVerdict | null;
   findingsCount: number | null;
   startedAt: string;
   spawnStartedAt?: string | null; // reviewer launch started
   relayStartedAt?: string | null; // findings delivery started
+  /** Exact transcript generation that received Viewer-generated findings. */
+  relayDelivery?: ViewerFlowDelivery | null;
   reviewedAt: string | null; // verdict detected
+  /** Reviewer process reached a verdict or terminal error. */
+  terminalAt?: string | null;
   relayedAt: string | null; // findings delivered to implementer
   error: string | null;
 };
@@ -108,6 +132,11 @@ export type Flow = {
   stateDetail: string | null;
   /** Ephemeral read-model block derived from the attached implementer. */
   block?: FlowBlock | null;
+  /** Durable positive merge evidence and the repository identity needed to
+      refresh it after the originating worktree disappears. */
+  mergeEvidence?: FlowMergeEvidence | null;
+  /** Exact transcript generation that received the Viewer-generated kickoff. */
+  kickoffDelivery?: ViewerFlowDelivery | null;
   rounds: Round[];
   createdAt: string;
   closedAt: string | null;

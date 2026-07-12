@@ -175,6 +175,7 @@ export function loadFlows(): Flow[] {
       ? configuredReviewerFallback()
       : flow.reviewerFallback ?? null,
     pausedState: flow.pausedState ?? null,
+    kickoffDelivery: flow.kickoffDelivery ?? null,
     rounds: flow.rounds.map((round) => ({
       ...round,
       reviewerConversationId: round.reviewerConversationId ?? null,
@@ -186,8 +187,12 @@ export function loadFlows(): Flow[] {
       autoRetryCount: round.autoRetryCount ?? 0,
       sessionId: round.sessionId ?? null,
       reviewerPid: round.reviewerPid ?? null,
+      reviewerIdentity: round.reviewerIdentity ?? null,
+      reviewHeadSha: round.reviewHeadSha ?? null,
       spawnStartedAt: round.spawnStartedAt ?? null,
       relayStartedAt: round.relayStartedAt ?? null,
+      relayDelivery: round.relayDelivery ?? null,
+      terminalAt: round.terminalAt ?? null,
       error: round.error ?? null,
     })),
   }));
