@@ -34,4 +34,13 @@ describe("spokenAnswerText", () => {
     expect(spoken).not.toContain("base64");
     expect(spoken).not.toContain("private");
   });
+
+  test("removes hidden HTML content and inline Markdown code", () => {
+    const spoken = spokenAnswerText("Visible <span hidden>private text</span> end. `secretCode()` <div aria-hidden=\"true\">concealed</div>");
+    expect(spoken).toContain("Visible");
+    expect(spoken).toContain("end.");
+    expect(spoken).not.toContain("private text");
+    expect(spoken).not.toContain("secretCode");
+    expect(spoken).not.toContain("concealed");
+  });
 });

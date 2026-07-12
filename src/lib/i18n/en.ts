@@ -438,6 +438,7 @@ export const en = {
   "tts.playing": "Playing audio",
   "tts.stopped": "Stopped",
   "tts.configError": "TTS configuration unavailable",
+  "tts.backendChanged": "The TTS provider changed. Review the updated details and confirm again.",
   "tts.requestError": "TTS request failed ({status})",
   "tts.requestFailed": "TTS request failed",
   "tts.playError": "The browser blocked audio playback. Try again.",

@@ -33,9 +33,10 @@ const backendInfo = {
 };
 
 async function drainUpdates(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  for (let index = 0; index < 3; index += 1) {
+    await Promise.resolve();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  }
 }
 
 async function mount(text: string): Promise<{ button: HTMLButtonElement; root: Root; host: HTMLDivElement }> {
@@ -84,6 +85,7 @@ test("a second click cancels pending synthesis and ignores its stale response", 
   const other = await mount("Another answer");
   expect(configRequests).toBe(1);
   flushSync(() => { view.button.click(); });
+  await drainUpdates();
   expect(view.host.textContent).toContain("Billed to your openai account per character");
   expect(view.host.textContent).toContain("AI-generated voice");
   expect(postSignal).toBeUndefined();
@@ -136,6 +138,7 @@ test("long answers require consent and cached replay makes no paid request", asy
 
   const view = await mount("x".repeat(MAX_TTS_TEXT_LENGTH + 100));
   flushSync(() => { view.button.click(); });
+  await drainUpdates();
   expect(view.host.textContent).toContain(`Speak the first ${MAX_TTS_TEXT_LENGTH.toLocaleString()} characters?`);
   const confirm = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
   flushSync(() => { confirm.click(); });
@@ -186,10 +189,44 @@ test("the confirmation dialog supports Escape, focus restoration, and Enter", as
   expect(document.activeElement).toBe(view.button);
 
   flushSync(() => { view.button.click(); });
+  await drainUpdates();
   dialog = view.host.querySelector('[role="dialog"]') as HTMLElement;
   flushSync(() => { dialog.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event); });
   await drainUpdates();
   expect(postRequests).toBe(1);
   flushSync(() => { view.button.click(); view.root.unmount(); });
   view.host.remove();
+});
+
+test("provider changes synchronize every answer control before confirmation", async () => {
+  const elevenInfo = {
+    ...backendInfo,
+    backend: "elevenlabs",
+    options: backendInfo.options.map((option) => option.id === "elevenlabs" ? { ...option, available: true } : option),
+  };
+  let current = backendInfo;
+  globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/tts/backend" && init?.method === "POST") {
+      current = elevenInfo;
+      return Response.json(current);
+    }
+    if (url === "/api/tts/backend") return Response.json(current);
+    throw new Error("unexpected synthesis");
+  }) as unknown as typeof fetch;
+
+  const first = await mount("Provider first");
+  const second = await mount("Provider second");
+  flushSync(() => { first.button.click(); });
+  await drainUpdates();
+  const eleven = [...first.host.querySelectorAll("button")].find((button) => button.textContent?.startsWith("elevenlabs"))!;
+  flushSync(() => { eleven.click(); });
+  await drainUpdates();
+
+  flushSync(() => { second.button.click(); });
+  await drainUpdates();
+  expect(second.host.textContent).toContain("elevenlabs · eleven_multilingual_v2 · Rachel");
+  flushSync(() => { first.root.unmount(); second.root.unmount(); });
+  first.host.remove();
+  second.host.remove();
 });

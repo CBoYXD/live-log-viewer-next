@@ -417,6 +417,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "tts.playing": "Відтворення аудіо",
   "tts.stopped": "Зупинено",
   "tts.configError": "Конфігурація TTS недоступна",
+  "tts.backendChanged": "Провайдер TTS змінився. Перевірте оновлені дані та підтвердьте ще раз.",
   "tts.requestError": "Помилка запиту TTS ({status})",
   "tts.requestFailed": "Помилка запиту TTS",
   "tts.playError": "Браузер заблокував відтворення аудіо. Спробуйте ще раз.",

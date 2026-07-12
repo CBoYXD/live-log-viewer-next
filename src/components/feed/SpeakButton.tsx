@@ -17,21 +17,23 @@ interface AudioCacheEntry { url: string; bytes: number }
 
 let backendInfo: BackendInfo | null = null;
 let backendInfoPromise: Promise<BackendInfo> | null = null;
+const backendListeners = new Set<(value: BackendInfo) => void>();
 const audioCache = new Map<string, AudioCacheEntry>();
 let cachedBytes = 0;
 const MAX_CACHE_ENTRIES = 8;
 const MAX_CACHE_BYTES = 16 * 1024 * 1024;
 const SILENT_AUDIO = "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQQAAACAgICA";
 
-function loadBackendInfo(): Promise<BackendInfo> {
-  if (backendInfo) return Promise.resolve(backendInfo);
+function loadBackendInfo(force = false): Promise<BackendInfo> {
+  if (!force && backendInfo) return Promise.resolve(backendInfo);
+  if (force) backendInfoPromise = null;
   backendInfoPromise ??= fetch("/api/tts/backend")
     .then((response) => {
       if (!response.ok) throw new Error("TTS configuration unavailable");
       return response.json() as Promise<BackendInfo>;
     })
     .then((value) => {
-      backendInfo = value;
+      storeBackendInfo(value);
       return value;
     })
     .catch((error) => {
@@ -44,6 +46,7 @@ function loadBackendInfo(): Promise<BackendInfo> {
 function storeBackendInfo(value: BackendInfo): void {
   backendInfo = value;
   backendInfoPromise = Promise.resolve(value);
+  for (const listener of backendListeners) listener(value);
 }
 
 function stopActive(): void {
@@ -90,11 +93,14 @@ export function SpeakButton({ text }: { text: string }) {
   useEffect(() => {
     mounted.current = true;
     let current = true;
+    const syncInfo = (value: BackendInfo) => { if (current) setInfo(value); };
+    backendListeners.add(syncInfo);
     void loadBackendInfo()
       .then((value) => { if (current) setInfo(value); })
       .catch(() => { if (current) setError(translate(locale, "tts.configError")); });
     return () => {
       current = false;
+      backendListeners.delete(syncInfo);
       mounted.current = false;
       generation.current += 1;
       if (activeStop === ownedStop.current) stopActive();
@@ -219,7 +225,21 @@ export function SpeakButton({ text }: { text: string }) {
     audio.muted = true;
     audio.src = SILENT_AUDIO;
     const authorization = audio.play();
-    void synthesize(audio, authorization);
+    void loadBackendInfo(true)
+      .then((fresh) => {
+        if (cacheKey(fresh, text) !== key) {
+          audio.pause();
+          setInfo(fresh);
+          setError(t("tts.backendChanged"));
+          setConfirming(false);
+          return;
+        }
+        void synthesize(audio, authorization);
+      })
+      .catch(() => {
+        audio.pause();
+        setError(t("tts.configError"));
+      });
   };
 
   const toggle = () => {
@@ -229,7 +249,14 @@ export function SpeakButton({ text }: { text: string }) {
     }
     setError(null);
     if (cached) replay();
-    else setConfirming(true);
+    else {
+      void loadBackendInfo(true)
+        .then((fresh) => {
+          setInfo(fresh);
+          setConfirming(true);
+        })
+        .catch(() => setError(t("tts.configError")));
+    }
   };
 
   const pickBackend = async (backend: BackendId) => {
