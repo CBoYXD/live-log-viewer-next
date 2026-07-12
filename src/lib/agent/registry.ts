@@ -246,14 +246,15 @@ function receiptStillAwaitsResumeSuccessor(receipt: SpawnReceipt): boolean {
 const PATH_CORRELATION_WINDOW_MS = 30_000;
 
 function correlatePathPendingReceipts(file: RegistryFile, observations: ConversationObservation[]): Map<string, string> {
-  type PendingReceipt = { launchId: string; cwd: string; expectedStart: number };
-  type PendingObservation = { path: string; cwd: string; observedStart: number };
-  type Correlation = { count: number; distance: number; pairs: Array<[string, string]> };
+  type PendingReceipt = { launchId: string; cwd: string; accountId: string | null; expectedStart: number };
+  type PendingObservation = { path: string; cwd: string; accountId: string | null; observedStart: number };
+  type Pair = [string, string];
+  type Correlation = { count: number; distance: number; assignments: Pair[][] };
   const receipts: PendingReceipt[] = Object.values(file.receipts).flatMap((receipt) => {
     if (receipt.engine !== "codex" || receipt.state !== "path-pending" || receipt.artifactPath !== null || !receipt.pathCorrelation) return [];
     const expectedStart = Date.parse(receipt.pathCorrelation.startedAt);
     return Number.isFinite(expectedStart)
-      ? [{ launchId: receipt.launchId, cwd: receipt.pathCorrelation.cwd, expectedStart }]
+      ? [{ launchId: receipt.launchId, cwd: receipt.pathCorrelation.cwd, accountId: receipt.accountId, expectedStart }]
       : [];
   });
   const pendingObservations: PendingObservation[] = [];
@@ -267,47 +268,72 @@ function correlatePathPendingReceipts(file: RegistryFile, observations: Conversa
       && (conversationOwnsPath(conversation, observation.path)
         || (nativeId !== null && conversation.generations.some((generation) => generation.id === nativeId))));
     if (knownOwners.some((owner) => !scannerAllocatedProvisionalOwner(owner, observation.path))) continue;
-    pendingObservations.push({ path: observation.path, cwd: observation.launchProfile.cwd, observedStart });
+    pendingObservations.push({ path: observation.path, cwd: observation.launchProfile.cwd, accountId: observation.accountId, observedStart });
   }
   const matches = new Map<string, string>();
-  const cwdValues = new Set([...receipts.map((receipt) => receipt.cwd), ...pendingObservations.map((observation) => observation.cwd)]);
-  const prefer = (candidate: Correlation, current: Correlation | undefined): boolean => {
-    if (!current || candidate.count !== current.count) return !current || candidate.count > current.count;
-    if (candidate.distance !== current.distance) return candidate.distance < current.distance;
-    return JSON.stringify(candidate.pairs) < JSON.stringify(current.pairs);
+  const partitionKey = (value: { cwd: string; accountId: string | null }) => JSON.stringify([value.cwd, value.accountId]);
+  const partitions = new Set([...receipts.map(partitionKey), ...pendingObservations.map(partitionKey)]);
+  const advance = (table: Array<Array<Correlation | undefined>>, observationIndex: number, receiptIndex: number, candidate: Correlation) => {
+    const current = table[observationIndex]![receiptIndex];
+    if (!current || candidate.count > current.count || (candidate.count === current.count && candidate.distance < current.distance)) {
+      table[observationIndex]![receiptIndex] = {
+        ...candidate,
+        assignments: candidate.assignments.map((assignment) => [...assignment]),
+      };
+      return;
+    }
+    if (candidate.count !== current.count || candidate.distance !== current.distance) return;
+    const signatures = new Set(current.assignments.map((assignment) => JSON.stringify(assignment)));
+    for (const assignment of candidate.assignments) {
+      const signature = JSON.stringify(assignment);
+      if (!signatures.has(signature)) {
+        current.assignments.push(assignment);
+        signatures.add(signature);
+        if (current.assignments.length === 2) break;
+      }
+    }
   };
-  for (const cwd of cwdValues) {
-    const cwdReceipts = receipts.filter((receipt) => receipt.cwd === cwd)
+  for (const partition of partitions) {
+    const cwdReceipts = receipts.filter((receipt) => partitionKey(receipt) === partition)
       .sort((left, right) => left.expectedStart - right.expectedStart || left.launchId.localeCompare(right.launchId));
-    const cwdObservations = pendingObservations.filter((observation) => observation.cwd === cwd)
+    const cwdObservations = pendingObservations.filter((observation) => partitionKey(observation) === partition)
       .sort((left, right) => left.observedStart - right.observedStart || left.path.localeCompare(right.path));
+    const compatible = (observation: PendingObservation, receipt: PendingReceipt) =>
+      observation.observedStart >= receipt.expectedStart - 1_000
+      && observation.observedStart <= receipt.expectedStart + PATH_CORRELATION_WINDOW_MS;
+    if (cwdReceipts.length > 1 && cwdObservations.length > 1) {
+      const ambiguousObservation = cwdObservations.some((observation) =>
+        cwdReceipts.filter((receipt) => compatible(observation, receipt)).length > 1);
+      const ambiguousReceipt = cwdReceipts.some((receipt) =>
+        cwdObservations.filter((observation) => compatible(observation, receipt)).length > 1);
+      if (ambiguousObservation || ambiguousReceipt) continue;
+    }
     const table: Array<Array<Correlation | undefined>> = Array.from(
       { length: cwdObservations.length + 1 },
       () => Array<Correlation | undefined>(cwdReceipts.length + 1),
     );
-    table[0]![0] = { count: 0, distance: 0, pairs: [] };
+    table[0]![0] = { count: 0, distance: 0, assignments: [[]] };
     for (let observationIndex = 0; observationIndex <= cwdObservations.length; observationIndex += 1) {
       for (let receiptIndex = 0; receiptIndex <= cwdReceipts.length; receiptIndex += 1) {
         const current = table[observationIndex]![receiptIndex];
         if (!current) continue;
-        const advance = (nextObservation: number, nextReceipt: number, candidate: Correlation) => {
-          if (prefer(candidate, table[nextObservation]![nextReceipt])) table[nextObservation]![nextReceipt] = candidate;
-        };
-        if (observationIndex < cwdObservations.length) advance(observationIndex + 1, receiptIndex, current);
-        if (receiptIndex < cwdReceipts.length) advance(observationIndex, receiptIndex + 1, current);
+        if (observationIndex < cwdObservations.length) advance(table, observationIndex + 1, receiptIndex, current);
+        if (receiptIndex < cwdReceipts.length) advance(table, observationIndex, receiptIndex + 1, current);
         if (observationIndex >= cwdObservations.length || receiptIndex >= cwdReceipts.length) continue;
         const observation = cwdObservations[observationIndex]!;
         const receipt = cwdReceipts[receiptIndex]!;
-        if (observation.observedStart < receipt.expectedStart - 1_000
-          || observation.observedStart > receipt.expectedStart + PATH_CORRELATION_WINDOW_MS) continue;
-        advance(observationIndex + 1, receiptIndex + 1, {
+        if (!compatible(observation, receipt)) continue;
+        advance(table, observationIndex + 1, receiptIndex + 1, {
           count: current.count + 1,
           distance: current.distance + Math.abs(observation.observedStart - receipt.expectedStart),
-          pairs: [...current.pairs, [observation.path, receipt.launchId]],
+          assignments: current.assignments.map((assignment) => [...assignment, [observation.path, receipt.launchId]]),
         });
       }
     }
-    for (const [pathname, launchId] of table.at(-1)?.at(-1)?.pairs ?? []) matches.set(pathname, launchId);
+    const assignment = table.at(-1)?.at(-1)?.assignments;
+    if (assignment?.length === 1) {
+      for (const [pathname, launchId] of assignment[0]!) matches.set(pathname, launchId);
+    }
   }
   return matches;
 }

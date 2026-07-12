@@ -374,7 +374,7 @@ describe("agent registry", () => {
     });
   });
 
-  test("restart inventory pairs simultaneous same-cwd Codex receipts and repairs provisional owners", () => {
+  test("restart inventory pairs distinct same-cwd Codex windows and repairs provisional owners", () => {
     const store = registry();
     const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
     const childPaths = [
@@ -397,7 +397,7 @@ describe("agent registry", () => {
       return receipt.receipt;
     });
     const persisted = store.snapshot();
-    const launchStarts = ["2026-07-12T12:00:00.000Z", "2026-07-12T12:00:02.000Z"];
+    const launchStarts = ["2026-07-12T12:00:00.000Z", "2026-07-12T12:00:40.000Z"];
     for (const [index, receipt] of created.entries()) {
       persisted.receipts[receipt.launchId]!.state = "path-pending";
       persisted.receipts[receipt.launchId]!.pathCorrelation = { cwd: "/repo", startedAt: launchStarts[index]! };
@@ -410,7 +410,7 @@ describe("agent registry", () => {
       accountId: "terra",
       launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: parent.id }),
       turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
-      startedAt: index === 0 ? "2026-07-12T12:00:00.250Z" : "2026-07-12T12:00:02.250Z",
+      startedAt: index === 0 ? "2026-07-12T12:00:00.250Z" : "2026-07-12T12:00:40.250Z",
       observedAt: "2026-07-12T12:01:00.000Z",
     }));
     const restarted = new AgentRegistry(store.filename);
@@ -447,6 +447,81 @@ describe("agent registry", () => {
     expect(restarted.conversationForPath(childPaths[1]!)?.id).toBe(created[1]!.conversationId);
     expect(Object.keys(restarted.snapshot().conversations)).not.toContain(provisionalIds[0]);
     expect(Object.keys(restarted.snapshot().conversations)).not.toContain(provisionalIds[1]);
+  });
+
+  test("path-pending recovery partitions reversed Codex startup by birth account", () => {
+    const store = registry();
+    const first = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a" });
+    const second = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "b" });
+    if (first.kind !== "created" || second.kind !== "created") throw new Error("expected creates");
+    const persisted = store.snapshot();
+    persisted.receipts[first.receipt.launchId]!.state = "path-pending";
+    persisted.receipts[first.receipt.launchId]!.pathCorrelation = { cwd: "/repo", startedAt: "2026-07-12T12:00:00.000Z" };
+    persisted.receipts[second.receipt.launchId]!.state = "path-pending";
+    persisted.receipts[second.receipt.launchId]!.pathCorrelation = { cwd: "/repo", startedAt: "2026-07-12T12:00:01.000Z" };
+    fs.writeFileSync(store.filename, JSON.stringify(persisted));
+    const firstPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const secondPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+
+    const restarted = new AgentRegistry(store.filename);
+    restarted.reconcileConversations([{
+      engine: "codex",
+      path: secondPath,
+      accountId: "b",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      startedAt: "2026-07-12T12:00:02.000Z",
+      observedAt: "2026-07-12T12:01:00.000Z",
+    }, {
+      engine: "codex",
+      path: firstPath,
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      startedAt: "2026-07-12T12:00:10.000Z",
+      observedAt: "2026-07-12T12:01:00.000Z",
+    }]);
+
+    expect(restarted.conversationForPath(firstPath)?.id).toBe(first.receipt.conversationId);
+    expect(restarted.conversationForPath(secondPath)?.id).toBe(second.receipt.conversationId);
+    expect(restarted.conversationForPath(firstPath)?.generations.at(-1)?.accountId).toBe("a");
+    expect(restarted.conversationForPath(secondPath)?.generations.at(-1)?.accountId).toBe("b");
+  });
+
+  test("path-pending recovery leaves indistinguishable same-account launches unresolved", () => {
+    const store = registry();
+    const first = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a" });
+    const second = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a" });
+    if (first.kind !== "created" || second.kind !== "created") throw new Error("expected creates");
+    const persisted = store.snapshot();
+    for (const [index, receipt] of [first.receipt, second.receipt].entries()) {
+      persisted.receipts[receipt.launchId]!.state = "path-pending";
+      persisted.receipts[receipt.launchId]!.pathCorrelation = {
+        cwd: "/repo",
+        startedAt: index === 0 ? "2026-07-12T12:00:00.000Z" : "2026-07-12T12:00:01.000Z",
+      };
+    }
+    fs.writeFileSync(store.filename, JSON.stringify(persisted));
+    const observations = [
+      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl",
+      "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+    ].map((pathname, index) => ({
+      engine: "codex" as const,
+      path: pathname,
+      accountId: "a",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+      startedAt: index === 0 ? "2026-07-12T12:00:10.000Z" : "2026-07-12T12:00:02.000Z",
+      observedAt: "2026-07-12T12:01:00.000Z",
+    }));
+
+    const restarted = new AgentRegistry(store.filename);
+    restarted.reconcileConversations(observations);
+
+    expect(restarted.snapshot().receipts[first.receipt.launchId]).toMatchObject({ state: "path-pending", artifactPath: null });
+    expect(restarted.snapshot().receipts[second.receipt.launchId]).toMatchObject({ state: "path-pending", artifactPath: null });
+    expect(observations.map((observation) => restarted.conversationForPath(observation.path)?.id)).not.toContain(first.receipt.conversationId);
+    expect(observations.map((observation) => restarted.conversationForPath(observation.path)?.id)).not.toContain(second.receipt.conversationId);
   });
 
   test("settles observer then route exactly once with receipt-owned account and profile", () => {
