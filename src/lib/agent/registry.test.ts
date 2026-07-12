@@ -383,6 +383,67 @@ describe("agent registry", () => {
     }
   });
 
+  test("resume succession rebases a migration before provider work", () => {
+    const store = registry();
+    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const resumedPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const conversation = store.ensureConversation("codex", firstPath, "terra");
+    store.setConversationMigration(conversation.id, {
+      intentId: "resume-rebase",
+      phase: "requested",
+      targetId: "work",
+      revision: 1,
+      error: null,
+      sourceGenerationId: conversation.generations[0]!.id,
+      updatedAt: "2026-07-12T12:00:00.000Z",
+    });
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry(resumedPath));
+
+    expect(settled.kind).toBe("settled");
+    const resumed = store.conversation(conversation.id)!;
+    expect(resumed.generations.at(-1)?.path).toBe(resumedPath);
+    expect(resumed.migration?.sourceGenerationId).toBe(resumed.generations.at(-1)?.id);
+  });
+
+  test("resume succession is fenced after migration provider work starts", () => {
+    const store = registry();
+    const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const resumedPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const conversation = store.ensureConversation("codex", firstPath, "terra");
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.setConversationMigration(conversation.id, {
+      intentId: "resume-fence",
+      phase: "successor-starting",
+      targetId: "work",
+      revision: 1,
+      error: null,
+      sourceGenerationId: conversation.generations[0]!.id,
+      updatedAt: "2026-07-12T12:00:00.000Z",
+    });
+
+    expect(store.settleSpawn(begun.receipt.launchId, spawnEntry(resumedPath))).toMatchObject({
+      kind: "conflict",
+      code: "spawn_identity_conflict",
+    });
+    expect(store.conversation(conversation.id)?.generations.map((generation) => generation.path)).toEqual([firstPath]);
+  });
+
   test("treats a second rollout path with the same native session key as one conversation", () => {
     const store = registry();
     const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
@@ -443,6 +504,8 @@ describe("agent registry", () => {
     const successorPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
     const canonical = store.ensureConversation("codex", sourcePath, "terra");
     const snapshot = store.snapshot();
+    snapshot.conversations[canonical.id]!.createdAt = "2026-07-12T10:00:00.000Z";
+    snapshot.conversations[canonical.id]!.updatedAt = "2026-07-12T10:00:00.000Z";
     const provisionalId = "conversation_00000000-0000-4000-8000-000000000002";
     snapshot.conversations[provisionalId] = {
       ...structuredClone(canonical),
@@ -493,6 +556,32 @@ describe("agent registry", () => {
       childArtifactPath: childPath,
       parentArtifactPath: parentPath,
       source: "engine-native",
+    });
+  });
+
+  test("stronger engine-native evidence corrects an inferred parent", () => {
+    const store = registry();
+    const parentA = store.ensureConversation("codex", "/sessions/parent-a-019f4906-3f67-7b72-9fbc-9ec3b5ad1301.jsonl", "terra");
+    const parentB = store.ensureConversation("codex", "/sessions/parent-b-019f4906-3f67-7b72-9fbc-9ec3b5ad1302.jsonl", "terra");
+    const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1303.jsonl";
+    const observation = (parentConversationId: `conversation_${string}`, observedAt: string) => ({
+      engine: "codex" as const,
+      path: childPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId }),
+      turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+      observedAt,
+    });
+
+    store.reconcileConversations([observation(parentA.id, "2026-07-12T12:00:00.000Z")]);
+    const child = store.conversationForPath(childPath)!;
+    store.reconcileConversations([observation(parentB.id, "2026-07-12T12:01:00.000Z")]);
+
+    expect(store.conversation(child.id)?.generations[0]?.launchProfile.parentConversationId).toBe(parentB.id);
+    expect(store.snapshot().lineageEdges[child.id]).toMatchObject({
+      source: "engine-native",
+      parentConversationId: parentB.id,
+      parentArtifactPath: parentB.generations[0]?.path,
     });
   });
 

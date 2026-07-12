@@ -222,6 +222,13 @@ function migrationReadiness(
   return hasPendingDelivery ? "idle" : "deferred";
 }
 
+function resumeCanRebaseMigration(migration: ConversationMigration | null): boolean {
+  return migration === null
+    || migration.phase === "committed"
+    || migration.phase === "rolled-back"
+    || ((migration.phase === "waiting-turn" || migration.phase === "requested") && migration.providerReceipt === null);
+}
+
 function migrationReadinessSignature(
   file: RegistryFile,
   engine: Extract<AgentEngine, "claude" | "codex">,
@@ -884,6 +891,9 @@ export class AgentRegistry {
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
       }
+      if (input.purpose === "resume-successor" && existingConversation && !resumeCanRebaseMigration(existingConversation.migration)) {
+        throw new Error("conversation migration prevents resume succession");
+      }
       if (input.clientAttemptId) {
         const existing = Object.values(file.receipts).find((receipt) => receipt.clientAttemptId === input.clientAttemptId);
         if (existing) {
@@ -1050,6 +1060,9 @@ export class AgentRegistry {
       updatedAt: createdAt,
     };
     if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
+    if (receipt.purpose === "resume-successor" && !resumeCanRebaseMigration(conversation.migration)) {
+      return conflict("spawn_identity_conflict");
+    }
     if (receipt.purpose === "migration-successor") {
       const provisionalOwner = Object.values(file.conversations).find((candidate) => candidate.id !== conversation.id
         && candidate.engine === conversation.engine && conversationOwnsPath(candidate, entry.artifactPath));
@@ -1087,6 +1100,16 @@ export class AgentRegistry {
       }
       file.conversationRevision[conversation.engine] += 1;
       file.engineRouting[conversation.engine].revision += 1;
+      if (conversation.migration && (conversation.migration.phase === "waiting-turn" || conversation.migration.phase === "requested")) {
+        const resumedSource = conversation.generations.at(-1);
+        if (resumedSource) {
+          conversation.migration = {
+            ...conversation.migration,
+            sourceGenerationId: resumedSource.id,
+            updatedAt: createdAt,
+          };
+        }
+      }
     }
     if (receipt.purpose !== "migration-successor" && !conversation.generations.some((generation) => generation.path === entry.artifactPath)) {
       conversation.generations.push({
@@ -1407,6 +1430,8 @@ export class AgentRegistry {
         const priorAccountId = generation.accountId;
         const priorRole = generation.launchProfile.role;
         const priorTurnState = conversation.turn.state;
+        const lineage = file.lineageEdges[conversation.id];
+        const observedParentConversationId = observation.launchProfile.parentConversationId;
         generation.accountId = observation.accountId ?? generation.accountId;
         generation.launchProfile = {
           ...generation.launchProfile,
@@ -1419,7 +1444,9 @@ export class AgentRegistry {
           readOnly: generation.launchProfile.readOnly ?? observation.launchProfile.readOnly,
           title: generation.launchProfile.title ?? observation.launchProfile.title,
           project: observation.launchProfile.project ?? generation.launchProfile.project,
-          parentConversationId: generation.launchProfile.parentConversationId ?? observation.launchProfile.parentConversationId,
+          parentConversationId: lineage?.source === "viewer-spawn"
+            ? lineage.parentConversationId
+            : observedParentConversationId ?? generation.launchProfile.parentConversationId,
           role: generation.launchProfile.role === "root" || observation.launchProfile.role === "root" ? "root" : "worker",
           goal: observation.launchProfile.goal ?? generation.launchProfile.goal,
           plan: observation.launchProfile.plan ?? generation.launchProfile.plan,
