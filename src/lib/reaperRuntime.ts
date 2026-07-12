@@ -347,6 +347,21 @@ function viewerFlowMessageAllowance(flows: Flow[], pathname: string): number {
   return count;
 }
 
+/* A headless reviewer is launched straight through the CLI (startHeadlessReview),
+   not a Viewer spawn receipt, so its automated review instruction lands in the
+   transcript as one user-role message that no launch/delivery allowance covers.
+   Left uncounted, that single automated prompt would mark every finished
+   reviewer owner-authored and pin it forever — the exact opposite of the
+   immediate reviewer collapse #112 exists for. Grant the round's reviewer
+   transcript one allowance for that startup prompt; a genuine owner message on
+   top is the second and still trips the exemption. */
+function viewerReviewerLaunchAllowance(flows: Flow[], pathname: string): number {
+  for (const flow of flows) {
+    if (flow.rounds.some((round) => round.reviewerPath === pathname)) return 1;
+  }
+  return 0;
+}
+
 function authorshipEvidence(
   snapshot: ReturnType<AgentRegistry["snapshot"]>,
   hosts: TranscriptHost[],
@@ -391,7 +406,8 @@ function authorshipEvidence(
     if (userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
     if (missingTranscriptPaths.has(pathname)) continue;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
-      + viewerFlowMessageAllowance(flows, pathname);
+      + viewerFlowMessageAllowance(flows, pathname)
+      + viewerReviewerLaunchAllowance(flows, pathname);
     /* Stamp the mtime BEFORE reading: a transcript that grows during the scan
        ends up with a newer on-disk mtime than we record, so the board re-pins it
        as unverified until the next cycle rather than certifying content the

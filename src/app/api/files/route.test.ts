@@ -442,6 +442,27 @@ test("a message appended after a cached clean scan re-pins as unverified against
   expect(worker?.authorshipUnverified).toBe(true);
 });
 
+test("an unreadable transcript (non-ENOENT stat failure) fails closed to unverified (issue #112 finding)", async () => {
+  /* Only a CONFIRMED absence lets a clean stamp stand on the cached mtime. A
+     stat that fails for any other reason (EACCES/EIO/ENOTDIR) leaves freshness
+     unknown, so the hard exemption must fail closed rather than trust the cache. */
+  const blocker = path.join(stateDir, "blocker"); // a regular file...
+  fs.writeFileSync(blocker, "x");
+  const workerPath = path.join(blocker, "worker.jsonl"); // ...so statSync here throws ENOTDIR, not ENOENT
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [workerPath]: 3000 }, // a clean stamp that the cached mtime alone would certify
+  }));
+  scannedFiles = [{ ...file(workerPath), engine: "codex", mtime: 3000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const worker = body.files.find((entry) => entry.path === workerPath);
+  expect(worker?.authorshipUnverified).toBe(true);
+});
+
 test("authorship aggregates across the whole conversation lineage (issue #112 finding)", async () => {
   /* A user message recorded on an earlier generation/continuity path must pin
      the current generation even after the historical entry leaves the board. */
@@ -482,4 +503,45 @@ test("fail-closed freshness spans the lineage: an unscanned predecessor pins the
   const body = await response.json() as { files: FileEntry[] };
   const current = body.files.find((entry) => entry.path === currentPath);
   expect(current?.authorshipUnverified).toBe(true);
+});
+
+test("an uncertain live-mtime read (not ENOENT) fails closed to unverified (issue #112 finding)", async () => {
+  /* A stamp is only trustworthy against a KNOWN live mtime. EACCES/EIO/ENOTDIR
+     leave freshness unknown — mapping every stat error to the cached snapshot
+     mtime would falsely certify a transcript that may have grown since. Force a
+     non-ENOENT stat failure by nesting the transcript path under a regular file
+     (statSync → ENOTDIR) and confirm it stays pinned despite a fresh stamp. */
+  const blocker = path.join(stateDir, "blocker");
+  fs.writeFileSync(blocker, "not a directory\n");
+  const workerPath = path.join(blocker, "worker.jsonl"); // statSync(workerPath) → ENOTDIR
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [workerPath]: 5000 }, // stamp is fresh against the cached mtime below
+  }));
+  scannedFiles = [{ ...file(workerPath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const worker = body.files.find((entry) => entry.path === workerPath);
+  expect(worker?.authorshipUnverified).toBe(true);
+});
+
+test("a confirmed-gone transcript (ENOENT) is certified by its immutable snapshot mtime (issue #112 finding)", async () => {
+  /* A deleted transcript is immutable and off the board — a clean stamp at or
+     past its last-known mtime certifies it, so it is not needlessly pinned. */
+  const gonePath = "/sessions/gone-019f4906-3f67-7b72-9fbc-9ec3b5ad1404.jsonl"; // never created → ENOENT
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [gonePath]: 5000 },
+  }));
+  scannedFiles = [{ ...file(gonePath), engine: "codex", mtime: 4000 }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const gone = body.files.find((entry) => entry.path === gonePath);
+  expect(gone?.authorshipUnverified).toBeUndefined();
 });

@@ -118,25 +118,29 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   }
   const filesByPath = new Map(files.map((file) => [file.path, file] as const));
   const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
-  /* Current on-disk mtime, memoized per request. A clean stamp must be checked
-     against the LIVE filesystem, not the scan snapshot's mtime: the files scan
-     is a cache that a GET may reuse (scanCache) while a user appends a message,
-     so a stamp taken before the append would look fresh against the stale
-     cached mtime and falsely certify a now-owner-authored transcript. statSync
-     sees the append and re-pins it unverified. Bounded — only paths that carry a
-     stamp reach here (an unstamped lineage path already fails closed). */
-  const liveMtime = new Map<string, number | null>();
-  const currentMtime = (pathname: string): number | null => {
-    const cached = liveMtime.get(pathname);
-    if (cached !== undefined) return cached;
-    let observed: number | null = null;
+  /* Live on-disk mtime probe, memoized per request. A clean stamp must be
+     checked against the LIVE filesystem, not the scan snapshot's mtime: the
+     files scan is a cache that a GET may reuse (scanCache) while a user appends a
+     message, so a stamp taken before the append would look fresh against the
+     stale cached mtime and falsely certify a now-owner-authored transcript. A
+     `mtime` probe sees the append and re-pins it unverified. A CONFIRMED absence
+     (ENOENT) means the transcript is gone — immutable and off the board — so the
+     snapshot mtime stands. Any OTHER stat error (EACCES, EIO, transient
+     exhaustion) leaves freshness UNKNOWN, and the hard exemption fails closed:
+     unknown → unverified. Bounded — only paths that carry a stamp reach here. */
+  type MtimeProbe = { kind: "mtime"; value: number } | { kind: "gone" } | { kind: "uncertain" };
+  const mtimeProbes = new Map<string, MtimeProbe>();
+  const probeMtime = (pathname: string): MtimeProbe => {
+    const cached = mtimeProbes.get(pathname);
+    if (cached) return cached;
+    let probe: MtimeProbe;
     try {
-      observed = fs.statSync(pathname).mtimeMs / 1000;
-    } catch {
-      observed = null;
+      probe = { kind: "mtime", value: fs.statSync(pathname).mtimeMs / 1000 };
+    } catch (error) {
+      probe = (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "gone" } : { kind: "uncertain" };
     }
-    liveMtime.set(pathname, observed);
-    return observed;
+    mtimeProbes.set(pathname, probe);
+    return probe;
   };
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
@@ -154,11 +158,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const unverified = [...lineage].some((pathname) => {
       const stamp = scannedAt.get(pathname);
       if (stamp === undefined) return true;
-      /* Prefer the live on-disk mtime; fall back to the scan snapshot only when
-         the transcript is gone (a deleted transcript is immutable — the stamp
-         stands, and there is nothing left to collapse anyway). */
-      const observed = currentMtime(pathname) ?? filesByPath.get(pathname)?.mtime;
-      return observed !== undefined && stamp < observed;
+      const probe = probeMtime(pathname);
+      if (probe.kind === "uncertain") return true; // fail closed on an unreadable transcript
+      if (probe.kind === "mtime") return stamp < probe.value;
+      /* Confirmed gone: immutable, so the last-known snapshot mtime certifies it. */
+      const cachedMtime = filesByPath.get(pathname)?.mtime;
+      return cachedMtime !== undefined && stamp < cachedMtime;
     });
     if (unverified) file.authorshipUnverified = true;
   }
