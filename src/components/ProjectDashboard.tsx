@@ -23,6 +23,8 @@ import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { deckKey } from "./scheme/agentLinks";
+import { computeWorkerStacks } from "./scheme/workerCollapse";
+import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
@@ -199,6 +201,18 @@ export function ProjectDashboard({
      reload — the queue can route to its quietest members while the manual
      column state stays untouched. */
   const [ephemeral, setEphemeral] = useState<string[]>([]);
+  /* Wall clock for the worker auto-collapse idle window (issue #112). Starts at
+     0 so the server render and first client render agree (no hydration skew);
+     the first tick lands the real time, and reviewer verdicts collapse without
+     waiting on the clock at all. */
+  const [nowMs, setNowMs] = useState(0);
+
+  useEffect(() => {
+    const tick = () => setNowMs(Date.now());
+    tick();
+    const id = window.setInterval(tick, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
@@ -585,6 +599,20 @@ export function ProjectDashboard({
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
   const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
   const renderableFlows = renderableFlowIds(flows, new Set(pipelineLayout.nodes.map((node) => node.file.path)));
+  /* Everything the scheme already draws — full nodes, mini-stack rows, reviewer
+     round decks: worker auto-collapse must never fold a card that is still
+     visible on the canvas, so these are excluded up front (issue #112). Derived
+     inline (like pipelineLayout above) so the React Compiler owns the caching —
+     a manual useMemo over the non-memoized pipelineLayout can't be preserved. */
+  const renderedPaths = new Set<string>();
+  for (const node of pipelineLayout.nodes) renderedPaths.add(node.file.path);
+  for (const stack of pipelineLayout.stacks) for (const item of stack.items) renderedPaths.add(item.file.path);
+  for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) renderedPaths.add(round.file.path);
+  /* Durable manual placements/expansions pin a card against auto-collapse; a
+     hand-opened worker survives reloads through these same board lists. */
+  const pinnedPaths = new Set([...prefs.manual, ...prefs.expanded]);
+  const workerStacks = computeWorkerStacks({ files, project, flows, pipelines, renderedPaths, pinnedPaths, nowMs });
+  const workerStackPaths = new Set(workerStacks.flatMap((stack) => stack.items.map((file) => file.path)));
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
@@ -830,9 +858,21 @@ export function ProjectDashboard({
           phone the strip, the map and the toast cover its job. */}
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
 
-      {!hasArchiveNodes && residual.length ? (
-        <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
-      ) : null}
+      {/* Worker-class cards that have auto-collapsed fold into per-flow /
+          per-worktree stacks here (issue #112) instead of vanishing to the
+          switchboard; owner-touched and live cards are never included. */}
+      <WorkerStacks stacks={workerStacks} files={files} flows={flows} onSelect={openSwitchboardFile} />
+
+      {(() => {
+        /* A collapsed worker already lives in its stack above; keep it out of
+           the residual strip so a card is never listed twice. */
+        const residualItems = workerStackPaths.size
+          ? residual.filter((file) => !workerStackPaths.has(file.path))
+          : residual;
+        return !hasArchiveNodes && residualItems.length ? (
+          <ResidualStrip items={residualItems} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
+        ) : null;
+      })()}
 
       <TaskToastHost />
     </div>

@@ -1,0 +1,266 @@
+import { describe, expect, test } from "bun:test";
+
+import type { Flow, Round } from "@/lib/flows/types";
+import type { FileEntry } from "@/lib/types";
+
+import {
+  classifyWorker,
+  computeWorkerStacks,
+  DEFAULT_WORKER_COLLAPSE_IDLE_MS,
+  isCollapseExempt,
+  pipelineStageAgentPaths,
+  reviewerRoundFinished,
+  shouldCollapseWorker,
+} from "./workerCollapse";
+
+const NOW = 2_000_000_000_000; // fixed clock; tests never read the wall clock
+const NOW_SEC = NOW / 1000;
+
+function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
+  return {
+    root: "claude-projects",
+    name: overrides.path,
+    project: "demo",
+    title: overrides.path,
+    engine: "claude",
+    kind: "session",
+    fmt: "claude",
+    parent: null,
+    mtime: NOW_SEC - 3600, // an hour idle unless overridden
+    size: 10,
+    activity: "idle",
+    proc: null,
+    pid: null,
+    model: null,
+    pendingQuestion: null,
+    waitingInput: null,
+    ...overrides,
+  };
+}
+
+const roleConfig = { engine: "claude" as const, model: null, effort: null };
+
+function round(overrides: Partial<Round> = {}): Round {
+  return {
+    n: 1,
+    reviewerPath: "/rev",
+    findingsPath: null,
+    triggeredBy: "marker",
+    readyNote: null,
+    verdict: null,
+    findingsCount: null,
+    startedAt: "2026-07-05T00:00:00Z",
+    reviewedAt: null,
+    relayedAt: null,
+    error: null,
+    ...overrides,
+  };
+}
+
+function flow(overrides: Partial<Flow> & { id: string; implementerPath: string }): Flow {
+  return {
+    template: "implement-review-loop",
+    project: "demo",
+    cwd: "/tmp",
+    roles: { implementer: roleConfig, reviewer: roleConfig },
+    baseRef: "abc",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    stateDetail: null,
+    rounds: [round()],
+    createdAt: "2026-07-05T00:00:00Z",
+    closedAt: null,
+    ...overrides,
+  };
+}
+
+const lineage = (flows: Flow[] = [], pipelineStagePaths = new Set<string>()) => ({ flows, pipelineStagePaths });
+
+const ctx = (over: Partial<Parameters<typeof shouldCollapseWorker>[1]> = {}) => ({
+  flows: [] as Flow[],
+  pipelineStagePaths: new Set<string>(),
+  nowMs: NOW,
+  idleMs: DEFAULT_WORKER_COLLAPSE_IDLE_MS,
+  pinnedPaths: new Set<string>(),
+  ...over,
+});
+
+describe("classifyWorker", () => {
+  test("flow reviewer and implementer annotations win", () => {
+    const reviewer = entry({ path: "/rev", flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    const impl = entry({ path: "/impl", flow: { flowId: "f1", flowRole: "implementer", round: null } });
+    expect(classifyWorker(reviewer, lineage())).toBe("flow-reviewer");
+    expect(classifyWorker(impl, lineage())).toBe("flow-implementer");
+  });
+
+  test("pipeline stage ownership is worker-class", () => {
+    const stage = entry({ path: "/stage" });
+    expect(classifyWorker(stage, lineage([], new Set(["/stage"])))).toBe("pipeline-stage");
+  });
+
+  test("agent-spawned subagents and codex children are spawned workers", () => {
+    const subagent = entry({ path: "/sub", kind: "subagent", parent: "/root" });
+    const codexChild = entry({ path: "/c", root: "codex-sessions", engine: "codex", parent: "/root" });
+    expect(classifyWorker(subagent, lineage())).toBe("spawned-worker");
+    expect(classifyWorker(codexChild, lineage())).toBe("spawned-worker");
+  });
+
+  test("an owner-started root conversation is not worker-class", () => {
+    const root = entry({ path: "/root" });
+    expect(classifyWorker(root, lineage())).toBeNull();
+  });
+});
+
+describe("reviewerRoundFinished", () => {
+  test("true on verdict, reviewedAt, error, or terminalAt", () => {
+    expect(reviewerRoundFinished(round({ verdict: "APPROVE" }))).toBe(true);
+    expect(reviewerRoundFinished(round({ reviewedAt: "2026-07-05T01:00:00Z" }))).toBe(true);
+    expect(reviewerRoundFinished(round({ error: "boom" }))).toBe(true);
+    expect(reviewerRoundFinished(round({ terminalAt: "2026-07-05T01:00:00Z" }))).toBe(true);
+  });
+  test("false while a round is still reviewing", () => {
+    expect(reviewerRoundFinished(round())).toBe(false);
+  });
+});
+
+describe("isCollapseExempt — hard exemptions", () => {
+  test("a user-authored message pins the card forever", () => {
+    const file = entry({ path: "/w", kind: "subagent", parent: "/r", userAuthored: true });
+    expect(isCollapseExempt(file, ctx())).toBe(true);
+    expect(shouldCollapseWorker(file, ctx())).toBe(false);
+  });
+
+  test("live / stalled / running / awaiting-input work is never collapsed", () => {
+    for (const over of [
+      { activity: "live" as const },
+      { activity: "stalled" as const },
+      { proc: "running" as const },
+      { pendingQuestion: { kind: "text" } as unknown as FileEntry["pendingQuestion"] },
+      { waitingInput: {} as unknown as FileEntry["waitingInput"] },
+    ]) {
+      const file = entry({ path: "/w", kind: "subagent", parent: "/r", ...over });
+      expect(isCollapseExempt(file, ctx())).toBe(true);
+    }
+  });
+
+  test("an in-flight account migration pins the card", () => {
+    const migrating = entry({
+      path: "/w",
+      kind: "subagent",
+      parent: "/r",
+      migration: { intentId: "i", trigger: "manual", phase: "verifying", targetAccountId: "a", failure: null },
+    });
+    expect(isCollapseExempt(migrating, ctx())).toBe(true);
+    const committed = entry({
+      path: "/w",
+      kind: "subagent",
+      parent: "/r",
+      migration: { intentId: "i", trigger: "manual", phase: "committed", targetAccountId: "a", failure: null },
+    });
+    expect(isCollapseExempt(committed, ctx())).toBe(false);
+  });
+
+  test("an explicit manual/expanded placement pins the card", () => {
+    const file = entry({ path: "/w", kind: "subagent", parent: "/r" });
+    expect(shouldCollapseWorker(file, ctx({ pinnedPaths: new Set(["/w"]) }))).toBe(false);
+  });
+});
+
+describe("shouldCollapseWorker", () => {
+  test("a finished reviewer round collapses immediately, even while fresh", () => {
+    const reviewer = entry({
+      path: "/rev",
+      activity: "recent",
+      mtime: NOW_SEC - 5, // 5 s old — well inside the idle window
+      flow: { flowId: "f1", flowRole: "reviewer", round: 1 },
+    });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(true);
+  });
+
+  test("a reviewer still reviewing is not collapsed while fresh", () => {
+    const reviewer = entry({
+      path: "/rev",
+      activity: "recent",
+      mtime: NOW_SEC - 5,
+      flow: { flowId: "f1", flowRole: "reviewer", round: 1 },
+    });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(shouldCollapseWorker(reviewer, ctx({ flows }))).toBe(false);
+  });
+
+  test("a non-reviewer worker collapses only past the idle window", () => {
+    const fresh = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 60 });
+    const stale = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 16 * 60 });
+    expect(shouldCollapseWorker(fresh, ctx())).toBe(false);
+    expect(shouldCollapseWorker(stale, ctx())).toBe(true);
+  });
+
+  test("the idle window is configurable", () => {
+    const file = entry({ path: "/w", kind: "subagent", parent: "/r", mtime: NOW_SEC - 6 * 60 });
+    expect(shouldCollapseWorker(file, ctx({ idleMs: 15 * 60 * 1000 }))).toBe(false);
+    expect(shouldCollapseWorker(file, ctx({ idleMs: 5 * 60 * 1000 }))).toBe(true);
+  });
+});
+
+describe("pipelineStageAgentPaths", () => {
+  test("collects every attempt's agent transcript", () => {
+    const pipelines = [
+      {
+        runs: [{ attempts: [{ agentPath: "/a" }, { agentPath: null }] }, { attempts: [{ agentPath: "/b" }] }],
+      },
+    ] as unknown as Parameters<typeof pipelineStageAgentPaths>[0];
+    expect(pipelineStageAgentPaths(pipelines)).toEqual(new Set(["/a", "/b"]));
+  });
+});
+
+describe("computeWorkerStacks", () => {
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
+
+  test("groups collapse-eligible workers per flow, then per worktree", () => {
+    const flowWorker = stale({ path: "/rev", flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+    const worktreeWorker = stale({ path: "/w", kind: "subagent", parent: "/root", worktree: "feat" });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    const stacks = computeWorkerStacks({
+      files: [flowWorker, worktreeWorker],
+      project: "demo",
+      flows,
+      renderedPaths: new Set(),
+      pinnedPaths: new Set(),
+      nowMs: NOW,
+    });
+    expect(stacks.map((s) => s.kind)).toEqual(["flow", "worktree"]);
+    expect(stacks[0]!.items.map((f) => f.path)).toEqual(["/rev"]);
+    expect(stacks[1]!.items.map((f) => f.path)).toEqual(["/w"]);
+  });
+
+  test("excludes conversations already drawn on the scheme", () => {
+    const worker = stale({ path: "/w", kind: "subagent", parent: "/root" });
+    const stacks = computeWorkerStacks({
+      files: [worker],
+      project: "demo",
+      flows: [],
+      renderedPaths: new Set(["/w"]),
+      pinnedPaths: new Set(),
+      nowMs: NOW,
+    });
+    expect(stacks).toHaveLength(0);
+  });
+
+  test("never collapses an owner-started root or a user-authored worker", () => {
+    const root = stale({ path: "/root" });
+    const touched = stale({ path: "/w", kind: "subagent", parent: "/root", userAuthored: true });
+    const stacks = computeWorkerStacks({
+      files: [root, touched],
+      project: "demo",
+      flows: [],
+      renderedPaths: new Set(),
+      pinnedPaths: new Set(),
+      nowMs: NOW,
+    });
+    expect(stacks).toHaveLength(0);
+  });
+});

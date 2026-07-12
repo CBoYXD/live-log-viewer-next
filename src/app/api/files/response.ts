@@ -14,6 +14,7 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { readUserAuthoredPaths } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import type { FilesResponse } from "@/lib/types";
@@ -92,6 +93,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   overlaySessionTitles(files);
+  /* Human-authorship pin for the board's worker-class auto-collapse (issue
+     #112): the reaper's sticky evidence (PR #125) marks any transcript that
+     carries a real user message. Authorship follows account-migration
+     succession through `predecessorPath` so a renamed successor keeps the pin. */
+  const userAuthored = readUserAuthoredPaths();
+  if (userAuthored.size) {
+    for (const file of files) {
+      if (userAuthored.has(file.path) || (file.predecessorPath && userAuthored.has(file.predecessorPath))) {
+        file.userAuthored = true;
+      }
+    }
+  }
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
