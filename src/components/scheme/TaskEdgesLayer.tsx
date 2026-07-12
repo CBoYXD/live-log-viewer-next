@@ -6,7 +6,7 @@ import { TASK_TONES } from "@/components/tasks/taskModel";
 
 import type { SchemeRect } from "./layout";
 import { MOVE_EASE, MOVE_MS } from "./nodes";
-import { routeTaskEdges, type TaskEdgeGeom, type TaskEdgeObstacle } from "./taskGeometry";
+import { routeTaskEdges, taskEdgesSignature, type TaskEdgeGeom, type TaskEdgeObstacle } from "./taskGeometry";
 
 /* Coral of a failed delivery beats the task's own status tone. */
 const FAILED_COLOR = "#d97757";
@@ -48,11 +48,18 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
   onRetry: (taskId: string, path: string) => void;
 }) {
   /* Route all edges together so they fan off coincident tracks, avoid every card
-     and container but their own endpoints, and untangle edge-to-edge crossings. */
-  const routed = useMemo(() => {
-    const routes = routeTaskEdges(edges, cards, containers);
-    return edges.map((edge) => ({ edge, route: routes.get(edge.key)! }));
-  }, [edges, cards, containers]);
+     and container but their own endpoints, and untangle edge-to-edge crossings.
+     The global pass is the layer's one heavy computation, and the 10 s poll hands
+     us fresh arrays every tick, so it is cached on a geometry signature: an
+     unchanged board reuses the routes instead of recomputing them on the render
+     thread, and only a real move re-runs the pass (issue #17). */
+  const sig = useMemo(() => taskEdgesSignature(edges, cards, containers), [edges, cards, containers]);
+  const routes = useMemo(
+    () => routeTaskEdges(edges, cards, containers),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the geometry signature; edges/cards/containers change identity every poll but not content
+    [sig],
+  );
+  const routed = useMemo(() => edges.map((edge) => ({ edge, route: routes.get(edge.key)! })), [edges, routes]);
   if (!edges.length) return null;
   return (
     <svg

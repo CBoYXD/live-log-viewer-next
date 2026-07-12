@@ -14,9 +14,11 @@ import {
   TASK_W,
   TASK_WORLD_MARGIN,
   taskCardHeight,
+  taskEdgesSignature,
   taskRect,
   taskWorldBounds,
   type TaskEdgeGeom,
+  type TaskEdgeObstacle,
   type TaskTargetSource,
 } from "./taskGeometry";
 import type { SchemeRect } from "./layout";
@@ -155,6 +157,18 @@ describe("taskRect / taskCardHeight", () => {
     const oneChar = taskCardHeight(task({ id: "t", text: "x" }));
     const wideRun = taskCardHeight(task({ id: "t", text: "W".repeat(40) }));
     expect(wideRun).toBeGreaterThan(oneChar);
+  });
+
+  test("word-boundary wrapping is bounded, not just character packing (Finding)", () => {
+    /* Twenty 10-'W' words wrap one-per-row in the 236px box (each word is ~118px,
+       two don't fit), so the body hits its 340px cap (~378px card with a source
+       chip). A length÷chars estimate packs them and undercounts to ~283px; the
+       greedy word-wrap bound must cover the real render. */
+    const twentyWords = Array.from({ length: 20 }, () => "WWWWWWWWWW").join(" ");
+    const h = taskCardHeight(
+      task({ id: "t", text: twentyWords, source: { path: "/n", ts: null, text: "x", fingerprint: "fp", engine: "codex" } }),
+    );
+    expect(h).toBeGreaterThanOrEqual(378);
   });
 
   test("standalone carriage returns each count as a rendered line (Finding 2)", () => {
@@ -612,5 +626,101 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     const asn = geom("t::/p", 0, 0, 300, 300);
     const routes = routeTaskEdges([src, asn], [], []);
     expect(routes.get(src.key)!.d).not.toBe(routes.get(asn.key)!.d);
+  });
+
+  test("stays within the render budget at the 300-task ceiling (Finding 2)", () => {
+    /* The benchmark shape: 300 spread source edges, one placed card each, twelve
+       panes. Broad-phase culling plus the reduction cap keep the whole global
+       pass well under a frame-budget ceiling; the un-bounded version took ~10s. */
+    const edges: TaskEdgeGeom[] = [];
+    const cards: Array<SchemeRect & { id: string }> = [];
+    for (let i = 0; i < 300; i++) {
+      const cx = (i % 10) * 700;
+      const cy = Math.floor(i / 10) * 240;
+      edges.push(geom("e" + String(i).padStart(3, "0"), cx, cy, cx + 320, cy + 400));
+      cards.push({ id: "e" + String(i).padStart(3, "0"), x: cx - 130, y: cy - 40, w: 260, h: 80 });
+    }
+    const panes: SchemeRect[] = Array.from({ length: 12 }, (_, i) => ({ x: (i % 6) * 700 + 200, y: Math.floor(i / 6) * 800 + 100, w: 600, h: 680 }));
+    const t0 = performance.now();
+    const routes = routeTaskEdges(edges, cards, panes);
+    expect(performance.now() - t0).toBeLessThan(1500);
+    expect(routes.size).toBe(300);
+  });
+
+  test("order-independent under broad-phase culling and the reduction cap", () => {
+    /* Determinism must survive the bounding-box short-circuit and the pass. D
+       crosses A/B/C, engaging the reduction. */
+    const edges = [geom("A", 0, 0, 400, 0), geom("B", 0, 110, 400, 110), geom("C", 0, 220, 400, 40), geom("D", 60, -60, 340, 320)];
+    const card = { id: "A", x: 180, y: -140, w: 40, h: 280 };
+    const forward = routeTaskEdges(edges, [card], []);
+    const reversed = routeTaskEdges([...edges].reverse(), [card], []);
+    for (const e of edges) {
+      expect(reversed.get(e.key)!.d).toBe(forward.get(e.key)!.d);
+      expect(reversed.get(e.key)!.crosses).toBe(forward.get(e.key)!.crosses);
+    }
+  });
+});
+
+describe("routeTaskEdges — render-thread cost (Finding 2)", () => {
+  /* A star of edges through a shared centre: every route's bounds overlap, so the
+     broad phase can't cull the edge-vs-edge pass — the pathological shape for the
+     global router. */
+  function star(n: number): { edges: TaskEdgeGeom[]; cards: TaskEdgeObstacle[] } {
+    const edges: TaskEdgeGeom[] = [];
+    const cards: TaskEdgeObstacle[] = [];
+    const R = 600;
+    const cx = 1000;
+    const cy = 1000;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const x1 = cx + Math.cos(a) * R;
+      const y1 = cy + Math.sin(a) * R;
+      const x2 = cx - Math.cos(a) * R;
+      const y2 = cy - Math.sin(a) * R;
+      cards.push({ id: "t" + i, x: x1 - 130, y: y1 - 20, w: 260, h: 300 });
+      edges.push({ key: "t" + i + "::/n", taskId: "t" + i, relation: "assignment", path: "/n", x1, y1, x2, y2, status: "assigned", failed: false, error: null });
+    }
+    return { edges, cards };
+  }
+
+  test("routes the 300-task ceiling well under a frame-budget's worth of seconds", () => {
+    /* The Finding-2 regression: an earlier build spent 9.86 s on 200 edges,
+       blocking the render thread. The control-hull cull keeps obstacle routing
+       near the cards actually on each path, so the whole pass stays double-digit
+       ms even at the 300-task ceiling. A generous ceiling here (still 60× under
+       the old 200-edge time) keeps the guard robust across CI hardware. */
+    const { edges, cards } = star(300);
+    const t0 = performance.now();
+    const routes = routeTaskEdges(edges, cards, []);
+    const dt = performance.now() - t0;
+    expect(routes.size).toBe(300);
+    expect(dt).toBeLessThan(1500);
+  });
+});
+
+describe("taskEdgesSignature — poll-stable route cache key (Finding 2)", () => {
+  function geom(key: string, x1: number, y1: number, x2: number, y2: number): TaskEdgeGeom {
+    return { key, taskId: key, relation: "assignment", path: "/" + key, x1, y1, x2, y2, status: "assigned", failed: false, error: null };
+  }
+  const edges = [geom("a", 0, 0, 300, 300)];
+  const cards: TaskEdgeObstacle[] = [{ id: "a", x: 10, y: 10, w: 260, h: 100 }];
+
+  test("identical geometry in fresh arrays yields the same signature", () => {
+    const a = taskEdgesSignature(edges, cards, []);
+    const b = taskEdgesSignature([geom("a", 0, 0, 300, 300)], [{ id: "a", x: 10, y: 10, w: 260, h: 100 }], []);
+    expect(a).toBe(b);
+  });
+
+  test("sub-pixel jitter does not bust the cache", () => {
+    const a = taskEdgesSignature(edges, cards, []);
+    const b = taskEdgesSignature([geom("a", 0.2, -0.1, 300.4, 299.6)], cards, []);
+    expect(a).toBe(b);
+  });
+
+  test("a moved edge, moved card, or new container all change the signature", () => {
+    const base = taskEdgesSignature(edges, cards, []);
+    expect(taskEdgesSignature([geom("a", 0, 40, 300, 300)], cards, [])).not.toBe(base);
+    expect(taskEdgesSignature(edges, [{ id: "a", x: 80, y: 10, w: 260, h: 100 }], [])).not.toBe(base);
+    expect(taskEdgesSignature(edges, cards, [{ x: 0, y: 0, w: 10, h: 10 }])).not.toBe(base);
   });
 });

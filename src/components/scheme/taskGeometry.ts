@@ -20,9 +20,15 @@ const STRIP_H = 6;
 const PAD_Y = 20;
 const LINE_H = 17;
 const BODY_CONTENT_W = TASK_W - 24;
-/* Widest bold glyph advance at 12.5px; the fewest characters a full line can
-   hold, so the most lines a given length can wrap to. */
+/* Upper-bound advances at 12.5px bold: the widest glyph (W/M ≈ 11.8, rounded up
+   to 13) and a space (≈ 3.4, rounded up to 5). Using widths ≥ the real ones
+   makes the wrap simulation a provable upper bound — real narrower glyphs only
+   pack more per line, never fewer, so the estimated row count never falls short
+   of what Chromium renders. */
 const MAX_GLYPH_W = 13;
+const MAX_SPACE_W = 5;
+/* Characters that fit on one full row at the widest glyph — the break-words wrap
+   width for an over-long single word. */
 const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
 /* Rendered chip block is 28m + 4 (each chip h-6 = 24, gap-1 = 4 between rows,
    pb-2 = 8 under the last), so the per-row budget must be the full 24 + 4 gap =
@@ -33,9 +39,50 @@ const CHIP_ROW_H = 28;
 const CHIP_PAD = 8;
 
 /**
+ * Worst-case rendered row count for one hard line under `whitespace-pre-wrap` +
+ * `break-words`. Greedy word wrap using the upper-bound advances above: a word
+ * that would overflow the current row starts a new one, and a word wider than a
+ * whole row breaks at character boundaries. Because the widths are upper bounds,
+ * real text packs at least this tightly, so the result never undercounts the
+ * rendered rows — closing the word-boundary gap a plain length÷chars estimate
+ * misses (twenty wide words wrap to twenty rows, not the packed count).
+ */
+function hardLineRows(line: string): number {
+  let rows = 1;
+  let used = 0; // px consumed on the current row
+  for (const token of line.match(/\s+|\S+/g) ?? []) {
+    if (/\s/.test(token)) {
+      used += token.length * MAX_SPACE_W;
+      while (used > BODY_CONTENT_W) {
+        rows++;
+        used -= BODY_CONTENT_W;
+      }
+      continue;
+    }
+    const width = token.length * MAX_GLYPH_W;
+    if (width <= BODY_CONTENT_W) {
+      if (used > 0 && used + width > BODY_CONTENT_W) {
+        rows++;
+        used = width;
+      } else {
+        used += width;
+      }
+    } else {
+      /* break-words splits an over-long word across full rows. */
+      if (used > 0) rows++;
+      const full = Math.ceil(token.length / CHARS_PER_LINE);
+      rows += full - 1;
+      used = (token.length - (full - 1) * CHARS_PER_LINE) * MAX_GLYPH_W;
+    }
+  }
+  return rows;
+}
+
+/**
  * Estimated on-board height of a task card: status strip + wrapped text
  * (capped at the internal-scroll threshold) + one chip row per assignment.
- * Deliberately conservative — see the wrap-width note above — so the returned
+ * A conservative upper bound of the rendered card — the wrap simulation counts
+ * rows against upper-bound glyph widths and every hard break — so the returned
  * box always contains the rendered card and the collision pass never lets two
  * cards overlap on screen.
  */
@@ -45,7 +92,7 @@ export function taskCardHeight(task: Pick<BoardTask, "text" | "assignments" | "s
      or a lone LF — so a string of standalone `\r`s can't hide extra rendered
      rows inside one counted line and undercount the height. */
   for (const raw of task.text.split(/\r\n?|\n/)) {
-    lines += Math.max(1, Math.ceil(raw.length / CHARS_PER_LINE));
+    lines += hardLineRows(raw);
   }
   const bodyH = Math.min(lines * LINE_H, TASK_BODY_MAX) + PAD_Y;
   const chipRows = task.assignments.length + (task.source ? 1 : 0);
@@ -290,6 +337,21 @@ function cubicHitsAny(
   obstacles: readonly SchemeRect[],
 ): boolean {
   if (!obstacles.length) return false;
+  /* Broad phase: a cubic never leaves the convex hull of its four control points,
+     so its bounds are the min/max of those points (plus the clearance pad). An
+     obstacle outside that box can't be hit — cull it with cheap number compares
+     before the per-segment Liang–Barsky test, so routing one edge stays near the
+     handful of cards actually near its path instead of scanning the whole board
+     (issue #17). */
+  const hullMinX = Math.min(x1, c1x, c2x, x2) - ROUTE_CLEARANCE;
+  const hullMaxX = Math.max(x1, c1x, c2x, x2) + ROUTE_CLEARANCE;
+  const hullMinY = Math.min(y1, c1y, c2y, y2) - ROUTE_CLEARANCE;
+  const hullMaxY = Math.max(y1, c1y, c2y, y2) + ROUTE_CLEARANCE;
+  const near: SchemeRect[] = [];
+  for (const rect of obstacles) {
+    if (rect.x <= hullMaxX && rect.x + rect.w >= hullMinX && rect.y <= hullMaxY && rect.y + rect.h >= hullMinY) near.push(rect);
+  }
+  if (!near.length) return false;
   const polyLen = Math.hypot(c1x - x1, c1y - y1) + Math.hypot(c2x - c1x, c2y - c1y) + Math.hypot(x2 - c2x, y2 - c2y);
   const segments = Math.max(ROUTE_MIN_SEGMENTS, Math.min(ROUTE_MAX_SEGMENTS, Math.ceil(polyLen / ROUTE_STEP)));
   let px = x1;
@@ -298,7 +360,7 @@ function cubicHitsAny(
     const t = i / segments;
     const nx = cubicAt(t, x1, c1x, c2x, x2);
     const ny = cubicAt(t, y1, c1y, c2y, y2);
-    for (const rect of obstacles) {
+    for (const rect of near) {
       if (segHitsRect(px, py, nx, ny, rect, ROUTE_CLEARANCE)) return true;
     }
     px = nx;
@@ -595,6 +657,27 @@ function sampleRoutePoints(d: string, per = 12): RoutePoint[] {
   return pts;
 }
 
+type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
+
+/* Axis-aligned bounds of a polyline — the broad phase for edge-vs-edge tests. */
+function boundsOf(pts: readonly RoutePoint[]): Bounds {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  return { minX, minY, maxX, maxY };
+}
+
+function boundsOverlap(a: Bounds, b: Bounds): boolean {
+  return a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
+}
+
 /* Parametric intersection of segments a–b and c–d, or null when they miss or are
    parallel. Inclusive of the segment ends, so a crossing that lands exactly on a
    shared sample vertex (two box diagonals meeting dead-centre) is still found —
@@ -653,6 +736,17 @@ function routesCross(a: readonly RoutePoint[], b: readonly RoutePoint[], shared:
    past another edge. Bounded so the pass is cheap and always terminates. */
 const CROSS_BOWS = [1, -1, 2, -2, 3, -3];
 const CROSS_PASSES = 2;
+/* The crossing-reduction pass re-routes candidate bows per edge — the pass's real
+   cost — so it is skipped above this many edges. Broad-phase culling keeps the
+   remaining (cheaper) fade near-linear on a spread board, so even at the 300-task
+   ceiling the global routing stays off the render thread's critical path. Below
+   the cap, dense boards get full untangling. */
+const CROSS_REDUCE_MAX = 48;
+/* An edge already crossing more than this many others sits in a dense tangle no
+   single perpendicular bow can meaningfully untangle, so re-routing it is wasted
+   work — it is left for the fade. Also caps the per-edge cost in a pathological
+   all-overlapping cluster. */
+const CROSS_BUSY = 4;
 
 /**
  * Routes every task edge together (issue #17): lanes fan coincident edges apart
@@ -672,6 +766,26 @@ const CROSS_PASSES = 2;
  * edges in key order, and the fade always picks the higher key, so the result is
  * identical for any input ordering.
  */
+/**
+ * Stable content key for a {@link routeTaskEdges} call: every input that can move
+ * a route — edge keys and (rounded) endpoints, plus each obstacle's box. Polling
+ * hands the layer fresh arrays every tick, so the layer memoizes the expensive
+ * global routing on this signature and skips the recompute when nothing actually
+ * moved (issue #17). Rounded to whole px because the router itself rounds, so a
+ * sub-pixel jitter never busts the cache.
+ */
+export function taskEdgesSignature(
+  edges: readonly TaskEdgeGeom[],
+  cards: readonly TaskEdgeObstacle[],
+  containers: readonly SchemeRect[],
+): string {
+  const r = Math.round;
+  const e = edges.map((x) => `${x.key}:${r(x.x1)},${r(x.y1)},${r(x.x2)},${r(x.y2)}`).join(";");
+  const c = cards.map((x) => `${x.id}:${r(x.x)},${r(x.y)},${r(x.w)},${r(x.h)}`).join(";");
+  const k = containers.map((x) => `${r(x.x)},${r(x.y)},${r(x.w)},${r(x.h)}`).join(";");
+  return `${e}|${c}|${k}`;
+}
+
 export function routeTaskEdges(
   edges: readonly TaskEdgeGeom[],
   cards: readonly TaskEdgeObstacle[],
@@ -682,72 +796,83 @@ export function routeTaskEdges(
   for (const edge of edges) sigCount.set(endpointSig(edge), (sigCount.get(endpointSig(edge)) ?? 0) + 1);
 
   const byKey = new Map<string, TaskEdgeGeom>(edges.map((edge) => [edge.key, edge]));
-  const state = new Map<string, { route: TaskEdgeRoute; pts: RoutePoint[] }>();
+  const state = new Map<string, { route: TaskEdgeRoute; pts: RoutePoint[]; box: Bounds }>();
   for (const edge of edges) {
     const route = routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lanes.get(edge.key) ?? 0);
-    state.set(edge.key, { route, pts: sampleRoutePoints(route.d) });
+    const pts = sampleRoutePoints(route.d);
+    state.set(edge.key, { route, pts, box: boundsOf(pts) });
   }
 
   /* How many *other* edges this route tangles with — a boolean per pair, robust
-     to the exact crossing point, so a symmetric dead-centre crossing counts. */
-  const crossingsAgainstOthers = (key: string, pts: readonly RoutePoint[]): number => {
+     to the exact crossing point, so a symmetric dead-centre crossing counts. The
+     bounding-box broad phase skips the O(segments²) test for every far-apart
+     edge, so the pass stays near-linear on a spread board (issue #17). */
+  const crossingsAgainstOthers = (key: string, pts: readonly RoutePoint[], box: Bounds): number => {
     const edge = byKey.get(key)!;
     let total = 0;
     for (const [otherKey, other] of state) {
-      if (otherKey === key) continue;
+      if (otherKey === key || !boundsOverlap(box, other.box)) continue;
       if (routesCross(pts, other.pts, sharedEndpoints(edge, byKey.get(otherKey)!))) total++;
     }
     return total;
   };
 
   const order = [...edges].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  for (let pass = 0; pass < CROSS_PASSES; pass++) {
-    let improved = false;
-    for (const edge of order) {
-      /* Never perturb a coincident edge — its lane is what keeps a fanned pair
-         from overdrawing, and parallel tracks never register as crossing. */
-      if ((sigCount.get(endpointSig(edge)) ?? 0) > 1) continue;
-      const current = state.get(edge.key)!;
-      let bestCrossings = crossingsAgainstOthers(edge.key, current.pts);
-      if (bestCrossings === 0) continue;
-      const obstacles = edgeObstacles(edge, cards, containers);
-      const laneBase = lanes.get(edge.key) ?? 0;
-      let best = current;
-      /* Obstacle clearance outranks edge-crossing count: a route that clears
-         every card and pane (`crosses === false`) is never traded for one that
-         re-enters a container just to untangle edges. Selection is lexicographic
-         on (obstacle-crossing?, edge-crossings). */
-      let bestObstacle = current.route.crosses ? 1 : 0;
-      for (const bow of CROSS_BOWS) {
-        const route = routeTaskEdge(edge, obstacles, laneBase + bow);
-        const candObstacle = route.crosses ? 1 : 0;
-        if (candObstacle > bestObstacle) continue; // would re-enter an obstacle — reject
-        const pts = sampleRoutePoints(route.d);
-        const crossings = crossingsAgainstOthers(edge.key, pts);
-        if (candObstacle < bestObstacle || crossings < bestCrossings) {
-          best = { route, pts };
-          bestObstacle = candObstacle;
-          bestCrossings = crossings;
+  /* The reduction re-routes candidate bows per crossing edge — the pass's real
+     cost. Bound it: above the cap, only the cheaper broad-phased fade runs. */
+  if (edges.length <= CROSS_REDUCE_MAX) {
+    for (let pass = 0; pass < CROSS_PASSES; pass++) {
+      let improved = false;
+      for (const edge of order) {
+        /* Never perturb a coincident edge — its lane is what keeps a fanned pair
+           from overdrawing, and parallel tracks never register as crossing. */
+        if ((sigCount.get(endpointSig(edge)) ?? 0) > 1) continue;
+        const current = state.get(edge.key)!;
+        let bestCrossings = crossingsAgainstOthers(edge.key, current.pts, current.box);
+        if (bestCrossings === 0 || bestCrossings > CROSS_BUSY) continue;
+        const obstacles = edgeObstacles(edge, cards, containers);
+        const laneBase = lanes.get(edge.key) ?? 0;
+        let best = current;
+        /* Obstacle clearance outranks edge-crossing count: a route that clears
+           every card and pane (`crosses === false`) is never traded for one that
+           re-enters a container just to untangle edges. Selection is lexicographic
+           on (obstacle-crossing?, edge-crossings). */
+        let bestObstacle = current.route.crosses ? 1 : 0;
+        for (const bow of CROSS_BOWS) {
+          const route = routeTaskEdge(edge, obstacles, laneBase + bow);
+          const candObstacle = route.crosses ? 1 : 0;
+          if (candObstacle > bestObstacle) continue; // would re-enter an obstacle — reject
+          const pts = sampleRoutePoints(route.d);
+          const box = boundsOf(pts);
+          const crossings = crossingsAgainstOthers(edge.key, pts, box);
+          if (candObstacle < bestObstacle || crossings < bestCrossings) {
+            best = { route, pts, box };
+            bestObstacle = candObstacle;
+            bestCrossings = crossings;
+          }
+        }
+        if (best !== current) {
+          state.set(edge.key, best);
+          improved = true;
         }
       }
-      if (best !== current) {
-        state.set(edge.key, best);
-        improved = true;
-      }
+      if (!improved) break;
     }
-    if (!improved) break;
   }
 
   /* Fade the residual: for every pair still crossing after the pass, mark the
      higher-key edge so it reads as passing behind — a crossing is never left
-     silently solid (issue #17). Deterministic: the pair is symmetric and the
-     higher key is a stable choice. */
+     silently solid (issue #17). Broad-phased, and deterministic: the pair is
+     symmetric and the higher key is a stable choice. */
   const faded = new Set<string>();
   for (let i = 0; i < order.length; i++) {
     for (let j = i + 1; j < order.length; j++) {
       const a = order[i]!;
       const b = order[j]!;
-      if (!routesCross(state.get(a.key)!.pts, state.get(b.key)!.pts, sharedEndpoints(a, b))) continue;
+      const sa = state.get(a.key)!;
+      const sb = state.get(b.key)!;
+      if (!boundsOverlap(sa.box, sb.box)) continue;
+      if (!routesCross(sa.pts, sb.pts, sharedEndpoints(a, b))) continue;
       faded.add(a.key < b.key ? b.key : a.key);
     }
   }
