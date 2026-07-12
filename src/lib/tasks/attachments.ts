@@ -5,7 +5,10 @@ import path from "node:path";
 import { statePath } from "@/lib/configDir";
 import { inboxImageExt, MAX_INBOX_IMAGE_BYTES } from "@/lib/imagePolicy";
 
+import { EXT_MIME, VALID_EXT } from "./attachmentModel";
 import type { BoardTask, TaskAttachment } from "./types";
+
+export { EXT_MIME, isTaskAttachment } from "./attachmentModel";
 
 /** Content-addressed image store shared by every task and draft. A file is
     named by the sha256 of its bytes, so identical uploads collapse to one file
@@ -19,25 +22,18 @@ export function attachmentPath(att: Pick<TaskAttachment, "sha256" | "ext">): str
   return path.join(attachmentsDir(), `${att.sha256}.${att.ext}`);
 }
 
-const VALID_EXT = new Set<TaskAttachment["ext"]>(["png", "jpg", "gif", "webp"]);
-
-export function isTaskAttachment(value: unknown): value is TaskAttachment {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const att = value as Partial<TaskAttachment>;
-  return (
-    typeof att.id === "string" &&
-    att.id.length > 0 &&
-    typeof att.sha256 === "string" &&
-    /^[0-9a-f]{64}$/.test(att.sha256) &&
-    typeof att.ext === "string" &&
-    VALID_EXT.has(att.ext as TaskAttachment["ext"]) &&
-    typeof att.mime === "string" &&
-    inboxImageExt(att.mime) !== null &&
-    typeof att.bytes === "number" &&
-    Number.isFinite(att.bytes) &&
-    att.bytes > 0 &&
-    typeof att.createdAt === "string"
-  );
+/** Reads a stored attachment by its content address, confined to the store dir.
+    Returns null for an unknown ext or a missing file — a corrupt/absent ref is
+    a visible failure at the call site, never a silent empty body. */
+export function readAttachment(sha256: string, ext: string): { data: Buffer; mime: string } | null {
+  if (!/^[0-9a-f]{64}$/.test(sha256) || !VALID_EXT.has(ext as TaskAttachment["ext"])) return null;
+  const filePath = attachmentPath({ sha256, ext: ext as TaskAttachment["ext"] });
+  try {
+    const data = fs.readFileSync(filePath);
+    return { data, mime: EXT_MIME[ext as TaskAttachment["ext"]] };
+  } catch {
+    return null;
+  }
 }
 
 export type StoreAttachmentResult =

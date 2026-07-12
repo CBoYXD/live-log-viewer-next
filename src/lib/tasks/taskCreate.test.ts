@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, test } from "bun:test";
 
-import { storeAttachment, sweepAttachments } from "./attachments";
+import { readAttachment, storeAttachment, sweepAttachments } from "./attachments";
 import { createTask, patchTask, type RecentCreate } from "./commands";
 import { formatDue, fromDueInput, isOverdue, toDueInputValue } from "./helpers";
 import { isTask, loadTasksFile, saveTasksFile } from "./store";
@@ -232,6 +232,24 @@ describe("attachment store", () => {
   test("an unsupported mime is rejected", () => {
     const res = storeAttachment(Buffer.from([1, 2, 3]), "application/pdf", "now");
     expect(res.ok).toBe(false);
+  });
+
+  test("a stored attachment is readable by its content address (for reload thumbnails)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llv-read-"));
+    process.env.LLV_STATE_DIR = dir;
+    try {
+      const bytes = Buffer.from([9, 8, 7, 6, 5]);
+      const stored = storeAttachment(bytes, "image/webp", "now");
+      if (!stored.ok) throw new Error("store failed");
+      const read = readAttachment(stored.attachment.sha256, "webp");
+      expect(read?.mime).toBe("image/webp");
+      expect(read?.data.equals(bytes)).toBe(true);
+      // A bad sha or a path-traversal ext returns null, never arbitrary bytes.
+      expect(readAttachment("../etc/passwd", "webp")).toBeNull();
+      expect(readAttachment(stored.attachment.sha256, "exe")).toBeNull();
+    } finally {
+      delete process.env.LLV_STATE_DIR;
+    }
   });
 
   test("the sweep never deletes referenced or young files", () => {

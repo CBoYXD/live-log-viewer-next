@@ -81,6 +81,12 @@ export async function createTask(input: CreateTaskInput): Promise<{ task: BoardT
   return res.ok ? { task: res.data.task } : { error: res.error };
 }
 
+/** The GET URL that serves a stored attachment's bytes — used for draft/card
+    thumbnails that must survive reload from the durable ref alone. */
+export function attachmentPreviewUrl(att: TaskAttachment): string {
+  return `/api/task-attachments?sha=${encodeURIComponent(att.sha256)}&ext=${encodeURIComponent(att.ext)}`;
+}
+
 /** Uploads one image to the content-addressed store and returns its durable
     ref, which a later create attaches to the task (the task then owns the bytes
     for every delivery — no post-send hop that can silently drop them). */

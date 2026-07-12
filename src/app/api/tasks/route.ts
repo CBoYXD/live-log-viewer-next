@@ -4,7 +4,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { attachmentPath, sweepAttachments } from "@/lib/tasks/attachments";
 import { createTask, type CreateTaskInput, type CreateTaskResult } from "@/lib/tasks/commands";
-import { mutateTasksFile } from "@/lib/tasks/store";
+import { loadTasks, mutateTasksFile } from "@/lib/tasks/store";
 import type { BoardTask } from "@/lib/tasks/types";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError } from "@/lib/types";
@@ -35,8 +35,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<{ ok: true; t
     return { state: persist, result: outcome };
   });
   if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
-  /* Best-effort GC of stale, unreferenced staged uploads — never touches a file
-     any task still references, so this create's own attachments are safe. */
-  if (!result.replay) sweepAttachments(result.tasks, Date.now());
+  /* Best-effort GC of stale, unreferenced staged uploads. A dangling reference
+     is impossible by construction: `createTask` re-checks `attachmentExists`
+     inside the same synchronous `mutateTasksFile` block that persists the task,
+     with no `await` before the write — so a concurrent request cannot delete a
+     referenced file between the check and the persist. The sweep additionally
+     reads the freshest task list (not this request's snapshot), so it never
+     evaluates references against stale state. */
+  sweepAttachments(loadTasks(), Date.now());
   return NextResponse.json({ ok: true, task: result.task });
 }

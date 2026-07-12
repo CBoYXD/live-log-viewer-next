@@ -79,20 +79,16 @@ function NewTaskView({
     composer.setBusy(true);
     composer.setStatus(null);
     try {
-      /* Images become durable, task-owned refs before the task exists, so a
-         create-with-images (even without targets) can never drop them. */
-      const staged = await draft.stageAttachments();
-      if ("error" in staged) {
-        composer.setStatus({ kind: "err", text: staged.error });
-        return;
-      }
+      /* Images were uploaded to durable, task-ownable refs the moment they were
+         picked, so a create-with-images (even without targets) can never drop
+         them and the refs already survived any reload. */
       const created = await createTask({
         project,
         text: payloadText,
         placement: "unplaced",
         dueAt: draft.dueAt,
         dueTz: draft.dueTz,
-        attachments: staged,
+        attachments: draft.stagedAttachments(),
         clientRequestId: draft.getRequestId(),
       });
       if ("error" in created) {

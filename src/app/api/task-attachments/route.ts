@@ -1,13 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
-import { storeAttachment } from "@/lib/tasks/attachments";
+import { readAttachment, storeAttachment } from "@/lib/tasks/attachments";
 import { isoNow } from "@/lib/tasks/helpers";
 import type { TaskAttachment } from "@/lib/tasks/types";
 import type { ApiError } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+/** Serves a stored attachment's bytes by its content address, so a draft's
+    thumbnails render after reload from the durable ref (no in-memory preview). */
+export async function GET(req: NextRequest): Promise<NextResponse<ApiError> | NextResponse> {
+  const rejection = rejectCrossOrigin(req);
+  if (rejection) return rejection;
+  const sha = req.nextUrl.searchParams.get("sha") ?? "";
+  const ext = req.nextUrl.searchParams.get("ext") ?? "";
+  const found = readAttachment(sha, ext);
+  if (!found) return NextResponse.json({ error: "attachment not found" }, { status: 404 });
+  return new NextResponse(new Uint8Array(found.data), {
+    headers: { "content-type": found.mime, "cache-control": "private, max-age=31536000, immutable" },
+  });
+}
 
 /**
  * Content-addressed image upload. A multipart `file` is validated against the

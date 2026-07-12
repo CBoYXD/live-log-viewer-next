@@ -16,7 +16,7 @@ import { conversationIdentity } from "@/lib/accounts/identity";
 import { BranchPane } from "@/components/BranchPane";
 import { flowByImplementer } from "@/components/flows/flowModel";
 import type { BranchGroup } from "@/components/projectModel";
-import { createTask, deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
+import { deleteTask, handoffTask, unassignTask, updateTask } from "@/components/tasks/taskApi";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { cleanTitle } from "@/components/utils";
 import { taskDeliveryText } from "@/lib/tasks/helpers";
@@ -30,6 +30,7 @@ import { AgentLinksLayer, EdgesLayer, LoopsLayer, MOVE_EASE, NodesLayer, type De
 import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
+import { findFreeSlot } from "./findFreeSlot";
 import { buildTaskEdges, buildTaskTargetIndex, isPlacedTask, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
@@ -79,6 +80,10 @@ interface Props {
       pins it where clicked; `onTaskPlaced` fires to disarm the caller. */
   placeTaskId?: string | null;
   onTaskPlaced?: () => void;
+  /** Desktop `+ Task`: bumping this drops the inline sticky composer in a free
+      slot near the button's world anchor (bottom-left quadrant), avoiding cards
+      and panes via `findFreeSlot`. */
+  newTaskNonce?: number;
 }
 
 function ToolButton({
@@ -138,6 +143,7 @@ export function SchemeBoard({
   onTaskDraft,
   placeTaskId,
   onTaskPlaced,
+  newTaskNonce,
 }: Props) {
   const { t } = useLocale();
   const mapMode = Boolean(onNodePick);
@@ -436,6 +442,20 @@ export function SchemeBoard({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only when a new placement is requested
   }, [placeTaskId]);
 
+  /* Desktop `+ Task`: drop the sticky composer in a free slot near the button's
+     world anchor (the viewport's bottom-left quadrant), stepping clear of every
+     card and pane through findFreeSlot. */
+  useEffect(() => {
+    if (!newTaskNonce || mapMode) return;
+    const anchorX = (vp.w * 0.25 - cam.x) / cam.z;
+    const anchorY = (vp.h * 0.7 - cam.y) / cam.z;
+    const obstacles = [...taskRects.values(), ...layout.nodes];
+    const slot = findFreeSlot({ x: Math.round(anchorX - TASK_W / 2), y: Math.round(anchorY) }, { w: TASK_W, h: 140 }, obstacles);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot drop on a `+ Task` press
+    setPendingTask(slot);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires only on a new `+ Task` press
+  }, [newTaskNonce]);
+
   /* Spatial keyboard navigation: live only on the desktop board — a selection
      session, an expanded overlay, or map mode all suspend it. */
   const navEnabled = !mapMode && !session && !overlayOpen;
@@ -602,21 +622,12 @@ export function SchemeBoard({
     [centerOn],
   );
 
-  const handleCreate = useCallback(
-    (text: string) => {
-      const pos = pendingTask;
-      if (!pos) return;
-      void createTask({ project, text, placement: "pinned", pos }).then((res) => {
-        if ("error" in res) {
-          pushTaskToast("err", res.error);
-          return;
-        }
-        setLocalTasks((prev) => [...prev, res.task]);
-        setPendingTask(null);
-      });
-    },
-    [project, pendingTask],
-  );
+  /* The sticky composer owns the create (text, voice, images, deadline); the
+     board just adopts the fresh card optimistically and drops the sticky. */
+  const handleStickyCreated = useCallback((task: BoardTask) => {
+    setLocalTasks((prev) => [...prev, task]);
+    setPendingTask(null);
+  }, []);
   const cancelCreate = useCallback(() => setPendingTask(null), []);
 
   /* Far-zoom feed sleep: behind the identity labels the pane content is
@@ -717,12 +728,13 @@ export function SchemeBoard({
         <TasksLayer
           tasks={placedTasks}
           files={files}
+          project={project}
           interactive={!handLike && !session}
           lite={mapMode}
           camRef={camRef}
           handlers={taskHandlers}
           pending={pendingTask}
-          onCreate={handleCreate}
+          onStickyCreated={handleStickyCreated}
           onCreateCancel={cancelCreate}
         />
         {/* Session bbox lives inside the transformed world div: the camera

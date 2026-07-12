@@ -40,18 +40,13 @@ function PanelNewTask({ project, onDone }: { project: string; onDone: () => void
     composer.setBusy(true);
     composer.setStatus(null);
     try {
-      const staged = await draft.stageAttachments();
-      if ("error" in staged) {
-        composer.setStatus({ kind: "err", text: staged.error });
-        return;
-      }
       const created = await createTask({
         project,
         text,
         placement: "unplaced",
         dueAt: draft.dueAt,
         dueTz: draft.dueTz,
-        attachments: staged,
+        attachments: draft.stagedAttachments(),
         clientRequestId: draft.getRequestId(),
       });
       if ("error" in created) {
@@ -97,7 +92,6 @@ function PanelNewTask({ project, onDone }: { project: string; onDone: () => void
 export function TaskPanel({
   tasks,
   project,
-  composeNonce = 0,
   onOpenTask,
   onPlaceOnMap,
   onClose,
@@ -105,8 +99,6 @@ export function TaskPanel({
   /** Every project's tasks; the header toggle filters. */
   tasks: BoardTask[];
   project: string;
-  /** Bumping this (e.g. the desktop `+ Task` button) opens the inline composer. */
-  composeNonce?: number;
   onOpenTask: (task: BoardTask) => void;
   /** Arms board placement mode for an unplaced task; absent hides the action. */
   onPlaceOnMap?: (task: BoardTask) => void;
@@ -115,11 +107,6 @@ export function TaskPanel({
   const { t } = useLocale();
   const [scope, setScope] = useState<"project" | "all">("project");
   const [composing, setComposing] = useState(false);
-  useEffect(() => {
-    /* eslint-disable-next-line react-hooks/set-state-in-effect -- opens the
-       composer once per `+ Task` press; the initial nonce of 0 is a no-op */
-    if (composeNonce > 0) setComposing(true);
-  }, [composeNonce]);
   const rows = useMemo(
     () => (scope === "project" ? tasks.filter((task) => task.project === project) : [...tasks]).sort(panelOrder),
     [tasks, project, scope],

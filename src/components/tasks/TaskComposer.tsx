@@ -4,6 +4,7 @@ import { CalendarClock, X } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { ComposerBar } from "@/components/ComposerBar";
+import { attachmentPreviewUrl } from "@/components/tasks/taskApi";
 import type { UseTaskDraftReturn } from "@/hooks/useTaskDraft";
 import { formatDue, fromDueInput, isOverdue, toDueInputValue } from "@/lib/tasks/helpers";
 import { getLocale, useLocale } from "@/lib/i18n";
@@ -55,11 +56,37 @@ function DueChip({ draft }: { draft: UseTaskDraftReturn }) {
   );
 }
 
+/** Thumbnails of the staged (already-uploaded) attachments, served from their
+    durable refs so they render after reload. Read-only apart from remove. */
+function StagedAttachments({ draft }: { draft: UseTaskDraftReturn }) {
+  const { t } = useLocale();
+  if (!draft.attachments.length) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {draft.attachments.map((att, idx) => (
+        <div key={att.id} className="group/att relative">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={attachmentPreviewUrl(att)} alt={t("img.previewAlt", { n: idx + 1 })} className="h-10 w-10 rounded border border-line object-cover" />
+          <button
+            type="button"
+            onClick={() => draft.removeAttachment(att.id)}
+            aria-label={t("img.removeAria", { n: idx + 1 })}
+            className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full border border-line bg-panel text-dim shadow-card hover:text-err group-hover/att:flex focus-visible:flex focus-visible:outline-none"
+          >
+            <X className="h-2.5 w-2.5" aria-hidden />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /**
  * The one composer every rich task-creation entry point renders: the shared
- * `ComposerBar` (text, voice, images) plus a deadline chip. State lives in
- * `useTaskDraft`; the caller owns the commit (`submit` on the draft) and the
- * left-slot chrome (target count, a plain label, …).
+ * `ComposerBar` (text, voice, images) plus a deadline chip. Images are routed
+ * to the draft's durable, upload-on-add store (`onImageFiles`) so staged refs
+ * survive reload. State lives in `useTaskDraft`; the caller owns the commit
+ * (`submit` on the draft) and the left-slot chrome (target count, a label, …).
  */
 export function TaskComposer({
   draft,
@@ -75,20 +102,24 @@ export function TaskComposer({
 }) {
   const { t } = useLocale();
   return (
-    <ComposerBar
-      composer={draft.composer}
-      placeholder={placeholder}
-      textareaAriaLabel={t("tasks.editAria")}
-      imageAriaLabel={t("composer.addImages")}
-      sendLabelIdle={createLabel}
-      sendLabelRecording={t("composer.stopAndSend")}
-      sendIdleClassName="border-accent bg-accent hover:opacity-90"
-      leftSlot={
-        <span className="flex min-w-0 items-center gap-1">
-          <DueChip draft={draft} />
-          {leftSlot}
-        </span>
-      }
-    />
+    <>
+      <ComposerBar
+        composer={draft.composer}
+        placeholder={placeholder}
+        textareaAriaLabel={t("tasks.editAria")}
+        imageAriaLabel={t("composer.addImages")}
+        sendLabelIdle={createLabel}
+        sendLabelRecording={t("composer.stopAndSend")}
+        sendIdleClassName="border-accent bg-accent hover:opacity-90"
+        onImageFiles={(files) => void draft.addFiles(files)}
+        leftSlot={
+          <span className="flex min-w-0 items-center gap-1">
+            <DueChip draft={draft} />
+            {leftSlot}
+          </span>
+        }
+      />
+      <StagedAttachments draft={draft} />
+    </>
   );
 }
