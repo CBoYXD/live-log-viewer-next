@@ -240,6 +240,38 @@ test("a malformed transcript protects an otherwise eligible Viewer probe", async
   }
 });
 
+test("an unknown missing transcript reaches the dead-transcript TTL in production input", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-missing-policy-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1353";
+  const pathname = path.join(directory, `missing-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker" });
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: "/repo", accountId: "default",
+    launchProfile: profile, status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+  });
+  registry.reconcileConversations([{
+    engine: "codex", path: pathname, accountId: "default", launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null }, observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+  const host = runtimeHost(pathname);
+  fs.writeFileSync(path.join(directory, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: { "%41:2041:2041:one": new Date(now - 31 * 60_000).toISOString() },
+    userAuthoredPaths: {},
+  }));
+  try {
+    const report = await runReaperCycle({ registry, hosts: [host], files: [], now });
+    expect(report.agents[0]).toMatchObject({ class: "dead-transcript", eligible: true, protectedReasons: [] });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("authorship at the beginning of a transcript survives a tail larger than the session reader window", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-early-user-"));
   const pathname = path.join(directory, "rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1344.jsonl");
@@ -961,6 +993,7 @@ test("post-kill cleanup preserves a same-pane replacement registry host", async 
       now,
       actuation: {
         readHosts: async () => snapshot,
+        refreshLifecycle: async () => [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
         processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
         kill: async () => {
           const entry = registry.snapshot().entries[`codex:${sessionId}`]!;
@@ -973,6 +1006,64 @@ test("post-kill cleanup preserves a same-pane replacement registry host", async 
 
     expect(report.agents[0]).toMatchObject({ eligible: true, action: "reaped" });
     expect(registry.snapshot().entries[`codex:${sessionId}`]?.host).toEqual(replacementEvidence);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an idle candidate that becomes busy inside the operation lock is retained", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-idle-busy-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1354";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg", timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "launch prompt" },
+  }) + "\n");
+  process.env.LLV_STATE_DIR = directory;
+  process.env.LLV_REAPER_ENABLED = "1";
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: "/repo", accountId: "default",
+    launchProfile: profile, status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+  });
+  registry.reconcileConversations([{
+    engine: "codex", path: pathname, accountId: "default", launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null }, observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+  const host = runtimeHost(pathname);
+  const snapshot: TranscriptHostSnapshot = {
+    hosts: [host], observation: "available", canonicalFor: (candidate) => candidate === pathname ? host : null,
+  };
+  let lifecycleRefreshes = 0;
+  let kills = 0;
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [host],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+      actuation: {
+        readHosts: async () => snapshot,
+        refreshLifecycle: async () => {
+          lifecycleRefreshes += 1;
+          registry.reconcileConversations([{
+            engine: "codex", path: pathname, accountId: "default", launchProfile: profile,
+            turn: { state: "busy", source: "tool", terminalAt: null }, observedAt: new Date(now).toISOString(),
+          }]);
+          return [{ ...runtimeFile(pathname, now / 1000), activity: "live", activityReason: "jsonl_turn_open" }];
+        },
+        processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
+        kill: async () => { kills += 1; return true; },
+        now: () => now,
+      },
+    });
+
+    expect(report.agents[0]).toMatchObject({ eligible: true, action: "kill-failed" });
+    expect(lifecycleRefreshes).toBe(1);
+    expect(kills).toBe(0);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -1067,6 +1158,7 @@ test("a delivery created during merge revalidation fences the final reap decisio
         },
         localBranchMerged: () => false,
         saveFlows: () => {},
+        refreshLifecycle: async () => [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
         processIdentity: (pid) => pid === 900 ? "900:original" : pid === 1041 ? "1041:original" : null,
         kill: async () => { kills += 1; return true; },
         now: () => now,

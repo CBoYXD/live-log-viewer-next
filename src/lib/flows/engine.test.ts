@@ -9,7 +9,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { newRound, tickFlows } = await import("./engine");
+const { captureReviewHead, newRound, tickFlows } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 
 afterAll(() => {
@@ -45,7 +45,7 @@ function writeCodexEntry(name: string, payload: Record<string, unknown>, mtime: 
   return entryFor(pathname, mtime);
 }
 
-test("a review round captures only a clean commit SHA", () => {
+test("a review round captures its clean commit immediately before launch", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-reviewed-head-"));
   try {
     expect(spawnSync("git", ["init", "-b", "main"], { cwd: directory }).status).toBe(0);
@@ -57,9 +57,12 @@ test("a review round captures only a clean commit SHA", () => {
     const headSha = spawnSync("git", ["rev-parse", "HEAD"], { cwd: directory, encoding: "utf8" }).stdout.trim();
     const flow = { cwd: directory, rounds: [] } as unknown as Flow;
 
-    expect(newRound(flow, "marker", null).reviewHeadSha).toBe(headSha);
+    const round = newRound(flow, "marker", null);
+    expect(round.reviewHeadSha).toBeNull();
+    expect(captureReviewHead(flow, round)).toBe(headSha);
+    expect(round.reviewHeadSha).toBe(headSha);
     fs.writeFileSync(path.join(directory, "work.txt"), "uncommitted\n");
-    expect(newRound(flow, "marker", null).reviewHeadSha).toBeNull();
+    expect(() => captureReviewHead(flow, newRound(flow, "marker", null))).toThrow("review requires a clean committed HEAD");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

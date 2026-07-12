@@ -86,7 +86,7 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     findingsPath: null,
     triggeredBy,
     readyNote,
-    reviewHeadSha: resolveCleanFlowHead(flow.cwd),
+    reviewHeadSha: null,
     verdict: null,
     findingsCount: null,
     startedAt: isoNow(),
@@ -98,6 +98,13 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     relayedAt: null,
     error: null,
   };
+}
+
+export function captureReviewHead(flow: Flow, round: Round): string {
+  const headSha = resolveCleanFlowHead(flow.cwd);
+  if (!headSha) throw new Error("review requires a clean committed HEAD");
+  round.reviewHeadSha = headSha;
+  return headSha;
 }
 
 function markNeedsDecision(flow: Flow, detail: string): void {
@@ -186,7 +193,9 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
   flow.stateDetail = null;
 }
 
-async function launchReviewer(flow: Flow, round: Round): Promise<void> {
+async function launchReviewer(flow: Flow, round: Round, persistCheckpoint: () => void): Promise<void> {
+  captureReviewHead(flow, round);
+  persistCheckpoint();
   const prompt = reviewerPrompt(flow, round);
   const account = accountManager.resolveSpawn(flow.roles.reviewer.engine, round.accountId);
   round.accountId ??= account.accountId;
@@ -307,7 +316,7 @@ async function tickFlow(
     try {
       round.spawnStartedAt = isoNow();
       persistCheckpoint();
-      await launchReviewer(flow, round);
+      await launchReviewer(flow, round, persistCheckpoint);
     } catch (error) {
       markNeedsDecision(flow, markRoundError(round, error instanceof Error ? error.message : String(error)));
     }

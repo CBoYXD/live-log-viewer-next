@@ -10,6 +10,7 @@ import { statePath } from "@/lib/configDir";
 import { resolveFlowMergeIdentity } from "@/lib/flows/git";
 import { loadFlows, saveFlows } from "@/lib/flows/store";
 import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
+import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { procBackend } from "@/lib/proc";
 import { listFiles } from "@/lib/scanner";
 import { scanUserAuthoredMessages } from "@/lib/session/reader";
@@ -34,6 +35,7 @@ const ROTATE_BYTES = 4 * 1024 * 1024;
 interface ReaperState {
   version: 1;
   firstObservedAt: Record<string, string>;
+  userAuthoredPaths: Record<string, true>;
 }
 
 function hostKey(host: TranscriptHost): string {
@@ -44,10 +46,16 @@ function readState(): ReaperState {
   try {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE(), "utf8")) as Partial<ReaperState>;
     if (parsed.version === 1 && parsed.firstObservedAt && typeof parsed.firstObservedAt === "object") {
-      return { version: 1, firstObservedAt: parsed.firstObservedAt };
+      return {
+        version: 1,
+        firstObservedAt: parsed.firstObservedAt,
+        userAuthoredPaths: parsed.userAuthoredPaths && typeof parsed.userAuthoredPaths === "object"
+          ? parsed.userAuthoredPaths as Record<string, true>
+          : {},
+      };
     }
   } catch { /* first run or invalid state */ }
-  return { version: 1, firstObservedAt: {} };
+  return { version: 1, firstObservedAt: {}, userAuthoredPaths: {} };
 }
 
 function atomicWrite(filename: string, value: unknown): void {
@@ -64,7 +72,7 @@ function updateObservationState(hosts: TranscriptHost[], now: number): ReaperSta
     const key = hostKey(host);
     firstObservedAt[key] = previous.firstObservedAt[key] ?? new Date(now).toISOString();
   }
-  const state = { version: 1 as const, firstObservedAt };
+  const state = { version: 1 as const, firstObservedAt, userAuthoredPaths: previous.userAuthoredPaths };
   atomicWrite(STATE_FILE(), state);
   return state;
 }
@@ -323,7 +331,12 @@ function viewerFlowMessageAllowance(flows: Flow[], pathname: string): number {
   return count;
 }
 
-function authorshipEvidence(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[], flows: Flow[]): {
+function authorshipEvidence(
+  snapshot: ReturnType<AgentRegistry["snapshot"]>,
+  hosts: TranscriptHost[],
+  flows: Flow[],
+  missingTranscriptPaths: ReadonlySet<string>,
+): {
   userAuthoredPaths: Set<string>;
   unverifiedPaths: Set<string>;
 } {
@@ -332,6 +345,7 @@ function authorshipEvidence(snapshot: ReturnType<AgentRegistry["snapshot"]>, hos
   for (const host of hosts) {
     const pathname = host.primaryPath;
     if (!pathname || userAuthoredPaths.has(pathname) || unverifiedPaths.has(pathname)) continue;
+    if (missingTranscriptPaths.has(pathname)) continue;
     const viewerMessageAllowance = (hasViewerWorkerLaunchPrompt(snapshot, pathname) ? 1 : 0)
       + viewerFlowMessageAllowance(flows, pathname);
     const scan = scanUserAuthoredMessages(pathname, host.engine, viewerMessageAllowance + 1);
@@ -363,11 +377,10 @@ function manualPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: Tra
   return protectedPaths;
 }
 
-function refreshFileTimes(files: FileEntry[]): FileEntry[] {
-  return files.map((entry) => {
-    try { return { ...entry, mtime: fs.statSync(entry.path).mtimeMs / 1000 }; }
-    catch { return entry; }
-  });
+async function refreshLifecycle(registry: AgentRegistry): Promise<FileEntry[]> {
+  const files = await listFiles();
+  await reconcileMigrationInventory(registry, files);
+  return files;
 }
 
 function evidenceFor(
@@ -409,7 +422,18 @@ async function makeInput(
   const snapshot = registry.snapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
-  const authorship = authorshipEvidence(snapshot, hosts, flows);
+  const authorship = authorshipEvidence(snapshot, hosts, flows, missingTranscriptPaths);
+  let stateChanged = false;
+  for (const pathname of authorship.userAuthoredPaths) {
+    if (state.userAuthoredPaths[pathname]) continue;
+    state.userAuthoredPaths[pathname] = true;
+    stateChanged = true;
+  }
+  if (stateChanged) atomicWrite(STATE_FILE(), state);
+  const protectedAuthorship = new Set([
+    ...authorship.userAuthoredPaths,
+    ...hosts.flatMap((host) => host.primaryPath && state.userAuthoredPaths[host.primaryPath] ? [host.primaryPath] : []),
+  ]);
   return {
     now,
     registry: snapshot,
@@ -417,11 +441,11 @@ async function makeInput(
     tmuxEvidenceByHost: new Map(hosts.map((host) => [hostKey(host), evidenceFor(host, processIdentity)])),
     reviewerProcesses: observeHeadlessReviewers(flows, overrides),
     viewerOwnedPaths: viewerOwnedPaths(snapshot, hosts),
-    authorshipUnverifiedPaths: new Set([...missingTranscriptPaths, ...authorship.unverifiedPaths]),
+    authorshipUnverifiedPaths: authorship.unverifiedPaths,
     files,
     flows,
     manualPaths: manualPaths(snapshot, hosts, files),
-    userAuthoredPaths: authorship.userAuthoredPaths,
+    userAuthoredPaths: protectedAuthorship,
     missingTranscriptPaths,
     mergedFlowIds,
     firstObservedAt: state.firstObservedAt,
@@ -579,7 +603,8 @@ async function actuateCandidate(
       const freshSnapshot: TranscriptHostSnapshot = await observeHosts(true);
       const freshHost = freshSnapshot.hosts.find((host) => hostMatchesCandidate(host, agent, processIdentity));
       if (!freshHost) return false;
-      const currentInput = await makeInput(registry, freshSnapshot.hosts, refreshFileTimes(files), state, currentTime(), overrides);
+      const lifecycleFiles = await (overrides.refreshLifecycle ?? refreshLifecycle)(registry);
+      const currentInput = await makeInput(registry, freshSnapshot.hosts, lifecycleFiles, state, currentTime(), overrides);
       const current = evaluateReaper(currentInput);
       const candidate = current.agents.find((item) => reportMatchesCandidate(item, agent));
       if (!candidate?.eligible) return false;
@@ -604,6 +629,7 @@ export interface ReaperActuationOverrides {
   pidAlive?: (pid: number) => boolean;
   processIdentity?: (pid: number) => string | null;
   killProcess?: typeof killHeadlessReviewerIfMatches;
+  refreshLifecycle?: typeof refreshLifecycle;
   resolveMergeIdentity?: typeof resolveFlowMergeIdentity;
   probePullRequest?: (evidence: FlowMergeEvidence) => PullRequestProbe | null | Promise<PullRequestProbe | null>;
   localBranchMerged?: typeof localBranchMerged;

@@ -184,6 +184,7 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
   const groups = duplicateGroups(input.hosts);
   const paneAgents = input.hosts.map((host): ReaperAgentReport => {
     const pathname = host.primaryPath;
+    const fileEntry = pathname ? files.get(pathname) : undefined;
     const conversation = pathname ? conversationForPath(input.registry, pathname) : null;
     const profile = pathname ? profileForPath(input.registry, pathname) : null;
     const flowMatch = pathname ? flowForPath(input.flows, pathname) : null;
@@ -215,7 +216,11 @@ export function evaluateReaper(input: ReaperInput): ReaperReport {
 
     if (pathname && input.userAuthoredPaths.has(pathname)) protectedReasons.unshift("user-authored-message");
     if (pathname && input.authorshipUnverifiedPaths.has(pathname)) protectedReasons.unshift("authorship-unverified");
-    if (conversation && (conversation.turn.state === "busy" || conversation.turn.state === "unknown" || deliveryFencesTurn(input.registry, conversation))) {
+    const lifecycleActive = fileEntry?.activity === "live"
+      || fileEntry?.activity === "stalled"
+      || Boolean(fileEntry?.pendingQuestion)
+      || Boolean(fileEntry?.waitingInput);
+    if (lifecycleActive || (conversation && (conversation.turn.state === "busy" || conversation.turn.state === "unknown" || deliveryFencesTurn(input.registry, conversation)))) {
       protectedReasons.unshift("mid-turn");
     }
     if (conversation?.migration && !["committed", "rolled-back"].includes(conversation.migration.phase)) {
