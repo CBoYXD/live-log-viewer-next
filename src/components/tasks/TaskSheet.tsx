@@ -371,28 +371,28 @@ export function TaskSheet({
 
   return (
     <div className="fixed inset-0 z-[60] flex flex-col bg-bg pb-[env(safe-area-inset-bottom)]">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
+      <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-line bg-panel px-2 py-1.5">
         {view !== "list" ? (
           <button
             type="button"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             aria-label={t("tasks.sheetBack")}
             onClick={() => setView("list")}
           >
-            <ChevronLeft className="h-4 w-4" aria-hidden />
+            <ChevronLeft className="h-5 w-5" aria-hidden />
           </button>
         ) : null}
-        <span className="shrink-0 text-[13px] font-bold">
+        <span className="shrink-0 pl-1 text-[13px] font-bold">
           {view === "new" ? t("tasks.sheetNew") : openTask ? taskTitle(openTask.text) || t("tasks.untitled") : t("tasks.panelTitle")}
         </span>
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-dim">{project}</span>
         <button
           type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
           aria-label={t("common.close")}
           onClick={onClose}
         >
-          <X className="h-4 w-4" aria-hidden />
+          <X className="h-5 w-5" aria-hidden />
         </button>
       </div>
 
@@ -400,7 +400,7 @@ export function TaskSheet({
         <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto p-2">
           <button
             type="button"
-            className="flex h-9 shrink-0 items-center justify-center gap-1 rounded-[10px] border border-dashed border-accent/50 text-[12px] font-bold text-accent hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className="flex min-h-11 shrink-0 items-center justify-center gap-1 rounded-[10px] border border-dashed border-accent/50 text-[13px] font-bold text-accent hover:bg-accent/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             onClick={() => setView("new")}
           >
             + {t("tasks.sheetNew")}

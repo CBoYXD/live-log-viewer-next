@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { ChevronRight, GitBranch } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import { useLocale } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
@@ -20,11 +21,14 @@ export function ResidualStrip({
   onSelect: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   return (
     <div className="shrink-0 border-t border-line bg-panel">
       <button
-        className="flex h-8 items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`flex w-full items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          isMobile ? "min-h-11" : "h-8"
+        }`}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >

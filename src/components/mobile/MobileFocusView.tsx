@@ -269,23 +269,32 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
       {/* Same runtime connection pill as desktop, compact, one thumb away.
           Renders nothing while slice-one is disabled. */}
       <ConnectionPill compact />
-      {/* One docked navigation strip (finding 7): the conversation chips scroll
-          horizontally on the left with a fade hint at the clipped edge (finding
-          5), and the map + tasks controls dock on the right so they never float
-          over the transcript (findings 2, 3). */}
+      {/* One docked navigation strip, two rows total (findings 4, 7): the pipeline
+          chain hop chips (when a stage is focused) and the conversation chips share
+          this single scrolling row with a fade hint at the clipped edge (finding
+          5); the map + tasks controls dock on the right so they never float over
+          the transcript (findings 2, 3). No separate third pipeline row. */}
       <div className="flex shrink-0 items-stretch border-b border-line bg-panel">
-        {entries.length > 1 ? (
+        {entries.length > 1 || pipelineFocus ? (
           <div className="relative min-w-0 flex-1">
             <div ref={chipScrollRef} onScroll={syncChipFade} className="no-scrollbar flex items-center gap-1.5 overflow-x-auto px-2 py-1.5">
-              {entries.map((entry) => (
-                <StripChip
-                  key={entry.key}
-                  entry={entry}
-                  active={entry.key === resolvedKey}
-                  chipRef={entry.key === resolvedKey ? activeChipRef : undefined}
-                  onClick={() => setFocusPath(entry.key)}
-                />
-              ))}
+              {pipelineFocus ? (
+                <>
+                  <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
+                  {entries.length > 1 ? <span aria-hidden className="mx-0.5 h-7 w-px shrink-0 bg-line" /> : null}
+                </>
+              ) : null}
+              {entries.length > 1
+                ? entries.map((entry) => (
+                    <StripChip
+                      key={entry.key}
+                      entry={entry}
+                      active={entry.key === resolvedKey}
+                      chipRef={entry.key === resolvedKey ? activeChipRef : undefined}
+                      onClick={() => setFocusPath(entry.key)}
+                    />
+                  ))
+                : null}
             </div>
             {/* Scroll affordance: a soft panel-colored fade over each clipped
                 edge, shown only while there is more to scroll that way. */}
@@ -321,10 +330,6 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
           </button>
         </div>
       </div>
-
-      {pipelineFocus ? (
-        <PipelineFocusRow pipeline={pipelineFocus.pipeline} index={pipelineFocus.index} renderableFlows={renderableFlows} renderablePaths={renderablePaths} onHop={hopToStage} onOpenPath={openStagePath} />
-      ) : null}
 
       {/* Even card gutters that also clear the notch/rounded corners (finding 8):
           the safe-area insets keep the pane off the screen edges symmetrically. */}
@@ -460,14 +465,16 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
   const canOpenFlow = Boolean(attempt?.flowId && renderableFlows.has(attempt.flowId));
   const canOpenPath = Boolean(attempt?.agentPath && renderablePaths.has(attempt.agentPath));
   return (
-    <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-line bg-[#fbfbfd] px-2 py-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
-      <span className="shrink-0 rounded-full bg-chip px-1.5 py-0.5 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
+    /* Inline chip group living inside the shared conversation-chip strip (finding
+       4): no separate row. Every hop/verdict control is a 44px tap target. */
+    <div className="flex shrink-0 items-center gap-1.5" role="group" aria-label={t("pipelineMobile.chipAria", { task: pipeline.task })}>
+      <span className="shrink-0 rounded-full bg-chip px-1.5 py-1 text-[10px] font-bold text-dim" aria-hidden>⇢ {t("pipelineMobile.position", { k: index + 1, n: total })}</span>
       <button
         type="button"
         disabled={!prevHopEnabled}
         onClick={() => onHop(index - 1)}
         aria-label={t("pipelineMobile.prevStage")}
-        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        className="inline-flex h-11 shrink-0 items-center rounded-full border border-line bg-panel px-3 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
       >
         ‹ {prev ? stageChipLabel(t, prev) : ""}
       </button>
@@ -477,7 +484,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
         onClick={() => setSheetOpen(true)}
         aria-haspopup="dialog"
         aria-label={t("pipelineMobile.openVerdict", { label: stageChipLabel(t, stage) })}
-        className="inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
+        className="inline-flex h-11 shrink-0 items-center gap-1 rounded-full px-3 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default"
         style={{ backgroundColor: tone.soft, color: tone.color }}
       >
         <span aria-hidden>{stage.kind === "review-loop" ? "⟳" : "▸"}</span>
@@ -491,7 +498,7 @@ function PipelineFocusRow({ pipeline, index, renderableFlows, renderablePaths, o
         disabled={!nextHopEnabled}
         onClick={() => onHop(index + 1)}
         aria-label={t("pipelineMobile.nextStage")}
-        className="shrink-0 rounded-full border border-line bg-panel px-2 py-0.5 text-[10px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
+        className="inline-flex h-11 shrink-0 items-center rounded-full border border-line bg-panel px-3 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30"
       >
         {next ? stageChipLabel(t, next) : ""} ›
       </button>

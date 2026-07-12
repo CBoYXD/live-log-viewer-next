@@ -93,14 +93,18 @@ export function ProcessStatusControls({
               <span className="truncate px-1 text-[11px] font-semibold text-err">{t("task.confirmKill", { pid: file.pid ?? "" })}</span>
             )}
             <button
-              className="whitespace-nowrap rounded-lg bg-err px-2 py-0.5 text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50"
+              className={`inline-flex items-center whitespace-nowrap rounded-lg bg-err text-[11px] font-bold tabular-nums text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50 ${
+                isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+              }`}
               disabled={killing}
               onClick={kill}
             >
               {forceNext ? "SIGKILL" : compact ? t("task.killPid", { pid: file.pid ?? "" }) : t("task.confirmKillYes")}
             </button>
             <button
-              className="whitespace-nowrap rounded-lg border border-line bg-panel px-2 py-0.5 text-[11px] font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className={`inline-flex items-center whitespace-nowrap rounded-lg border border-line bg-panel text-[11px] font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+                isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+              }`}
               onClick={() => setConfirming(false)}
             >
               {compact ? t("common.no") : t("common.cancel")}

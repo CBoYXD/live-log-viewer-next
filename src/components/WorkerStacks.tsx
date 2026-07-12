@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 
 import { ChevronRight, Layers } from "@/components/icons";
+import { useIsMobile } from "@/hooks/useIsMobile";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
 import { cleanTitle } from "@/lib/title";
@@ -94,6 +95,7 @@ export function WorkerStacks({
   onSelect: (file: FileEntry) => void;
 }) {
   const { t } = useLocale();
+  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const total = useMemo(() => stacks.reduce((sum, stack) => sum + stack.items.length, 0), [stacks]);
   const titleByImplementer = useMemo(() => new Map(files.map((file) => [file.path, file.title] as const)), [files]);
@@ -111,7 +113,9 @@ export function WorkerStacks({
   return (
     <div className="shrink-0 border-t border-line bg-panel" data-testid="worker-stacks">
       <button
-        className="flex h-8 items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+        className={`flex w-full items-center gap-2 px-4 text-[10px] font-bold uppercase tracking-[.6px] text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+          isMobile ? "min-h-11" : "h-8"
+        }`}
         aria-expanded={open}
         aria-label={t("workerStack.aria")}
         onClick={() => setOpen((value) => !value)}

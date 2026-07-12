@@ -53,7 +53,9 @@ export function DeleteFileButton({ file, onDeleted }: { file: FileEntry; onDelet
         <span className="px-0.5 font-semibold text-err">{t("delFile.confirm")}</span>
         <button
           type="button"
-          className="rounded-lg bg-err px-2 py-0.5 font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50"
+          className={`inline-flex items-center rounded-lg bg-err font-bold text-white disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-err/50 ${
+            isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+          }`}
           disabled={deleting}
           onClick={remove}
         >
@@ -61,7 +63,9 @@ export function DeleteFileButton({ file, onDeleted }: { file: FileEntry; onDelet
         </button>
         <button
           type="button"
-          className="rounded-lg border border-line bg-panel px-2 py-0.5 font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+          className={`inline-flex items-center rounded-lg border border-line bg-panel font-semibold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+            isMobile ? "min-h-11 px-3" : "px-2 py-0.5"
+          }`}
           onClick={() => setConfirming(false)}
         >
           {t("common.no")}
