@@ -833,9 +833,11 @@ export const uk: Record<keyof typeof en, Message> = {
   "plan.tokens": "токенів: {n}",
   "plan.time": "часу: {n} хв",
   "plan.ctxTitle": "Контекстне вікно: використано {pct}%\n{used} з {window} токенів",
+  "plan.ctxSourceRuntime": "Розмір вікна повідомлений середовищем агента",
+  "plan.ctxSourceRegistry": "Розмір вікна з вбудованого реєстру моделей ({version}) — приблизно",
+  "plan.ctxTitleUnknown": "Використання контексту: {used} токенів\nРозмір вікна для цієї моделі невідомий — відсоток не показується",
   "plan.ctxAria": "Контекст: використано {pct} відсотків вікна",
-  "plan.ctxUnknownTitle": "Контекстне вікно: невідоме\nВикористано {used} токенів",
-  "plan.ctxUnknownAria": "Контекст: використано {used} токенів; розмір вікна невідомий",
+  "plan.ctxAriaUnknown": "Контекст: використано {used} токенів, розмір вікна невідомий",
   "plan.goalAria": "Ціль сесії: {status}",
 
   "limits.now": "зараз",

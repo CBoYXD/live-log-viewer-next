@@ -865,9 +865,11 @@ export const en = {
   "plan.tokens": "tokens: {n}",
   "plan.time": "time: {n} min",
   "plan.ctxTitle": "Context window: {pct}% used\n{used} of {window} tokens",
+  "plan.ctxSourceRuntime": "Window reported by the agent runtime",
+  "plan.ctxSourceRegistry": "Window from the bundled model registry ({version}) — approximate",
+  "plan.ctxTitleUnknown": "Context usage: {used} tokens\nWindow unknown for this model — percentage withheld",
   "plan.ctxAria": "Context: {pct} percent of the window used",
-  "plan.ctxUnknownTitle": "Context window: unknown\n{used} tokens used",
-  "plan.ctxUnknownAria": "Context: {used} tokens used; window unknown",
+  "plan.ctxAriaUnknown": "Context: {used} tokens used, window size unknown",
   "plan.goalAria": "Session goal: {status}",
 
   // LimitsFooter

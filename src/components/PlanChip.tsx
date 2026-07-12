@@ -77,11 +77,18 @@ function fmtTokens(n: number): string {
 export function CtxChip({ ctx }: { ctx: CtxUsage }) {
   const { t } = useLocale();
   const used = ctx.usedTokens.toLocaleString(bcp47());
-  const known = ctx.windowTokens !== null && ctx.pct !== null;
-  const title = known
-    ? t("plan.ctxTitle", { pct: ctx.pct!, used, window: ctx.windowTokens!.toLocaleString(bcp47()) })
-    : t("plan.ctxUnknownTitle", { used });
-  const ariaLabel = known ? t("plan.ctxAria", { pct: ctx.pct! }) : t("plan.ctxUnknownAria", { used });
+  let title: string;
+  let ariaLabel: string;
+  if (ctx.windowTokens !== null && ctx.pct !== null) {
+    const source = ctx.source === "registry"
+      ? t("plan.ctxSourceRegistry", { version: ctx.registryVersion ?? "?" })
+      : t("plan.ctxSourceRuntime");
+    title = `${t("plan.ctxTitle", { pct: ctx.pct, used, window: ctx.windowTokens.toLocaleString(bcp47()) })}\n${source}`;
+    ariaLabel = t("plan.ctxAria", { pct: ctx.pct });
+  } else {
+    title = t("plan.ctxTitleUnknown", { used });
+    ariaLabel = t("plan.ctxAriaUnknown", { used });
+  }
   return (
     <span
       className={`inline-flex shrink-0 items-center gap-0.5 rounded-full px-1.5 py-0.5 font-mono text-[9.5px] font-semibold ${ctxTone(ctx.pct)}`}
@@ -89,8 +96,12 @@ export function CtxChip({ ctx }: { ctx: CtxUsage }) {
       aria-label={ariaLabel}
     >
       ctx {fmtTokens(ctx.usedTokens)}
-      <span className="opacity-50">/</span>
-      {ctx.windowTokens === null ? "?" : fmtTokens(ctx.windowTokens)}
+      {ctx.windowTokens === null ? null : (
+        <>
+          <span className="opacity-50">/</span>
+          {fmtTokens(ctx.windowTokens)}
+        </>
+      )}
     </span>
   );
 }
