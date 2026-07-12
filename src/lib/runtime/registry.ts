@@ -5,6 +5,7 @@ import type {
   StructuredHostColumns,
 } from "@/lib/agent/registry";
 import type { SessionKey } from "@/lib/agent/sessionKey";
+import { procBackend } from "@/lib/proc";
 
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
 import type { HostState } from "./engineHost";
@@ -67,16 +68,30 @@ export async function adoptCodexRegistryHosts(
     entry.key.engine === "codex" && entry.structuredHost?.kind === "codex-app-server");
   const adopted: AdoptedCodexHost[] = [];
   for (const entry of rows) {
+    const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
     try {
-      const host = await CodexAppServerHost.adopt(entry.key.sessionId, {
-        ...optionsFor(entry),
-        initialEventCursor: entry.structuredHost?.eventCursor ?? 0,
+      await registry.withOperationLock(entry.key, owner, async () => {
+        const claimed = registry.claimStructuredHost(entry.key, owner);
+        if (!claimed?.structuredHost) return;
+        try {
+          const host = await CodexAppServerHost.adopt(entry.key.sessionId, {
+            ...optionsFor(claimed),
+            initialEventCursor: claimed.structuredHost.eventCursor,
+          });
+          await persistCodexHost(registry, entry.key, host, claimed.claimEpoch);
+          adopted.push({ key: entry.key, host });
+        } catch {
+          registry.setStructuredHost(entry.key, {
+            ...claimed.structuredHost,
+            endpoint: "stdio:released",
+            process: null,
+            activeTurnRef: null,
+          }, "dead");
+          registry.releaseClaim(entry.key, claimed.claimOwner!);
+        }
       });
-      await persistCodexHost(registry, entry.key, host, entry.structuredHost?.writerClaimEpoch ?? entry.claimEpoch);
-      adopted.push({ key: entry.key, host });
-    } catch {
-      const prior = entry.structuredHost!;
-      registry.setStructuredHost(entry.key, { ...prior, endpoint: "stdio:released", process: null, activeTurnRef: null }, "dead");
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "agent registry is busy") throw error;
     }
   }
   return adopted;

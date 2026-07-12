@@ -38,6 +38,7 @@ export interface CodexAppServerHostOptions {
   approvalPolicy?: string;
   env?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  shutdownGraceMs?: number;
   initialEventCursor?: number;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 }
@@ -53,6 +54,7 @@ const SECRET_ENV_NAMES = [
   "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
 
 function record(value: unknown): JsonObject | null {
@@ -118,6 +120,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly requestTimeoutMs: number;
+  private readonly shutdownGraceMs: number;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
@@ -130,16 +133,30 @@ export class CodexAppServerHost implements EngineHost {
   private account: HostState["account"] = null;
   private released = false;
   private dead = false;
+  private reaped = false;
+  private terminationStarted = false;
+  private terminationTimer: ReturnType<typeof setTimeout> | null = null;
+  private releasePromise: Promise<void> | null = null;
+  private readonly reapedPromise: Promise<void>;
+  private resolveReaped!: () => void;
 
   private constructor(child: ChildProcessWithoutNullStreams, identity: CodexThreadIdentity, options: CodexAppServerHostOptions) {
     this.child = child;
     this.identity = identity;
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.cursor = options.initialEventCursor ?? 0;
+    this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
     child.stderr.on("data", () => { /* stderr can contain authentication details; keep it out of output */ });
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
+      this.reaped = true;
+      if (this.terminationTimer) {
+        clearTimeout(this.terminationTimer);
+        this.terminationTimer = null;
+      }
+      this.resolveReaped();
       if (!this.released) this.fail(new Error("Codex app-server child exited"));
     });
   }
@@ -182,6 +199,9 @@ export class CodexAppServerHost implements EngineHost {
           approvalPolicy: options.approvalPolicy ?? "never",
         });
       const identity = threadFromResult(result, threadId ? "thread/resume" : "thread/start");
+      if (threadId && identity.threadId !== threadId) {
+        throw new Error("thread/resume returned a different thread id");
+      }
       provisional.identity.threadId = identity.threadId;
       provisional.identity.path = identity.path;
       provisional.emit({ kind: "session-status", status: "idle" });
@@ -197,7 +217,7 @@ export class CodexAppServerHost implements EngineHost {
     const subscriber: Subscriber = { afterSeq, queue: [], wake: null, closed: false };
     for (const event of this.events) if (event.seq > afterSeq) subscriber.queue.push(event);
     this.subscribers.add(subscriber);
-    const host = this;
+    const subscribers = this.subscribers;
     return {
       async *[Symbol.asyncIterator]() {
         try {
@@ -215,7 +235,7 @@ export class CodexAppServerHost implements EngineHost {
           }
         } finally {
           subscriber.closed = true;
-          host.subscribers.delete(subscriber);
+          subscribers.delete(subscriber);
         }
       },
     };
@@ -292,16 +312,49 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async release(): Promise<void> {
-    if (this.released) return;
+    this.releasePromise ??= this.releaseAndReap();
+    return this.releasePromise;
+  }
+
+  private async releaseAndReap(): Promise<void> {
     this.released = true;
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));
     }
     this.pending.clear();
+    this.closeSubscribers();
+    this.startTermination();
+    if (await this.waitForReap(this.shutdownGraceMs)) return;
+    try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+    if (!await this.waitForReap(this.shutdownGraceMs)) {
+      throw new Error("Codex app-server child could not be reaped");
+    }
+  }
+
+  private startTermination(): void {
+    if (this.terminationStarted || this.reaped) return;
+    this.terminationStarted = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
     try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
-    this.closeSubscribers();
+    this.terminationTimer = setTimeout(() => {
+      this.terminationTimer = null;
+      if (this.reaped) return;
+      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+    }, this.shutdownGraceMs);
+  }
+
+  private async waitForReap(timeoutMs: number): Promise<boolean> {
+    if (this.reaped) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.reapedPromise.then(() => true),
+        new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private emit(event: UnsequencedEvent): void {
@@ -430,5 +483,6 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.emit({ kind: "session-status", status: "dead" });
     this.closeSubscribers();
+    this.startTermination();
   }
 }

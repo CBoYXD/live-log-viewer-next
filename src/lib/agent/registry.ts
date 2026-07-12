@@ -54,6 +54,24 @@ export interface StructuredHostColumns {
   pendingAttention: string[];
 }
 
+const STRUCTURED_CLAIM_PREFIX = "structured-host:";
+
+function structuredClaimOwner(identity: ProcessIdentity): string {
+  return `${STRUCTURED_CLAIM_PREFIX}${JSON.stringify(identity)}`;
+}
+
+function structuredClaimIdentity(owner: string): ProcessIdentity | null {
+  if (!owner.startsWith(STRUCTURED_CLAIM_PREFIX)) return null;
+  try {
+    const identity = JSON.parse(owner.slice(STRUCTURED_CLAIM_PREFIX.length)) as Partial<ProcessIdentity>;
+    return Number.isInteger(identity.pid) && identity.pid! > 0
+      ? { pid: identity.pid!, startIdentity: typeof identity.startIdentity === "string" ? identity.startIdentity : null }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Immutable tmux facts captured before readiness polling can expose a new
     pane to the observer. They are the only durable correlation between a
     launch receipt and an externally observed host. */
@@ -1453,10 +1471,39 @@ export class AgentRegistry {
     status?: AgentHostStatus,
   ): AgentRegistryEntry {
     return this.mutate((file) => {
-      const entry = file.entries[sessionKeyId(key)];
+      const keyId = sessionKeyId(key);
+      const entry = file.entries[keyId];
       if (!entry) throw new Error("agent registry entry is missing");
+      const replacement = {
+        ...entry,
+        structuredHost: structuredHost ? normalizeStructuredHost(structuredHost) : null,
+        status: status ?? entry.status,
+      };
+      const changedHostPaths = activeHostPathsChangedByEntry(file, keyId, replacement);
+      const readinessBefore = migrationReadinessSignature(file, key.engine, changedHostPaths);
       entry.structuredHost = structuredHost ? normalizeStructuredHost(structuredHost) : null;
       if (status) entry.status = status;
+      entry.updatedAt = now();
+      advanceMigrationScopeRevision(file, key.engine, readinessBefore, changedHostPaths);
+      return clone(entry);
+    });
+  }
+
+  /** Atomically claims a stale structured row and advances its writer fence. */
+  claimStructuredHost(key: SessionKey, owner: ProcessIdentity): AgentRegistryEntry | null {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      if (!entry?.structuredHost) return null;
+      const liveHost = entry.structuredHost.process;
+      if (liveHost && this.ownerAlive(liveHost)) return null;
+      const requestedOwner = structuredClaimOwner(owner);
+      if (entry.claimOwner && entry.claimOwner !== requestedOwner) {
+        const priorOwner = structuredClaimIdentity(entry.claimOwner);
+        if (!priorOwner || this.ownerAlive(priorOwner)) return null;
+      }
+      entry.claimOwner = requestedOwner;
+      entry.claimEpoch += 1;
+      entry.structuredHost.writerClaimEpoch = entry.claimEpoch;
       entry.updatedAt = now();
       return clone(entry);
     });
