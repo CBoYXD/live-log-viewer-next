@@ -153,7 +153,7 @@ export function AgentRuntimeControls({ file }: { file: FileEntry }) {
                   type="button"
                   onClick={() => setSheetOpen(false)}
                   aria-label={t("common.close")}
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                 >
                   <X className="h-4 w-4" aria-hidden />
                 </button>

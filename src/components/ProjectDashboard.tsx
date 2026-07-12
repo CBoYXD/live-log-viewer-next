@@ -152,7 +152,7 @@ function ProjectViewTabs({
           onClick={() => onChange(mode)}
           aria-label={t(mode === "scheme" ? "dash.viewScheme" : "dash.viewList")}
           className={`inline-flex items-center justify-center gap-1 rounded-full text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
-            header ? "h-9 w-9" : "px-2 py-1"
+            header ? "h-11 w-11" : "px-2 py-1"
           } ${value === mode ? "bg-accent/10 text-accent" : "text-dim hover:text-ink"}`}
         >
           {mode === "scheme" ? <Network className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden /> : <List className={header ? "h-3.5 w-3.5" : "h-3 w-3"} aria-hidden />}
@@ -850,10 +850,10 @@ export function ProjectDashboard({
                     {archived ? (
                       <button
                         type="button"
-                        className="inline-flex shrink-0 items-center gap-1 rounded-full border border-line bg-bg px-2 py-1 text-[12px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+                        className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border border-line bg-bg px-3 text-[13px] font-semibold text-dim hover:border-accent/40 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                         onClick={() => onUnarchive(project)}
                       >
-                        <ArchiveRestore className="h-3.5 w-3.5" aria-hidden /> {t("dash.unarchive")}
+                        <ArchiveRestore className="h-4 w-4" aria-hidden /> {t("dash.unarchive")}
                       </button>
                     ) : (
                       <ArchiveProjectButton files={projectFiles} allowEmpty={catalogKnown} onArchive={() => onArchive(project)} />
@@ -1079,6 +1079,12 @@ export function ProjectDashboard({
       ) : null}
 
       <TaskToastHost />
+
+      {/* Phone-only reservation (finding 4): while a deploy pill is live it
+          publishes `--llv-deploy-inset`; this spacer lifts the docked worker /
+          quiet-conversation sections above it so the toast never covers their
+          rows. Collapses to 0 when no deploy is showing. */}
+      {isMobile ? <div aria-hidden className="shrink-0" style={{ height: "var(--llv-deploy-inset, 0px)" }} /> : null}
     </div>
   );
 }

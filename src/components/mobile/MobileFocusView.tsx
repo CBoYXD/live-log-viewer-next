@@ -375,16 +375,16 @@ export function MobileFocusView({ project, groups, manual, files, flows, pipelin
 
       {mapOpen ? (
         <div className="fixed inset-0 z-50 flex flex-col bg-bg pb-[env(safe-area-inset-bottom)]">
-          <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line bg-panel px-3">
-            <span className="shrink-0 text-[13px] font-bold">{t("mobile.map")}</span>
+          <div className="flex min-h-[52px] shrink-0 items-center gap-2 border-b border-line bg-panel px-2 py-1.5">
+            <span className="shrink-0 pl-1 text-[13px] font-bold">{t("mobile.map")}</span>
             <span className="min-w-0 flex-1 truncate text-[11.5px] text-dim">{project}</span>
             <button
               type="button"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[8px] border border-line bg-bg text-dim hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
               aria-label={t("mobile.closeMap")}
               onClick={() => setMapOpen(false)}
             >
-              <X className="h-4 w-4" aria-hidden />
+              <X className="h-5 w-5" aria-hidden />
             </button>
           </div>
           <SchemeBoard
