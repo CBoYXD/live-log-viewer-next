@@ -66,7 +66,7 @@ test("idle reconfiguration releases the real session lock before serialized resu
   const key = { engine: "codex" as const, sessionId };
   registry.upsert({
     key, artifactPath: pathname, cwd: SANDBOX, accountId: "default",
-    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, role: "worker" }), status: "idle",
+    launchProfile: emptyLaunchProfile({ cwd: SANDBOX, role: "worker", readOnly: true, permissionMode: "never" }), status: "idle",
     host: KILL_HOST, claimEpoch: 1, claimOwner: null, pendingAction: null,
   });
   const entry: FileEntry = {
@@ -82,11 +82,15 @@ test("idle reconfiguration releases the real session lock before serialized resu
     launchId: null, claimedPaths: [pathname], primaryPath: pathname,
   };
   let resumed = 0;
+  let resumePolicy: { readOnly?: boolean | null; permissionMode?: string | null } = {};
 
   const outcome = await reconfigureConversation(pathname, { model: "gpt-5.6-terra", effort: "medium", fast: true }, {
     pathAllowed: () => true,
     listFiles: async () => [entry],
-    resumeSpecFor: () => ({ command: "codex resume", cwd: SANDBOX, windowName: "codex-resume", engine: "codex" }),
+    resumeSpecFor: (_root, _path, options) => {
+      resumePolicy = options ?? {};
+      return { command: "codex resume", cwd: SANDBOX, windowName: "codex-resume", engine: "codex" };
+    },
     livePaneHost: async () => liveHost,
     registry,
     paneScreen: async () => "›\n? for shortcuts",
@@ -99,6 +103,7 @@ test("idle reconfiguration releases the real session lock before serialized resu
 
   expect(outcome).toMatchObject({ ok: true, outcome: "reconfigured", target: "%8" });
   expect(resumed).toBe(1);
+  expect(resumePolicy).toMatchObject({ readOnly: true, permissionMode: "never" });
 });
 
 const KILL_HOST: TmuxHostEvidence = {

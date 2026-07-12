@@ -67,17 +67,22 @@ export async function reconfigureConversation(
   if (!filePath || !(overrides.pathAllowed ?? pathAllowed)(filePath)) return failure("the conversation path is required", 400);
   const entry = (await (overrides.listFiles ?? listFiles)()).find((item) => item.path === filePath);
   if (!entry || (entry.engine !== "claude" && entry.engine !== "codex")) return failure("conversation is unavailable", 403);
-  const spec = (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, config);
-  if (!spec) return failure("this conversation cannot be resumed", 409);
-  const deliver = overrides.deliver ?? deliverToTranscriptHost;
-  const host = await (overrides.livePaneHost ?? livePaneHost)(filePath);
-  if (host === null) {
-    const resumed = await hostOutcome(deliver({ entry, spec, payload: "" }));
-    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
-  }
   const registry = overrides.registry ?? agentRegistry();
   const registered = registeredHostForPath(registry.snapshot(), filePath);
   if (!registered?.host) return failure("no registered agent pane for this conversation", 404);
+  const buildSpec = (profile: AgentRegistryEntry["launchProfile"]) => (overrides.resumeSpecFor ?? resumeSpecFor)(entry.root, entry.path, {
+    ...config,
+    readOnly: profile?.readOnly ?? null,
+    permissionMode: profile?.permissionMode ?? null,
+  });
+  const deliver = overrides.deliver ?? deliverToTranscriptHost;
+  const host = await (overrides.livePaneHost ?? livePaneHost)(filePath);
+  if (host === null) {
+    const spec = buildSpec(registered.launchProfile);
+    if (!spec) return failure("this conversation cannot be resumed", 409);
+    const resumed = await hostOutcome(deliver({ entry, spec, payload: "" }));
+    return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
+  }
   const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
   try {
     const prepared = await registry.withOperationLock(registered.key, owner, async () => {
@@ -85,6 +90,8 @@ export async function reconfigureConversation(
       if (!refreshed?.host || refreshed.host.paneId !== host.paneId) {
         return failure("the registered pane changed", 409);
       }
+      const spec = buildSpec(refreshed.launchProfile);
+      if (!spec) return failure("this conversation cannot be resumed", 409);
       const refreshedHost = refreshed.host;
       return withPaneLock(host.paneId, async () => {
         if (!screenAtIdleComposer(await (overrides.paneScreen ?? paneScreen)(host.paneId))) {
@@ -93,14 +100,14 @@ export async function reconfigureConversation(
         if (!await (overrides.killHost ?? killTmuxHostIfMatches)(refreshedHost)) return failure("the registered pane changed or its process did not exit", 409);
         registry.markUnhosted(refreshed.key);
         forgetResumePane(filePath);
-        return "prepared" as const;
+        return { state: "prepared" as const, spec };
       });
     });
     if (prepared === "pending") return { ok: true, target: host.display, outcome: "pending" };
-    if (prepared !== "prepared") return prepared;
+    if (!("state" in prepared)) return prepared;
     /* Resume acquires the same per-session serialization lock through the
        transcript-host adapter. The termination lock must be released first. */
-    const resumed = await hostOutcome(deliver({ entry: { ...entry, pid: null, proc: "done" }, spec, payload: "" }));
+    const resumed = await hostOutcome(deliver({ entry: { ...entry, pid: null, proc: "done" }, spec: prepared.spec, payload: "" }));
     return resumed.ok ? { ...resumed, outcome: "reconfigured" } : resumed;
   } catch (error) {
     return failure(error);
