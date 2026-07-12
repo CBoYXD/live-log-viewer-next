@@ -639,6 +639,30 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     expect(enters(routes.get("B")!.d, pane)).toBe(false);
   });
 
+  test("busy fan-out detours are deconflicted onto distinct corridors (Finding)", () => {
+    /* One task fanning out to six targets across a 600×680 pane: every edge must
+       detour, and without deconfliction all six land on the identical corridor,
+       compounding into an opaque rail. Each now gets its own track. */
+    const pane: SchemeRect = { x: -300, y: 100, w: 600, h: 680 };
+    const edges = Array.from({ length: 6 }, (_, i) => geom("a" + i, -450, 400 + i * 10, 450, 200 + i * 80));
+    const routes = routeTaskEdges(edges, [], [pane]);
+    const corridors = edges.map((e) => routes.get(e.key)!.corridor);
+    expect(corridors.every((c) => c)).toBe(true); // all six detoured
+    /* No two overlapping-extent corridors on the same axis sit within a lane. */
+    for (let i = 0; i < corridors.length; i++) {
+      for (let j = i + 1; j < corridors.length; j++) {
+        const a = corridors[i]!;
+        const b = corridors[j]!;
+        if (a.axis === b.axis && Math.min(a.hi, b.hi) > Math.max(a.lo, b.lo)) {
+          expect(Math.abs(a.pos - b.pos)).toBeGreaterThanOrEqual(25);
+        }
+      }
+    }
+    /* Deterministic under input order. */
+    const rev = routeTaskEdges([...edges].reverse(), [], [pane]);
+    for (const e of edges) expect(rev.get(e.key)!.d).toBe(routes.get(e.key)!.d);
+  });
+
   test("reduces an avoidable crossing that per-edge routing leaves tangled", () => {
     /* An obstacle bows edge A down through edge B (two crossings); the pass
        nudges A onto a lane that clears B. */
