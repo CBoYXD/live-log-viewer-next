@@ -311,14 +311,37 @@ export const AgentLinksLayer = memo(function AgentLinksLayer({
  * stays readable when the board is zoomed out to the map. A group appears only
  * while its flow/pipeline is open, so it dissolves on close with no extra state.
  */
+/** Everything a pipeline group's on-halo stage strip needs to render + route
+    (issue #136): supplied by SchemeBoard for the interactive board, omitted on
+    the lite map. Absent → group halos keep only their label chip. */
+export interface PipelineGroupControls {
+  flows: Flow[];
+  renderablePaths: ReadonlySet<string>;
+  renderableFlows: ReadonlySet<string>;
+  /** Ids of pipelines whose per-node compact strip is ACTUALLY mounted on a
+      placed board node. A pipeline absent from this set has no on-board plan
+      surface — even if its current stage resolved to a path, that node may be
+      hidden/collapsed — so the group halo must carry the plan itself (issue
+      #136). Membership, not `pipelineBoardStripPath`, is the source of truth. */
+  nodeStripPipelineIds: ReadonlySet<string>;
+  onOpenPath: (path: string) => void;
+  onOpenFlow: (flowId: string) => void;
+}
+
 export const GroupsLayer = memo(function GroupsLayer({
   groups,
   interactive,
+  pipelineControls,
 }: {
   groups: SchemeGroup[];
   /** Passive on the hand-tool, during a selection session and on the lite map:
       the halos still render, but the label chip stops opening the panel. */
   interactive: boolean;
+  /** When present, a pipeline group whose current stage has NO per-node strip
+      (a review-loop or not-yet-materialized stage) renders the full planned
+      stage graph on the halo itself, so the group is always the pipeline surface
+      (issue #136). */
+  pipelineControls?: PipelineGroupControls | null;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
   if (!groups.length) return null;
@@ -348,6 +371,27 @@ export const GroupsLayer = memo(function GroupsLayer({
               className="absolute inset-0 rounded-[20px] border-2 border-dashed"
               style={{ borderColor: color, backgroundColor: soft }}
             />
+            {/* The pipeline's full planned stage graph on the halo itself, shown
+                only when no per-node strip is actually mounted for it — so the
+                group is the single stage-plan surface with no duplication, and a
+                pipeline whose current node is hidden/collapsed still shows its
+                plan (issue #136 / review finding 1). */}
+            {group.pipeline && pipelineControls && !pipelineControls.nodeStripPipelineIds.has(group.pipeline.id) ? (
+              <div
+                data-scheme-group-strip
+                className={`absolute left-4 right-4 top-3 z-[7] ${interactive ? "pointer-events-auto" : "pointer-events-none"}`}
+              >
+                <PipelineStrip
+                  pipeline={group.pipeline}
+                  flows={pipelineControls.flows}
+                  renderablePaths={pipelineControls.renderablePaths}
+                  renderableFlows={pipelineControls.renderableFlows}
+                  compact
+                  onOpenPath={pipelineControls.onOpenPath}
+                  onOpenFlow={pipelineControls.onOpenFlow}
+                />
+              </div>
+            ) : null}
             <button
               data-scheme-ui
               className={`absolute -top-3 left-5 z-[8] inline-flex max-w-[22em] items-center gap-[0.4em] rounded-full bg-panel px-[0.7em] py-[0.15em] font-bold shadow-card hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:cursor-default ${

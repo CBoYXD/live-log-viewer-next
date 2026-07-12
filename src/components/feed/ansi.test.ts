@@ -37,8 +37,13 @@ describe("decodeTerminalText", () => {
 });
 
 describe("formatStdinKeys", () => {
-  test("empty input is a bare Enter", () => {
-    expect(formatStdinKeys("")).toBe("⏎");
+  test("empty input is a poll, not a keystroke (returns empty for the caller to label)", () => {
+    expect(formatStdinKeys("")).toBe("");
+  });
+
+  test("an explicit Enter keystroke renders ⏎", () => {
+    expect(formatStdinKeys("\n")).toBe("⏎");
+    expect(formatStdinKeys("\r")).toBe("⏎");
   });
 
   test("control bytes render as caret notation", () => {

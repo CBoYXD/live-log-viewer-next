@@ -961,6 +961,7 @@ export function ProjectDashboard({
                 flows={flows}
                 pipelines={pipelines}
                 tasks={hasNodes ? projectTasks : []}
+                workerStacks={workerStacks}
                 drafts={hasNodes ? drafts : []}
                 focus={highlight}
                 attentionPaths={attentionPaths}

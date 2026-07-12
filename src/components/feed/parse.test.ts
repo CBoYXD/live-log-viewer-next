@@ -136,26 +136,32 @@ describe("feed session parity with one-shot parse", () => {
   test("codex interactive shell: wait/write_stdin decode, keys, and empty-wait collapse (#141)", () => {
     const ESC = "\x1b";
     const lines = [
+      /* The REAL current wait wrapper: `Script running with cell ID N` (issue
+         #141 / finding 3), not the older `Process running with session ID`. */
       JSON.stringify({ type: "response_item", timestamp: "t1", payload: { type: "function_call", name: "wait", call_id: "w1", arguments: JSON.stringify({ cell_id: "46", yield_time_ms: 30000 }) } }),
-      JSON.stringify({ type: "response_item", timestamp: "t2", payload: { type: "function_call_output", call_id: "w1", output: `Chunk ID: 224a0b\nWall time: 30.0 seconds\nProcess running with session ID 70901\nOriginal token count: 674\nOutput:\n${ESC}[32m#16 building${ESC}[0m\r\n#16 done\r\n` } }),
+      JSON.stringify({ type: "response_item", timestamp: "t2", payload: { type: "function_call_output", call_id: "w1", output: `Script running with cell ID 46\nWall time 10.0 seconds\nOutput:\n${ESC}[32m#16 building${ESC}[0m\r\n#16 done\r\n` } }),
       JSON.stringify({ type: "response_item", timestamp: "t3", payload: { type: "function_call", name: "write_stdin", call_id: "s1", arguments: JSON.stringify({ session_id: 8479, chars: "" }) } }),
-      JSON.stringify({ type: "response_item", timestamp: "t4", payload: { type: "function_call_output", call_id: "s1", output: "Chunk ID: aa\nWall time: 5 seconds\nProcess exited with code 0\nOriginal token count: 3\nOutput:\n" } }),
+      /* An empty wait/poll wrapped in the same `Script running with cell ID` form. */
+      JSON.stringify({ type: "response_item", timestamp: "t4", payload: { type: "function_call_output", call_id: "s1", output: "Script running with cell ID 8479\nWall time 5.0 seconds\nOutput:\n" } }),
     ];
     const feed = buildFeed(codexFile, lines, false, "");
     const tools = feed.items.filter((item): item is Extract<Item, { kind: "tool" }> => item.kind === "tool");
     const wait = tools.find((tool) => tool.tool === "wait")!;
     expect(wait.family).toBe("shell");
-    /* Decoded: real newlines, ANSI removed, preamble not leaked. */
+    /* Decoded: real newlines, ANSI removed, preamble (incl. the real wrapper) not leaked. */
     expect(wait.outputPreview).toContain("#16 building");
     expect(wait.outputPreview).toContain("#16 done");
     expect(wait.outputPreview).not.toContain(ESC);
-    expect(wait.outputPreview).not.toContain("Process running");
-    expect(wait.outputPreview).not.toContain("Chunk ID");
-    /* write_stdin names its session; its empty chunk collapses to "waiting Ns". */
+    expect(wait.outputPreview).not.toContain("Script running with cell ID");
+    expect(wait.outputPreview).not.toContain("Wall time");
+    expect(wait.outputPreview).not.toContain("Output:");
+    /* write_stdin names its session; its empty chunk collapses to "waiting Ns"
+       with the captured wall time, not an "ok" with leaked runtime metadata. */
     const stdin = tools.find((tool) => tool.tool === "write_stdin")!;
     expect(stdin.summary).toContain("8479");
     expect(stdin.outputPreview).toBe("");
     expect(stdin.statusLabel.toLowerCase()).toContain("wait");
+    expect(stdin.statusLabel).toContain("5");
   });
 
   test("codex rollout: echo dedup, shell calls, compaction pair, service rows", () => {

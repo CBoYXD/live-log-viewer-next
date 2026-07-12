@@ -39,17 +39,20 @@ export function decodeTerminalText(text: string): string {
  * Human-readable rendering of the bytes `write_stdin` sent into a session:
  * control keys as their caret form (`^C`), newlines/returns as `⏎`, tabs as `⇥`,
  * so a card shows WHAT was typed rather than an invisible or raw-escape blob.
- * Empty input (a bare Enter) renders as `⏎`.
+ *
+ * Empty `chars` is NOT a keystroke: per the write_stdin contract it is a poll of
+ * the session for more output without sending any bytes. It returns `""` so the
+ * caller can label it a poll rather than falsely claiming an Enter was sent.
  */
 export function formatStdinKeys(chars: string): string {
-  if (!chars) return "⏎";
-  const rendered = chars
+  if (!chars) return "";
+  return chars
     .replace(/\r\n|\r|\n/g, "⏎")
     .replace(/\t/g, "⇥")
     /* Remaining C0/DEL control bytes → caret notation (^A … ^_, ^?). */
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, (ch) => {
       const code = ch.charCodeAt(0);
       return "^" + String.fromCharCode(code === 127 ? 63 : code + 64);
-    });
-  return rendered.trim() || "⏎";
+    })
+    .trim();
 }

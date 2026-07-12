@@ -354,6 +354,9 @@ const CMD_GROUP_MIN = 4;
 const OUTPUT_OK_MAX = 12_000;
 const OUTPUT_ERR_MAX = 60_000;
 const COMMAND_MAX = 8_000;
+/* A Codex result-preamble line (custom-tool + interactive-shell wrappers, all
+   known variants). Used to strip the contiguous leading metadata block. */
+const PREAMBLE_LINE = /^(?:Chunk ID:|Wall time\b|Original token count:|Output:[ \t]*$|Script completed\b|Script running with (?:cell|session) ID\b|Process running with (?:cell|session) ID\b|Process exited with code\b)/;
 const CODE_EXT_RE = /\.([A-Za-z0-9]{1,10})$/;
 
 function extLang(path: string): string | null {
@@ -1009,23 +1012,23 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
     /* Codex interactive-shell wall time, read before the preamble is stripped, so
-       an empty `wait` can render a compact "waiting Ns" line (issue #141). */
+       an empty `wait` can render a compact "waiting Ns" line (issue #141). Matches
+       both `Wall time: 30 seconds` and the bare `Wall time 10.0 seconds` wrapper. */
     const wallSeconds = output.match(/Wall time:?\s*([\d.]+)\s*seconds?/i)?.[1];
-    /* Codex wraps every custom-tool / interactive-shell result in a `Chunk ID /
-       Wall time / Process … / Original token count / Output:` preamble; strip it,
-       decode the terminal payload (real newlines, ANSI removed — issue #141), and
-       treat a bare `{}` (a script that returned nothing) as no output at all, so
-       an apply_patch card is not trailed by a signal-free block (issue #90). */
-    const cleaned = decodeTerminalText(output)
-      .replace(/^Chunk ID:[^\n]*\n/, "")
-      .replace(/Wall time:[^\n]*\n/, "")
-      .replace(/^Process (?:running with session ID|exited with code)[^\n]*\n/gm, "")
-      .replace(/Original token count:[^\n]*\n?/, "")
-      .replace(/^Script completed[ \t]*\r?\n/, "")
-      .replace(/^Wall time [\d.]+ seconds?[ \t]*\r?\n/, "")
-      .replace(/^Output:[ \t]*\r?\n/, "")
-      .trim();
-    const body = cleaned === "{}" ? "" : cleaned;
+    /* Codex wraps custom-tool AND interactive-shell (wait / write_stdin) results
+       in a metadata preamble whose lines vary by tool and version:
+         Chunk ID: …             Script completed
+         Wall time[:] N seconds  Script running with cell ID N
+         Original token count: … Process running with session ID N
+         Output:                 Process exited with code N
+       Strip the contiguous leading block of those lines, decode the payload (real
+       newlines, ANSI removed — issue #141), and treat a bare `{}` (a script that
+       returned nothing) as no output (issue #90). */
+    const lines = decodeTerminalText(output).split("\n");
+    let start = 0;
+    while (start < lines.length && PREAMBLE_LINE.test(lines[start]!)) start += 1;
+    const stripped = lines.slice(start).join("\n").trim();
+    const body = stripped === "{}" ? "" : stripped;
     const isErr = errFlag === true || (code !== undefined && code !== "0");
     const prev = callRec.event;
     /* An empty codex wait/stdin chunk collapses to "waiting Ns" rather than an

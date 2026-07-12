@@ -1,0 +1,37 @@
+import { expect, test } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { Minimap, type StackDot } from "./Minimap";
+import type { SchemeLayout, SchemeRect } from "./layout";
+
+const emptyLayout: SchemeLayout = {
+  nodes: [], edges: [], stacks: [], decks: [], loops: [], groups: [], links: [], drafts: [],
+  byPath: new Map(), width: 1000, height: 1000,
+};
+const world: SchemeRect = { x: 0, y: 0, w: 1000, h: 1000 };
+const cam = { x: 0, y: 0, z: 1 };
+const vp = { w: 800, h: 600 };
+
+test("collapsed worker stacks render one minimap dot per origin (#136 finding 2)", () => {
+  const stackDots: StackDot[] = [
+    { key: "wstack::flow::f1", color: "#5a51e0" },
+    { key: "wstack::pipeline::p1", color: "#5a51e0" },
+    { key: "wstack::origin::/root", color: "#9a9aa4" },
+  ];
+  const html = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} stackDots={stackDots} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  /* One dot per stack, tinted by origin kind (orchestration accent / spawner gray). */
+  const dots = html.match(/background-color:\s*#5a51e0/g) ?? [];
+  expect(dots.length).toBe(2);
+  expect(html).toContain("#9a9aa4");
+  /* The legend is titled with the stack count. */
+  expect(html).toContain("3 collapsed stacks");
+});
+
+test("no worker stacks → no legend dots", () => {
+  const html = renderToStaticMarkup(
+    <Minimap layout={emptyLayout} world={world} stackDots={[]} cam={cam} vp={vp} onJump={() => {}} />,
+  );
+  expect(html).not.toContain("collapsed stack");
+});

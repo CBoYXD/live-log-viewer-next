@@ -25,9 +25,10 @@ describe("family, icon, and summary per table row", () => {
     expect(s.chips.some((c) => c.value === "8479")).toBe(true);
   });
 
-  test("write_stdin — an empty stdin (bare Enter) renders a ⏎ instead of nothing (#141)", () => {
+  test("write_stdin — empty chars is labeled a poll, not an Enter keystroke (#141)", () => {
     const s = sum("write_stdin", { session_id: 12, chars: "" }, "codex");
-    expect(s.summary).toContain("⏎");
+    expect(s.summary).toContain("poll");
+    expect(s.summary).not.toContain("⏎");
   });
 
   test("wait — names the session/cell it is tailing, as a shell card (#141)", () => {

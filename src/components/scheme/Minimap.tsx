@@ -18,6 +18,12 @@ export interface Camera {
 const MAP_W = 216;
 const MAP_H = 148;
 
+/** One collapsed worker-stack origin, drawn as a single legend dot (issue #136). */
+export interface StackDot {
+  key: string;
+  color: string;
+}
+
 /**
  * Scaled-down world in the corner: every node as an engine-colored block,
  * the current viewport as an accent frame. Click or drag to jump the camera.
@@ -26,6 +32,7 @@ export function Minimap({
   layout,
   world,
   tasks = [],
+  stackDots = [],
   cam,
   vp,
   onJump,
@@ -37,6 +44,9 @@ export function Minimap({
   world: SchemeRect;
   /** Tasks render as 3 px status-colored dots; their edges never show here. */
   tasks?: PlacedTask[];
+  /** Collapsed worker stacks (issue #136): one dot per origin, shown as a compact
+      legend so folded workers read as a handful of dots, never an agent flood. */
+  stackDots?: StackDot[];
   cam: Camera;
   vp: { w: number; h: number };
   onJump: (wx: number, wy: number) => void;
@@ -88,8 +98,10 @@ export function Minimap({
     >
       <svg width={MAP_W} height={MAP_H} aria-hidden>
         <g transform={`translate(${ox - world.x * scale} ${oy - world.y * scale}) scale(${scale})`}>
+          {/* On-canvas quiet-branch stacks: one dot each, so a stack is a single
+              mark on the map, never a wall of member cards (issue #136). */}
           {layout.stacks.map((stack) => (
-            <rect key={stack.key} x={stack.x} y={stack.y} width={stack.w} height={stack.h} rx={18} fill="#c9c9d1" opacity={0.45} />
+            <circle key={stack.key} cx={stack.x + stack.w / 2} cy={stack.y + stack.h / 2} r={7 / scale} fill="#9a9aa4" opacity={0.6} />
           ))}
           {layout.drafts.map((draft) => (
             <rect key={draft.key} x={draft.x} y={draft.y} width={draft.w} height={draft.h} rx={18} fill="#9a9aa4" opacity={0.3} />
@@ -130,6 +142,23 @@ export function Minimap({
           />
         </g>
       </svg>
+      {/* Collapsed worker stacks live off-canvas, so they get a compact legend
+          here — one dot per origin — making "reflect stacks, not a flood" literal
+          on the map (issue #136). Capped so the row itself never floods. */}
+      {stackDots.length ? (
+        <div
+          className="pointer-events-none absolute bottom-1 left-1 flex max-w-[140px] flex-wrap items-center gap-1"
+          title={t("minimap.stacks", { count: stackDots.length })}
+          aria-hidden
+        >
+          {stackDots.slice(0, 14).map((dot) => (
+            <span key={dot.key} className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: dot.color }} />
+          ))}
+          {stackDots.length > 14 ? (
+            <span className="text-[8px] font-bold leading-none text-dim">+{stackDots.length - 14}</span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

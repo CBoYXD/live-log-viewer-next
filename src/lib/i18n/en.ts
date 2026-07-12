@@ -559,6 +559,7 @@ export const en = {
   "tools.noOutput": "no output captured",
   "tools.noOutputTip": "the full output lives in the rollout session",
   "tools.stdin": "stdin",
+  "tools.stdinPoll": "poll",
   "tools.wait": "wait",
   "tools.session": "session",
   "tools.waitingSeconds": "waiting {n}s",
@@ -898,6 +899,7 @@ export const en = {
 
   // scheme/Minimap
   "minimap.title": "Minimap — click or drag to navigate",
+  "minimap.stacks": { one: "{count} collapsed stack", other: "{count} collapsed stacks" },
 
   // PlanChip
   "plan.agentPlan": "Agent plan:",

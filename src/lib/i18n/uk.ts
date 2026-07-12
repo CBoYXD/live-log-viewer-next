@@ -537,6 +537,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "tools.noOutput": "вивід не збережено",
   "tools.noOutputTip": "повний вивід зберігається в сесії rollout",
   "tools.stdin": "stdin",
+  "tools.stdinPoll": "опитування",
   "tools.wait": "очікування",
   "tools.session": "сесія",
   "tools.waitingSeconds": "очікування {n} с",
@@ -867,6 +868,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "bulk.flowStart": "Запустити {count} флоу",
 
   "minimap.title": "Мінімапа — клікни або тягни, щоб перейти",
+  "minimap.stacks": { one: "{count} згорнутий стек", other: "{count} згорнутих стеків" },
 
   "plan.agentPlan": "План агента:",
   "plan.stepsAria": "План: {done} з {total} кроків",
