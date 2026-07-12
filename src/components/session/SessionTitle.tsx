@@ -14,6 +14,20 @@ import { saveSessionTitle } from "./sessionTitleApi";
     server-provided entry as-is". */
 type Optimistic = { title: string | null; revision: number } | null;
 
+/** Whether two entry snapshots are the same session. The transcript path is the
+    stable anchor; when it changes (account/compaction succession) a matching
+    conversation id still proves the same session. Deliberately tolerant of
+    conversation-id *enrichment* (path unchanged, id undefined→defined), which is
+    a later poll filling identity in — not a switch to a different session. */
+function isSameSession(a: SessionRef, b: SessionRef): boolean {
+  return a.path === b.path || (a.conversationId != null && b.conversationId != null && a.conversationId === b.conversationId);
+}
+
+interface SessionRef {
+  path: string;
+  conversationId?: string;
+}
+
 interface SessionTitleProps {
   file: FileEntry;
   /** Truncation applied to the displayed title. */
@@ -59,29 +73,30 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
      users must not lose their place after Enter/Escape/Reset/Cancel). */
   const restoreFocus = useRef(false);
 
-  // Reset all edit state when the session identity changes, so a parent that
-  // reuses this component for a different session (e.g. the scheme board's
-  // expanded overlay switching A→B) never keeps A's editor, optimistic title,
-  // or retry — a stale blur/retry would otherwise submit A's value under B's
-  // identity. Storing the previous identity in state is React's sanctioned way
-  // to reset on a prop change without a key (react.dev "you might not need an
-  // effect").
-  const identity = file.conversationId ?? file.path;
-  const [renderedIdentity, setRenderedIdentity] = useState(identity);
-  if (identity !== renderedIdentity) {
-    setRenderedIdentity(identity);
-    setEditing(false);
-    setValue("");
-    setOptimistic(null);
-    setBusy(false);
-    setAnnounce("");
-    setRetryTitle(undefined);
+  // Reset all edit state when the component is reused for a *different* session
+  // (e.g. the scheme board's expanded overlay switching A→B), so a stale
+  // blur/retry never submits A's value under B's identity. Enrichment of the
+  // same session (a poll adding `conversationId`, or a succession changing the
+  // path while the id holds) is NOT a switch — it keeps the draft. Tracking the
+  // previous ref in state is React's sanctioned reset-on-prop-change pattern.
+  const [rendered, setRendered] = useState<SessionRef>({ path: file.path, conversationId: file.conversationId });
+  if (rendered.path !== file.path || rendered.conversationId !== file.conversationId) {
+    const switched = !isSameSession(rendered, file);
+    setRendered({ path: file.path, conversationId: file.conversationId });
+    if (switched) {
+      setEditing(false);
+      setValue("");
+      setOptimistic(null);
+      setBusy(false);
+      setAnnounce("");
+      setRetryTitle(undefined);
+    }
   }
-  // Latest identity for async guards, kept current in an effect (ref writes are
-  // not allowed during render).
-  const identityRef = useRef(identity);
+  // Latest session ref for async guards, kept current in an effect (ref writes
+  // are not allowed during render).
+  const identityRef = useRef<SessionRef>({ path: file.path, conversationId: file.conversationId });
   useEffect(() => {
-    identityRef.current = identity;
+    identityRef.current = { path: file.path, conversationId: file.conversationId };
   });
 
   // Ignore the optimistic overlay once the server has caught up to (or past)
@@ -148,11 +163,11 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   }, [autoEditToken]);
 
   const attemptSave = async (title: string | null, allowRetry: boolean) => {
-    // Capture the identity this save belongs to; if the component is reused for
+    // Capture the session this save belongs to; if the component is reused for
     // another session before the request resolves, drop the stale result rather
     // than write it (e.g. a failed A-save must not arm B's retry with A's value).
-    const forIdentity = identity;
-    const stale = () => identityRef.current !== forIdentity;
+    const forSession: SessionRef = { path: file.path, conversationId: file.conversationId };
+    const stale = () => !isSameSession(forSession, identityRef.current);
     setBusy(true);
     setRetryTitle(undefined);
     const trimmed = title && title.trim() ? title.trim() : null;

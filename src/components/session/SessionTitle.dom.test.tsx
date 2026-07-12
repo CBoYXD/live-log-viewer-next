@@ -361,6 +361,33 @@ test("switching sessions before a save settles resets the editor and shows the n
   expect(view.host.textContent).not.toContain("A draft not saved");
 });
 
+test("conversation-id enrichment on the same path keeps the editor open (no reset)", () => {
+  // Initially no conversationId; identity is the path.
+  const bare = entry({ path: "/home/u/.claude/projects/proj/enrich.jsonl", title: "Session" });
+  const view = mount(bare);
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+
+  // A later poll fills in conversationId for the same path — enrichment, not a
+  // switch: the open editor (an in-progress draft) must survive, and nothing is
+  // saved.
+  view.rerender(entry({ path: "/home/u/.claude/projects/proj/enrich.jsonl", conversationId: "conversation_E", title: "Session" }));
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+  expect(calls).toHaveLength(0);
+});
+
+test("succession (new path, same conversation id) keeps the editor open (no reset)", () => {
+  const gen1 = entry({ path: "/home/u/.claude/projects/proj/gen1.jsonl", conversationId: "conversation_X", title: "S" });
+  const gen2 = entry({ path: "/home/u/.claude/projects/proj/gen2.jsonl", conversationId: "conversation_X", title: "S" });
+  const view = mount(gen1);
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+
+  view.rerender(gen2);
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeTruthy();
+  expect(calls).toHaveLength(0);
+});
+
 test("an optimistic rename does not leak onto a different reused session", async () => {
   const view = mount(sessionA());
   flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());

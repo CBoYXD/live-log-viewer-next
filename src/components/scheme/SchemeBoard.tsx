@@ -837,10 +837,10 @@ export function SchemeBoard({
         aria-label={cleanTitle(expandedNode.file.title, 90)}
       >
         <BranchPane
-          /* Key by session identity so switching the expanded node A→B remounts
-             the pane instead of reusing A's SessionTitle (editor/optimistic/
-             retry) under B's identity. */
-          key={expandedNode.file.conversationId ?? expandedNode.file.path}
+          /* Not keyed by identity: SessionTitle resets its own edit state on a
+             real A→B switch (and preserves it across conversation-id enrichment
+             or succession), so a key here would only cause spurious remounts —
+             and replay a retained F2 token — when a poll fills in identity. */
           file={expandedNode.file}
           tasks={expandedNode.tasks}
           isRoot={expandedNode.isRoot}
