@@ -130,6 +130,18 @@ function FlowOverride({ group, onClose }: { group: SchemeGroup; onClose: () => v
   const [model, setModel] = useState(reviewer.model ?? "");
   const [effort, setEffort] = useState(reviewer.effort ?? "");
   const [note, setNote] = useState(flow.rounds.at(-1)?.readyNote ?? "");
+  /* The panel stays mounted across polls, so re-seed the note whenever the current
+     round changes — otherwise a note typed for round N would be submitted over
+     round N+1 once it reaches a note-consuming state (issue #118 review). Tracked
+     via the round number, so an operator's in-progress edit within the SAME round
+     survives a refresh. Render-time state adjustment (React's endorsed idiom), so
+     no stale-effect flash. */
+  const roundKey = flow.rounds.at(-1)?.n ?? 0;
+  const [noteRound, setNoteRound] = useState(roundKey);
+  if (noteRound !== roundKey) {
+    setNoteRound(roundKey);
+    setNote(flow.rounds.at(-1)?.readyNote ?? "");
+  }
   const [limit, setLimit] = useState(String(flow.roundLimit));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

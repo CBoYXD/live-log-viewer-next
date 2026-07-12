@@ -124,6 +124,35 @@ test("an empty note field is still sent so a cleared note reaches the backend (i
   host.remove();
 });
 
+test("the note re-seeds when the current round changes across a poll, discarding a stale edit (issue #118 review)", () => {
+  /* Round 1 parked; operator types a note but does not submit. */
+  const round1: SchemeGroup = {
+    ...flowGroup,
+    flow: { ...flowGroup.flow!, state: "needs_decision", rounds: [{ n: 1, readyNote: "round-1 note" }] } as unknown as Flow,
+  };
+  const { host, root } = mount(<GroupOverridePanel group={round1} onClose={() => undefined} />);
+  const textarea = () => host.querySelector("textarea") as HTMLTextAreaElement;
+  expect(textarea().value).toBe("round-1 note");
+  const setter = Object.getOwnPropertyDescriptor(dom.HTMLTextAreaElement.prototype, "value")!.set!;
+  flushSync(() => {
+    setter.call(textarea(), "operator edit for round 1");
+    textarea().dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+  });
+  expect(textarea().value).toBe("operator edit for round 1");
+
+  /* A poll advances the flow to round 2 (also parked). The stale round-1 edit
+     must NOT survive into round 2 — the field re-seeds from round 2. */
+  const round2: SchemeGroup = {
+    ...flowGroup,
+    flow: { ...flowGroup.flow!, state: "needs_decision", rounds: [{ n: 1, readyNote: "round-1 note" }, { n: 2, readyNote: "round-2 note" }] } as unknown as Flow,
+  };
+  flushSync(() => root.render(<GroupOverridePanel group={round2} onClose={() => undefined} />));
+  expect(textarea().value).toBe("round-2 note");
+
+  flushSync(() => root.unmount());
+  host.remove();
+});
+
 test("the next-round note editor is disabled where no action can save it (issue #118 review)", () => {
   /* auto-mode fixing: the next round is created by the engine's marker, which
      never reads this field — the editor must be disabled, not silently discard. */

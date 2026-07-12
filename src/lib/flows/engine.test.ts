@@ -8,7 +8,7 @@ import type { FileEntry } from "@/lib/types";
 import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
-const { tickFlows, persistTickFlows, flowTickBase, reviewerOwnershipLost } = await import("./engine");
+const { tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, relayFixOrPark } = await import("./engine");
 const { loadFlows, saveFlows } = await import("./store");
 
 afterAll(() => {
@@ -345,12 +345,92 @@ test("a reviewer spawned into a concurrently closed flow is detected as orphaned
   /* The close is respected (not reopened) and the pane handle was NOT persisted. */
   expect(after.state).toBe("closed");
   expect(after.rounds[0]!.reviewerPane).toBeNull();
-  /* So the engine's ownership check fires and the pane gets cleaned up. */
-  expect(reviewerOwnershipLost("flow-spawn")).toBe(true);
+  /* So the launch is detected as un-persisted and the pane gets cleaned up. */
+  expect(reviewerLaunchPersisted(loadFlows()[0], clone.rounds[0]!)).toBe(false);
 });
 
-test("reviewerOwnershipLost is false while the flow is still open and alive", () => {
-  saveFlows([raceFlow({ id: "flow-open", state: "reviewing" })]);
-  expect(reviewerOwnershipLost("flow-open")).toBe(false);
-  expect(reviewerOwnershipLost("flow-missing")).toBe(true);
+test("a pause during pane launch orphans nothing and lets resume re-spawn (issue #118 review Finding 2)", () => {
+  /* Tick is mid-spawn (spawnStartedAt set, no handle yet); base = spawning. */
+  const spawning = raceFlow({
+    id: "flow-pause",
+    state: "spawning",
+    reviewerMode: "pane",
+    rounds: [{
+      n: 1, reviewerPath: null, reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      reviewerPane: null, findingsPath: null, triggeredBy: "button", readyNote: null, verdict: null,
+      findingsCount: null, startedAt: "2026-06-06T00:00:00Z", spawnStartedAt: "2026-06-06T00:00:01Z",
+      relayStartedAt: null, reviewedAt: null, relayedAt: null, error: null,
+    }],
+  });
+  saveFlows([spawning]);
+  const clone = structuredClone(spawning);
+  const base = flowTickBase([clone]);
+
+  /* The operator pauses while the pane is being created. */
+  saveFlows([raceFlow({ id: "flow-pause", state: "paused", pausedState: "spawning", reviewerMode: "pane", rounds: spawning.rounds })]);
+
+  /* The tick stamps the pane handle and persists — the merge drops it (paused). */
+  clone.state = "reviewing";
+  clone.rounds[0]!.reviewerPane = { paneId: "%9", windowName: "codex-rev" };
+  persistTickFlows([clone], base);
+
+  /* The handle did not persist, so the launch is orphaned and must be cleaned up. */
+  expect(reviewerLaunchPersisted(loadFlows()[0], clone.rounds[0]!)).toBe(false);
+  expect(loadFlows()[0]!.state).toBe("paused");
+
+  /* Cleanup clears the abandoned spawn markers so resume re-spawns fresh rather
+     than parking as "interrupted". */
+  abandonLaunch("flow-pause", 1);
+  const after = loadFlows()[0]!.rounds[0]!;
+  expect(after.spawnStartedAt).toBeNull();
+  expect(after.reviewerPane).toBeNull();
+});
+
+test("reviewerLaunchPersisted tracks the handle, not just close state", () => {
+  const round = { n: 1, reviewerPane: { paneId: "%5", windowName: "w" }, reviewerPid: null } as never;
+  /* Handle present on disk → owned. */
+  saveFlows([raceFlow({ id: "flow-own", state: "reviewing", rounds: [{ ...(round as object), reviewerPath: null, reviewerRole: null, findingsPath: null, triggeredBy: "button", readyNote: null, verdict: null, findingsCount: null, startedAt: "t", spawnStartedAt: "t", relayStartedAt: null, reviewedAt: null, relayedAt: null, error: null } as never] })]);
+  expect(reviewerLaunchPersisted(loadFlows()[0], round)).toBe(true);
+  /* Missing flow → lost. */
+  expect(reviewerLaunchPersisted(undefined, round)).toBe(false);
+});
+
+function limitFlow(rounds: number, roundLimit: number): Flow {
+  return raceFlow({
+    id: "flow-limit",
+    state: "relaying",
+    roundLimit,
+    rounds: Array.from({ length: rounds }, (_unused, i) => ({
+      n: i + 1, reviewerPath: null, findingsPath: null, triggeredBy: "marker", readyNote: null,
+      verdict: "REQUEST_CHANGES", findingsCount: 0, startedAt: "t", reviewedAt: "t", relayedAt: null, error: null,
+    })) as never,
+  });
+}
+
+test("the post-relay transition honors a concurrent Extend, not the stale clone limit (issue #118 review Finding 3)", () => {
+  /* Disk was extended to 8 during the awaited delivery; the tick clone still has 5. */
+  saveFlows([limitFlow(5, 8)]);
+  const clone = structuredClone(loadFlows()[0]!);
+  clone.roundLimit = 5;
+  relayFixOrPark(clone);
+  /* 5 rounds < fresh 8 → keep iterating, not parked; the clone adopts the fresh limit. */
+  expect(clone.state).toBe("fixing");
+  expect(clone.roundLimit).toBe(8);
+});
+
+test("the post-relay transition honors a concurrent Set-Limit lower, parking as expected (issue #118 review Finding 3)", () => {
+  /* Disk was lowered to 4; the stale clone (5) would have allowed another round. */
+  saveFlows([limitFlow(4, 4)]);
+  const clone = structuredClone(loadFlows()[0]!);
+  clone.roundLimit = 5;
+  relayFixOrPark(clone);
+  expect(clone.state).toBe("needs_decision");
+  expect(clone.stateDetail).toBe("round limit reached");
+});
+
+test("relayFixOrPark treats a 0 limit as unlimited", () => {
+  saveFlows([limitFlow(9, 0)]);
+  const clone = structuredClone(loadFlows()[0]!);
+  relayFixOrPark(clone);
+  expect(clone.state).toBe("fixing");
 });

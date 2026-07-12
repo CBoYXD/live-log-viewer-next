@@ -187,12 +187,41 @@ function applyVerdict(flow: Flow, round: Round, parsed: ParsedFindings): void {
   flow.stateDetail = null;
 }
 
-/** Has the flow lost the ability to own the reviewer we just spawned? A
-    concurrent close (or a delete) during the await means the spawned reviewer is
-    orphaned — the tick's merge will drop our handle, so we must stop it here. */
-export function reviewerOwnershipLost(flowId: string): boolean {
-  const disk = loadFlows().find((flow) => flow.id === flowId);
-  return !disk || disk.state === "closed";
+/**
+ * Did the reviewer launch we just performed actually land on disk? After the
+ * post-spawn checkpoint, our handle (pane id / headless pid) is on the round IF
+ * we still own the launch. If a concurrent close/pause/retry/cancel took the flow
+ * over during the await, the tick's merge dropped our handle — so the disk round
+ * no longer carries it, and the worker we started is now an orphan we must stop.
+ */
+export function reviewerLaunchPersisted(diskFlow: Flow | undefined, round: Round): boolean {
+  if (!diskFlow) return false;
+  const diskRound = diskFlow.rounds.find((item) => item.n === round.n);
+  if (!diskRound) return false;
+  if (round.reviewerPane) return diskRound.reviewerPane?.paneId === round.reviewerPane.paneId;
+  if (round.reviewerPid != null) return diskRound.reviewerPid === round.reviewerPid;
+  /* Transcript-only launch (no pane/pid handle yet): treat a close as lost. */
+  return diskFlow.state !== "closed";
+}
+
+/**
+ * Clear the abandoned launch's spawn markers on disk so a resume/retry re-spawns
+ * a fresh reviewer instead of parking as "interrupted" (issue #118 review): a
+ * pause that raced the launch leaves the round with spawnStartedAt set but no
+ * live reviewer, which the spawning branch would otherwise read as an interrupted
+ * restart. Synchronous load-modify-save, so no patchFlow interleaves.
+ */
+export function abandonLaunch(flowId: string, roundNumber: number): void {
+  const flows = loadFlows();
+  const flow = flows.find((item) => item.id === flowId);
+  const round = flow?.rounds.find((item) => item.n === roundNumber);
+  if (!round) return;
+  round.spawnStartedAt = null;
+  round.reviewerPane = null;
+  round.reviewerPath = null;
+  round.reviewerPid = null;
+  round.sessionId = null;
+  saveFlows(flows);
 }
 
 /** Best-effort kill of a pane reviewer we spawned but can no longer own. The
@@ -242,10 +271,15 @@ async function launchReviewer(flow: Flow, round: Round, persistCheckpoint: () =>
     if (transcript) round.reviewerPath = transcript;
     if (!round.reviewerPath && pane.panePid) round.error = null;
     /* Persist the pane handle NOW so a close that races the tail of this spawn can
-       find and stop it; if the flow was already closed while we were spawning, the
-       merge dropped our handle and we own an orphan — kill it. */
+       find and stop it. If a concurrent close/pause/retry took the flow over, the
+       merge dropped our handle — the pane is an orphan, so kill it, and let a
+       resume/retry re-spawn cleanly rather than parking as interrupted. */
     persistCheckpoint();
-    if (reviewerOwnershipLost(flow.id)) await stopOrphanPane(round);
+    const paneDisk = loadFlows().find((item) => item.id === flow.id);
+    if (!reviewerLaunchPersisted(paneDisk, round)) {
+      await stopOrphanPane(round);
+      if (paneDisk && paneDisk.state !== "closed") abandonLaunch(flow.id, round.n);
+    }
     return;
   }
   const launched = startHeadlessReview(
@@ -261,11 +295,16 @@ async function launchReviewer(flow: Flow, round: Round, persistCheckpoint: () =>
   if (launched.pid) round.reviewerPid = launched.pid;
   if (launched.sessionId) round.sessionId = launched.sessionId;
   if (launched.reviewerPath) round.reviewerPath = launched.reviewerPath;
-  /* Same ownership guard as the pane branch: persist the pid, and if the flow was
-     closed while the headless reviewer was launching, terminate the orphan
-     (forgetHeadlessReview SIGTERM/SIGKILLs the detached process group). */
+  /* Same ownership guard as the pane branch: persist the pid, and if a concurrent
+     close/pause/retry took the flow over, terminate the orphan (forgetHeadlessReview
+     SIGTERM/SIGKILLs the detached group) and clear the abandoned spawn markers so
+     resume/retry re-spawns fresh. */
   persistCheckpoint();
-  if (reviewerOwnershipLost(flow.id)) forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  const headlessDisk = loadFlows().find((item) => item.id === flow.id);
+  if (!reviewerLaunchPersisted(headlessDisk, round)) {
+    forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    if (headlessDisk && headlessDisk.state !== "closed") abandonLaunch(flow.id, round.n);
+  }
 }
 
 async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, round: Round): Promise<void> {
@@ -279,7 +318,23 @@ async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, 
     flow.closedAt = isoNow();
   } else if (round.verdict === "COMMENT") {
     flow.state = "done_comment";
-  } else if (flow.roundLimit > 0 && flow.rounds.length >= flow.roundLimit) {
+  } else {
+    relayFixOrPark(flow);
+  }
+}
+
+/**
+ * The post-relay fix-or-park transition, decided against the FRESH persisted round
+ * limit rather than the tick clone's (issue #118 review). An Extend / Set-Limit
+ * that raced this awaited delivery survives the merge as operator-owned config, so
+ * reading the stale clone value could still park an increased-limit flow as "round
+ * limit reached" or let a lowered-limit flow start another round. Re-reads disk
+ * synchronously right before the decision, so it matches what the merge persists.
+ */
+export function relayFixOrPark(flow: Flow): void {
+  const roundLimit = loadFlows().find((item) => item.id === flow.id)?.roundLimit ?? flow.roundLimit;
+  flow.roundLimit = roundLimit;
+  if (roundLimit > 0 && flow.rounds.length >= roundLimit) {
     markNeedsDecision(flow, "round limit reached");
   } else {
     flow.state = "fixing";
