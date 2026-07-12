@@ -6,8 +6,12 @@ import path from "node:path";
 const SANDBOX = fs.mkdtempSync(path.join(os.tmpdir(), "llv-limits-account-test-"));
 const OLD_STATE = process.env.LLV_STATE_DIR;
 const OLD_HOME = process.env.LLV_CODEX_HOME;
+const OLD_CLAUDE_HOME = process.env.LLV_CLAUDE_HOME;
 process.env.LLV_STATE_DIR = path.join(SANDBOX, "state");
 process.env.LLV_CODEX_HOME = path.join(SANDBOX, "legacy");
+process.env.LLV_CLAUDE_HOME = path.join(SANDBOX, "legacy-claude");
+fs.mkdirSync(process.env.LLV_CLAUDE_HOME, { recursive: true });
+fs.writeFileSync(path.join(process.env.LLV_CLAUDE_HOME, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "test-token", subscriptionType: "max" } }), { mode: 0o600 });
 
 const { createManagedCodexAccount, setActiveCodexAccount } = await import("@/lib/accounts/codex");
 const { mapAppServerRateLimits, readCodexLimits, readLimits } = await import("./limits");
@@ -17,8 +21,26 @@ afterAll(() => {
   else process.env.LLV_STATE_DIR = OLD_STATE;
   if (OLD_HOME === undefined) delete process.env.LLV_CODEX_HOME;
   else process.env.LLV_CODEX_HOME = OLD_HOME;
+  if (OLD_CLAUDE_HOME === undefined) delete process.env.LLV_CLAUDE_HOME;
+  else process.env.LLV_CLAUDE_HOME = OLD_CLAUDE_HOME;
   fs.rmSync(SANDBOX, { recursive: true, force: true });
 });
+
+const codexLiveReader = async () => ({
+  primary: { usedPercent: 12, resetsAt: 100, windowDurationMins: 300 },
+  secondary: null,
+  planType: "pro",
+});
+
+function resetLimitsCache(): void {
+  delete (globalThis as { __llvLimitsCache?: unknown }).__llvLimitsCache;
+  delete (globalThis as { __llvLimitsInflight?: unknown }).__llvLimitsInflight;
+  fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "limits-cache.json"), { force: true });
+}
+
+function claudeUsage(usedPercent = 20): Response {
+  return Response.json({ five_hour: { utilization: usedPercent } });
+}
 
 test("switching to an account without events never reuses another account's Codex limits", async () => {
   const legacySession = path.join(process.env.LLV_CODEX_HOME!, "sessions", "2026", "07", "09", "rollout.jsonl");
@@ -146,6 +168,155 @@ test("a fresh Claude cache still refreshes missing Codex limits", async () => {
     expect(payload.claude?.session?.usedPercent).toBe(11);
     expect(payload.codex?.session?.usedPercent).toBe(37);
     expect(payload.codexAccountId).toBe("default");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("consecutive Claude 429s back off and suppress a third fetch inside the cooldown", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    return new Response(null, { status: 429 });
+  }) as unknown as typeof fetch;
+  try {
+    const first = await readLimits({ codexLiveReader, now: () => 1_000_000 });
+    expect(first.provenance.claude).toMatchObject({ source: "unavailable", reason: "oauth-rate-limited", retryAt: new Date(1_060_000).toISOString() });
+    const second = await readLimits({ codexLiveReader, now: () => 1_060_001 });
+    expect(second.provenance.claude.retryAt).toBe(new Date(1_180_001).toISOString());
+    const third = await readLimits({ codexLiveReader, now: () => 1_120_000 });
+    expect(third.provenance.claude).toEqual(second.provenance.claude);
+    expect(fetches).toBe(2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("Claude 429 honors Retry-After when it exceeds the exponential delay", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    return fetches === 1
+      ? new Response(null, { status: 429, headers: { "retry-after": "600" } })
+      : claudeUsage();
+  }) as unknown as typeof fetch;
+  try {
+    const limited = await readLimits({ codexLiveReader, now: () => 2_000_000 });
+    expect(limited.provenance.claude.retryAt).toBe(new Date(2_600_000).toISOString());
+    await readLimits({ codexLiveReader, now: () => 2_300_000 });
+    expect(fetches).toBe(1);
+    const recovered = await readLimits({ codexLiveReader, now: () => 2_600_001 });
+    expect(recovered.provenance.claude).toMatchObject({ source: "live", reason: null, retryAt: null });
+    expect(fetches).toBe(2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("Claude 429 preserves an HTTP-date Retry-After deadline across response latency", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  let now = 10_000_000;
+  let fetches = 0;
+  const retryHeader = new Date(10_121_000).toUTCString();
+  const retryAt = Date.parse(retryHeader);
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    if (fetches === 1) {
+      now = 10_001_500;
+      return new Response(null, { status: 429, headers: { "retry-after": retryHeader } });
+    }
+    return claudeUsage();
+  }) as unknown as typeof fetch;
+  try {
+    const limited = await readLimits({ codexLiveReader, now: () => now });
+    expect(limited.provenance.claude.retryAt).toBe(new Date(retryAt).toISOString());
+    now = retryAt - 1;
+    await readLimits({ codexLiveReader, now: () => now });
+    expect(fetches).toBe(1);
+    now = retryAt + 1;
+    const recovered = await readLimits({ codexLiveReader, now: () => now });
+    expect(recovered.provenance.claude.source).toBe("live");
+    expect(fetches).toBe(2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("Claude 401 records re-authentication provenance", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(null, { status: 401 })) as unknown as typeof fetch;
+  try {
+    const result = await readLimits({ codexLiveReader, now: () => 3_000_000 });
+    expect(result.provenance.claude).toMatchObject({
+      source: "unavailable",
+      reason: "oauth-reauthentication-required",
+      retryAt: new Date(3_060_000).toISOString(),
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a Claude success resets 429 backoff and preserves the fresh-cache fast path", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  const replies = [
+    new Response(null, { status: 429 }),
+    claudeUsage(21),
+    new Response(null, { status: 429 }),
+  ];
+  let fetches = 0;
+  globalThis.fetch = (async () => replies[fetches++]) as unknown as typeof fetch;
+  try {
+    await readLimits({ codexLiveReader, now: () => 4_000_000 });
+    const recovered = await readLimits({ codexLiveReader, now: () => 4_060_001 });
+    expect(recovered.claude?.session?.usedPercent).toBe(21);
+    await readLimits({ codexLiveReader, now: () => 4_080_000 });
+    expect(fetches).toBe(2);
+    const limitedAgain = await readLimits({ codexLiveReader, now: () => 4_090_002 });
+    expect(limitedAgain.provenance.claude.retryAt).toBe(new Date(4_150_002).toISOString());
+    expect(fetches).toBe(3);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("concurrent Claude refreshes share one provider request at each retry boundary", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  let response = deferred<Response>();
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    return response.promise;
+  }) as unknown as typeof fetch;
+  try {
+    const firstWave = Array.from({ length: 6 }, () => readLimits({ codexLiveReader, now: () => 5_000_000 }));
+    expect(fetches).toBe(1);
+    response.resolve(new Response(null, { status: 429 }));
+    const firstResults = await Promise.all(firstWave);
+    expect(firstResults.every((result) => result.provenance.claude.retryAt === new Date(5_060_000).toISOString())).toBeTrue();
+
+    response = deferred<Response>();
+    const secondWave = Array.from({ length: 6 }, () => readLimits({ codexLiveReader, now: () => 5_060_001 }));
+    expect(fetches).toBe(2);
+    response.resolve(new Response(null, { status: 429 }));
+    const secondResults = await Promise.all(secondWave);
+    expect(secondResults.every((result) => result.provenance.claude.retryAt === new Date(5_180_001).toISOString())).toBeTrue();
+
+    await readLimits({ codexLiveReader, now: () => 5_120_000 });
+    expect(fetches).toBe(2);
   } finally {
     globalThis.fetch = realFetch;
   }

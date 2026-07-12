@@ -314,7 +314,12 @@ export interface LimitsProvenance {
   source: "live" | "transcript" | "cache" | "unavailable";
   reason: string | null;
   staleSince: string | null;
+  /** ISO timestamp for the next provider refresh after a failed read. */
+  retryAt?: string | null;
 }
+
+export const LIMITS_RATE_LIMITED_REASON = "oauth-rate-limited";
+export const LIMITS_REAUTH_REQUIRED_REASON = "oauth-reauthentication-required";
 
 export interface LimitsPayload {
   claude: EngineLimits | null;

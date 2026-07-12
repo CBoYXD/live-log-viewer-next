@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { accountEntryPointVisible, type Engine, useEngineAccounts } from "@/hooks/useEngineAccounts";
 import { type Locale, translate, useLocale } from "@/lib/i18n";
-import type { EngineLimits, LimitsPayload, LimitWindow } from "@/lib/types";
+import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type EngineLimits, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "@/lib/types";
 
 import { AccountsPanel } from "./AccountsPanel";
 import { BurndownPanel } from "./BurndownPanel";
@@ -24,6 +24,17 @@ export function fmtStaleSince(staleSince: string | null | undefined, locale: Loc
   if (Number.isNaN(d.getTime())) return null;
   return translate(locale, "limits.asOf", {
     time: d.toLocaleTimeString(bcp47(locale), { hour: "2-digit", minute: "2-digit", hour12: false }),
+  });
+}
+
+export function fmtLimitsFailureReason(meta: LimitsProvenance, locale: Locale): string | null {
+  if (meta.source !== "unavailable" && meta.source !== "cache") return null;
+  if (meta.reason === LIMITS_REAUTH_REQUIRED_REASON) return translate(locale, "limits.reauthRequired");
+  if (meta.reason !== LIMITS_RATE_LIMITED_REASON || !meta.retryAt) return null;
+  const retryAt = new Date(meta.retryAt);
+  if (Number.isNaN(retryAt.getTime())) return translate(locale, "limits.rateLimited");
+  return translate(locale, "limits.rateLimitedRetry", {
+    time: retryAt.toLocaleTimeString(bcp47(locale), { hour: "2-digit", minute: "2-digit", hour12: false }),
   });
 }
 
@@ -166,6 +177,7 @@ function EngineLimitsBlock({
   payloadAccountId,
   now,
   staleHint,
+  provenance,
   onSwitched,
 }: {
   engine: Engine;
@@ -174,9 +186,10 @@ function EngineLimitsBlock({
   payloadAccountId: string | null;
   now: number;
   staleHint: string | null;
+  provenance: LimitsProvenance;
   onSwitched: () => void;
 }) {
-  const { t } = useLocale();
+  const { locale, t } = useLocale();
   const accounts = useEngineAccounts(engine);
   const [open, setOpen] = useState(false);
   const [chartOpen, setChartOpen] = useState(false);
@@ -242,6 +255,8 @@ function EngineLimitsBlock({
   const activeLabel = activeAccount?.label ?? t("accounts.trigger");
   const effective = activeAccount?.effective;
   const draining = accounts.migration?.state === "draining";
+  const failureReason = fmtLimitsFailureReason(provenance, locale);
+  const visibleFailureReason = accounts.status === "loading" || identityPending ? null : failureReason;
 
   return (
     <div ref={containerRef} className="relative">
@@ -294,14 +309,15 @@ function EngineLimitsBlock({
               setOpen(false);
               setChartOpen((value) => !value);
             }}
-            className="block w-full px-3.5 pb-3 pt-0.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            className={`block w-full px-3.5 pt-0.5 text-left hover:bg-bg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${visibleFailureReason ? "pb-1.5" : "pb-3"}`}
           >
             <LimitRow label={t("limits.5h")} window={accountLimits!.session} engineColor={tint.color} now={now} />
             <LimitRow label={t("limits.week")} window={accountLimits!.weekly} engineColor={tint.color} now={now} />
           </button>
-        ) : (
+        ) : visibleFailureReason ? null : (
           <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-dim">{accounts.status === "loading" || identityPending ? t("limits.accountLoading") : t("limits.noDataYet")}</div>
         )}
+        {visibleFailureReason ? <div className="px-3.5 pb-3 pt-0.5 text-[10px] text-dim">{visibleFailureReason}</div> : null}
       </div>
       {open ? <AccountsPanel state={accounts} onClose={close} /> : null}
       {chartOpen ? <BurndownPanel key={accounts.active} engine={engine} label={label} plan={accountLimits?.plan ?? null} activeAccountId={accounts.active} onClose={closeChart} /> : null}
@@ -341,8 +357,8 @@ export function LimitsFooter() {
   const now = snap?.at ?? 0;
   return (
     <div className="shrink-0 border-t border-line empty:hidden">
-      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} staleHint={claudeStaleHint} onSwitched={invalidateLimits} />
-      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="claude" label="Claude" limits={snap?.data.claude ?? null} payloadAccountId={snap?.data.claudeAccountId ?? null} now={now} staleHint={claudeStaleHint} provenance={snap?.data.provenance.claude ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
+      <EngineLimitsBlock engine="codex" label="Codex" limits={snap?.data.codex ?? null} payloadAccountId={snap?.data.codexAccountId ?? null} now={now} staleHint={codexStaleHint} provenance={snap?.data.provenance.codex ?? { source: "unavailable", reason: null, staleSince: null }} onSwitched={invalidateLimits} />
     </div>
   );
 }
