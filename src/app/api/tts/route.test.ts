@@ -29,6 +29,13 @@ describe("/api/tts", () => {
     expect(await response.json()).toEqual({ error: "text-to-speech is unavailable" });
   });
 
+  test("returns a clean 400 for a null JSON body", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    const response = await POST(request("null"));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "expected a JSON object" });
+  });
+
   test("streams the OpenAI audio response", async () => {
     process.env.OPENAI_API_KEY = "test-key";
     const stream = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1, 2, 3])); controller.close(); } });

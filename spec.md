@@ -1,15 +1,15 @@
-# Issue 121: deployment proxy request forwarding
+# Issue 26: TTS read answer aloud
 
 ## Task statement
 
-Investigate the first managed Viewer cutover failure where `serveViewerDeploymentProxy` accepted connections on the stable listener while returning zero response bytes. Repair request forwarding for the production `bun-container` runtime, preserve the target-file listener-switch design, cover the failure with a real TCP regression test, and remove the public-repository SSH bootstrap papercut.
+Add OpenAI text-to-speech for assistant answers through `/api/tts`, expose play/stop controls only when an environment API key is available, stream audio, and exclude tool calls and code blocks from spoken text.
 
 ## Acceptance criteria
 
-- AC1: The deployment proxy forwards a request sent immediately after downstream TCP connection and returns the candidate Viewer response.
-- AC2: The proxy preserves request bytes while its upstream connection is being established under production-image Bun 1.2.18.
-- AC3: A regression test drives an external TCP client through an in-process proxy and upstream listener.
-- AC4: Missing, invalid, or recursive release targets continue to receive the existing `503 Service Unavailable` response.
-- AC5: The default canonical remote for the public repository uses HTTPS and remains configurable through `LLV_VIEWER_CANONICAL_REMOTE`.
-- AC6: `bun test` and `bunx tsc --noEmit` pass.
-- AC7: Investigation and verification use unused high ports and leave the production listener, runtime-host, legacy Viewer, and managed candidate lifecycle unchanged.
+- AC1: `/api/tts` uses `OPENAI_API_KEY`, returns a clean `501` when unavailable, and streams successful OpenAI audio responses.
+- AC2: Assistant prose messages expose play/stop controls while structured tool-call rows remain excluded.
+- AC3: Spoken text excludes fenced, unmatched fenced, empty fenced, and indented code blocks.
+- AC4: Rapid interactions cancel stale synthesis and playback, with no overlapping audio or leaked object URLs.
+- AC5: Answers above the API limit are bounded to 4,096 characters before synthesis.
+- AC6: Invalid JSON values, including `null`, receive a clean `400` response.
+- AC7: `bun test` and `bunx tsc --noEmit` pass.

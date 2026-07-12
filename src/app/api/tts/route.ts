@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const OPENAI_SPEECH_URL = "https://api.openai.com/v1/audio/speech";
-const MAX_TEXT_LENGTH = 4096;
-
 export async function GET(): Promise<NextResponse<{ available: boolean }>> {
   return NextResponse.json({ available: Boolean(process.env.OPENAI_API_KEY?.trim()) });
 }
@@ -21,17 +20,21 @@ export async function POST(req: NextRequest): Promise<Response> {
     return NextResponse.json({ error: "text-to-speech is unavailable" }, { status: 501 });
   }
 
-  let body: { text?: unknown };
+  let parsed: unknown;
   try {
-    body = (await req.json()) as typeof body;
+    parsed = await req.json();
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return NextResponse.json({ error: "expected a JSON object" }, { status: 400 });
+  }
+  const body = parsed as { text?: unknown };
   if (typeof body.text !== "string" || !body.text.trim()) {
     return NextResponse.json({ error: "text must be a non-empty string" }, { status: 400 });
   }
-  if (body.text.length > MAX_TEXT_LENGTH) {
-    return NextResponse.json({ error: `text is too long (${MAX_TEXT_LENGTH} character limit)` }, { status: 413 });
+  if (body.text.length > MAX_TTS_TEXT_LENGTH) {
+    return NextResponse.json({ error: `text is too long (${MAX_TTS_TEXT_LENGTH} character limit)` }, { status: 413 });
   }
 
   let upstream: Response;

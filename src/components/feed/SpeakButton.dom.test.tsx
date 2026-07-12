@@ -1,0 +1,90 @@
+import { afterEach, expect, mock, test } from "bun:test";
+import { Window } from "happy-dom";
+import { createRoot, type Root } from "react-dom/client";
+import { act } from "react";
+
+import { MAX_TTS_TEXT_LENGTH } from "@/lib/tts";
+
+import { SpeakButton } from "./SpeakButton";
+
+const dom = new Window();
+Object.assign(globalThis, {
+  window: dom,
+  document: dom.document,
+  navigator: dom.navigator,
+  Node: dom.Node,
+  HTMLElement: dom.HTMLElement,
+  Event: dom.Event,
+  MouseEvent: dom.MouseEvent,
+  IS_REACT_ACT_ENVIRONMENT: true,
+});
+
+const originalFetch = globalThis.fetch;
+const originalAudio = globalThis.Audio;
+const originalCreateObjectURL = URL.createObjectURL;
+const originalRevokeObjectURL = URL.revokeObjectURL;
+
+async function mount(text: string): Promise<{ button: HTMLButtonElement; root: Root; host: HTMLDivElement }> {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await act(async () => { root.render(<SpeakButton text={text} />); });
+  return { button: host.querySelector("button")!, root, host };
+}
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  globalThis.Audio = originalAudio;
+  URL.createObjectURL = originalCreateObjectURL;
+  URL.revokeObjectURL = originalRevokeObjectURL;
+  document.body.replaceChildren();
+});
+
+test("a second click cancels pending synthesis and ignores its stale response", async () => {
+  let resolvePost!: (response: Response) => void;
+  let postSignal: AbortSignal | undefined;
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json({ available: true });
+    postSignal = init.signal as AbortSignal;
+    return new Promise<Response>((resolve) => { resolvePost = resolve; });
+  }) as unknown as typeof fetch;
+  const createObjectURL = mock(() => "blob:tts");
+  URL.createObjectURL = createObjectURL;
+
+  const view = await mount("Read me");
+  await act(async () => { view.button.click(); });
+  expect(view.button.getAttribute("aria-label")).toContain("Stop");
+  await act(async () => { view.button.click(); });
+  expect(postSignal?.aborted).toBe(true);
+  expect(view.button.getAttribute("aria-label")).toContain("Read answer");
+
+  await act(async () => { resolvePost(new Response(new Blob(["late"]))); await Promise.resolve(); });
+  expect(createObjectURL).not.toHaveBeenCalled();
+  await act(async () => { view.root.unmount(); });
+  view.host.remove();
+});
+
+test("long answers are bounded before synthesis", async () => {
+  let sentText = "";
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json({ available: true });
+    sentText = (JSON.parse(String(init.body)) as { text: string }).text;
+    return new Response(new Blob(["audio"]));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:tts";
+  const revokeObjectURL = mock(() => {});
+  URL.revokeObjectURL = revokeObjectURL;
+  globalThis.Audio = class {
+    onended: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    pause() {}
+    async play() {}
+  } as unknown as typeof Audio;
+
+  const view = await mount("x".repeat(MAX_TTS_TEXT_LENGTH + 100));
+  await act(async () => { view.button.click(); await Promise.resolve(); });
+  expect(sentText).toHaveLength(MAX_TTS_TEXT_LENGTH);
+  await act(async () => { view.button.click(); view.root.unmount(); });
+  expect(revokeObjectURL).toHaveBeenCalledWith("blob:tts");
+  view.host.remove();
+});

@@ -12,4 +12,9 @@ describe("spokenAnswerText", () => {
   test("supports tilde fences", () => {
     expect(spokenAnswerText("Intro\n~~~sh\necho hidden\n~~~\nOutro")).toBe("Intro\n\nOutro");
   });
+
+  test("removes empty and unmatched fenced blocks", () => {
+    expect(spokenAnswerText("Before\n```\n```\nAfter")).toBe("Before\n\nAfter");
+    expect(spokenAnswerText("Before\n```ts\nconst hidden = true;")).toBe("Before");
+  });
 });
