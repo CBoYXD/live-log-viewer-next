@@ -102,7 +102,9 @@ test("dims and labels a stale account limits read and omits a missing reset time
   }));
   const detail = html.match(/<dl[^>]*Quota windows[^>]*>[\s\S]*?<\/dl>/)?.[0] ?? "";
   expect(detail).not.toBe("");
-  expect(detail).toContain("opacity-55"); // stale read is dimmed
+  // Freshness is a visible, AT-readable caption, not opacity/title alone.
+  expect(detail).toContain("Last known values");
+  expect(detail).toContain("opacity-70"); // values stay legible; text carries the meaning
   expect(html).toContain('title="Last known values — not a live read"');
   expect(detail).toContain("80%"); // 100 − 20 with no reset line
   expect(detail).not.toContain("reset"); // resetsAt null → no reset text

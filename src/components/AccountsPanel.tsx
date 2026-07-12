@@ -75,8 +75,12 @@ function AccountLimitsDetail({ account }: { account: AccountOption }) {
     <dl
       aria-label={t("accounts.limitsAria", { label: account.label })}
       title={stale ? t("accounts.limitsStaleTip") : undefined}
-      className={`flex flex-col gap-0.5 px-3 pb-1.5 pl-[26px] ${stale ? "opacity-55" : ""}`}
+      className={`flex flex-col gap-0.5 px-3 pb-1.5 pl-[26px] ${stale ? "opacity-70" : ""}`}
     >
+      {/* Freshness is a visible, screen-reader-readable line — not opacity or a
+          title tooltip alone (touch has no hover, and `title` AT support is
+          spotty), so historical numbers never read as current. */}
+      {stale ? <div className="text-[9.5px] font-semibold uppercase tracking-wide text-dim">{t("accounts.limitsStale")}</div> : null}
       {windows.map(({ key, label, window: w }) => {
         const left = Math.max(0, Math.min(100, 100 - w.usedPercent));
         return (

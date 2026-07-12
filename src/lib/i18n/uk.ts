@@ -140,6 +140,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "accounts.effectiveTip": "{window} обмежує",
   "accounts.effectiveStale": "{window} обмежує · застаріло",
   "accounts.limitsAria": "Вікна лімітів для {label}",
+  "accounts.limitsStale": "Останні відомі значення",
   "accounts.limitsStaleTip": "Останні відомі значення — не наживо",
   // Claude sign-in slice (#61)
   "accounts.claudeLoginStarted": "Вхід для {label} розпочато",
