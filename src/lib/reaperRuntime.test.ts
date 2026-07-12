@@ -7,6 +7,7 @@ import path from "node:path";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
 import type { TranscriptHost, TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
+import { mutateBoard, setBoardFileForTests } from "@/lib/board/store";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
@@ -16,6 +17,7 @@ const originalStateDir = process.env.LLV_STATE_DIR;
 const originalEnabled = process.env.LLV_REAPER_ENABLED;
 
 afterEach(() => {
+  setBoardFileForTests(null);
   if (originalStateDir === undefined) delete process.env.LLV_STATE_DIR;
   else process.env.LLV_STATE_DIR = originalStateDir;
   if (originalEnabled === undefined) delete process.env.LLV_REAPER_ENABLED;
@@ -188,6 +190,59 @@ test("a completed Viewer worker spawn discounts its single launch prompt", async
     });
 
     expect(report.agents[0]).toMatchObject({ class: "probe", eligible: true, protectedReasons: [] });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a dashboard-reconciled root remains eligible while an explicit standalone placement is protected", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-board-placement-"));
+  const reconciledSessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1360";
+  const explicitSessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1361";
+  const reconciledPath = path.join(directory, `rollout-${reconciledSessionId}.jsonl`);
+  const explicitPath = path.join(directory, `rollout-${explicitSessionId}.jsonl`);
+  const boardFile = path.join(directory, "board.json");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  for (const pathname of [reconciledPath, explicitPath]) {
+    fs.writeFileSync(pathname, JSON.stringify({
+      type: "event_msg",
+      timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+      payload: { type: "user_message", message: "launch prompt" },
+    }) + "\n");
+  }
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  setBoardFileForTests(boardFile);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
+  for (const [sessionId, pathname] of [[reconciledSessionId, reconciledPath], [explicitSessionId, explicitPath]]) {
+    const receipt = registry.beginSpawn("codex", "/repo", profile);
+    registry.completeSpawn(receipt.launchId, {
+      key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: "/repo", accountId: "default",
+      launchProfile: profile, status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+    });
+    registry.reconcileConversations([{
+      engine: "codex", path: pathname, accountId: "default", launchProfile: profile,
+      turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+      observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+    }]);
+  }
+  expect(mutateBoard("repo", 0, [{ kind: "reconcile-roots", roots: [reconciledPath], removeManual: [] }], boardFile).ok).toBe(true);
+  expect(mutateBoard("repo", 1, [{ kind: "restore", path: explicitPath, placement: "manual" }], boardFile).ok).toBe(true);
+  const reconciledFile = runtimeFile(reconciledPath, now / 1000 - 2 * 60 * 60);
+  const explicitFile = { ...runtimeFile(explicitPath, now / 1000 - 2 * 60 * 60), proc: null };
+
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(reconciledPath), { ...runtimeHost(explicitPath), paneId: "%42", panePid: 1042, agentPid: 2042 }],
+      files: [reconciledFile, explicitFile],
+      now,
+    });
+
+    expect(report.agents[0]).toMatchObject({ class: "probe", eligible: true, protectedReasons: [] });
+    expect(report.agents[1]).toMatchObject({ class: "probe", eligible: false });
+    expect(report.agents[1]?.protectedReasons).toContain("manual-board-placement");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

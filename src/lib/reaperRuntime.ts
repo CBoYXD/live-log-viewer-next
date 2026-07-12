@@ -6,6 +6,7 @@ import path from "node:path";
 import { agentRegistry, type AgentRegistry, type RegistryFile, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
 import { boardFor } from "@/lib/board/store";
+import { buildBranchGroups } from "@/components/projectModel";
 import { statePath } from "@/lib/configDir";
 import { resolveFlowMergeIdentity } from "@/lib/flows/git";
 import { loadFlows, saveFlows } from "@/lib/flows/store";
@@ -363,13 +364,25 @@ function viewerOwnedPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts
 function manualPaths(snapshot: ReturnType<AgentRegistry["snapshot"]>, hosts: TranscriptHost[], files: FileEntry[]): Set<string> {
   const filesByPath = new Map(files.map((entry) => [entry.path, entry]));
   const protectedPaths = new Set<string>();
+  const placementsByProject = new Map<string, { manual: ReadonlySet<string>; reconciledRoots: ReadonlySet<string> }>();
   for (const host of hosts) {
     const pathname = host.primaryPath;
     if (!pathname) continue;
     const project = filesByPath.get(pathname)?.project || profileForPath(snapshot, pathname)?.project;
     if (!project) continue;
     try {
-      if (boardFor(project).prefs.manual.includes(pathname)) protectedPaths.add(pathname);
+      let placements = placementsByProject.get(project);
+      if (!placements) {
+        const board = boardFor(project);
+        placements = {
+          manual: new Set(board.prefs.manual),
+          reconciledRoots: new Set(buildBranchGroups(files, project, {
+            expandedConversationPaths: new Set(board.prefs.expanded),
+          }).filter((group) => !group.orphanTask).map((group) => group.key)),
+        };
+        placementsByProject.set(project, placements);
+      }
+      if (placements.manual.has(pathname) && !placements.reconciledRoots.has(pathname)) protectedPaths.add(pathname);
     } catch {
       protectedPaths.add(pathname);
     }
