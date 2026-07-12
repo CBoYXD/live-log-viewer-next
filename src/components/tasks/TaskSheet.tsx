@@ -85,8 +85,8 @@ function NewTaskView({
     setStatus(null);
     try {
       /* A default seed spot the user never chose — leave it unpinned so the
-         board's collision pass spreads panel-created cards instead of stacking
-         them. */
+         board's collision pass spreads panel-created cards and they never
+         stack. */
       const created = await createTask({ project, text: payloadText, pos: { x: 120, y: 120 }, pinned: false });
       if ("error" in created) {
         setStatus({ kind: "err", text: created.error });

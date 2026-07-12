@@ -155,7 +155,7 @@ describe("taskRect / taskCardHeight", () => {
 
   test("wrap width assumes the widest glyphs, never an average", () => {
     /* The content box is only 236px, so a run of the widest glyphs cannot fit
-       on one line — the estimate counts more than a single line for them. */
+       on one line — the estimate counts several lines for them. */
     const oneChar = taskCardHeight(task({ id: "t", text: "x" }));
     const wideRun = taskCardHeight(task({ id: "t", text: "W".repeat(40) }));
     expect(wideRun).toBeGreaterThan(oneChar);
@@ -844,7 +844,7 @@ describe("routeTaskEdges — busy fan-out corridor deconfliction (Finding)", () 
     const routes = routeTaskEdges(edges, [], [pane]);
     expect(routes.size).toBe(6);
     const corridorX = edges.map((e) => Math.round(routes.get(e.key)!.mid.x));
-    /* No corridor is shared by more than two edges — the old bug put all six on one. */
+    /* Each corridor holds at most two edges — the old bug put all six on one. */
     const perCorridor = new Map<number, number>();
     for (const x of corridorX) perCorridor.set(x, (perCorridor.get(x) ?? 0) + 1);
     expect(Math.max(...perCorridor.values())).toBeLessThanOrEqual(2);

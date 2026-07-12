@@ -53,7 +53,7 @@ function claudeCtx(obj: Record<string, unknown>): CtxUsage | null {
  * Context-window fullness from the newest usage record in the transcript
  * tail. Size-keyed cache like turn state — no reads beyond the tail, and an
  * unchanged file costs nothing. Tails with no usage record return null (the
- * chip disappears rather than showing a stale number).
+ * chip disappears, and no stale number is shown).
  */
 export function ctxFor(entry: FileEntry): CtxUsage | null {
   const conversationRoot = entry.root === "claude-projects" || entry.root === "codex-sessions";

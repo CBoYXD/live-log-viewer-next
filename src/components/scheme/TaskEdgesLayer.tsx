@@ -33,8 +33,9 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
 }: {
   edges: TaskEdgeGeom[];
   /** World box to span — origin (world.x/world.y) may be negative, so the svg
-      is positioned and view-boxed to it rather than pinned to (0,0). The world
-      box already includes routed detours, so no path or marker is clipped. */
+      is positioned and view-boxed to it, allowing a negative origin so a card
+      left of (0,0) stays in view. The world box already includes routed detours,
+      so no path or marker is clipped. */
   world: { x: number; y: number; w: number; h: number };
   /** Routed geometry per edge key — computed once in SchemeBoard so the world
       box can grow to contain it. */
@@ -60,7 +61,7 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
         const color = edge.failed ? FAILED_COLOR : isSource ? SOURCE_COLOR : TASK_TONES[edge.status].color;
         const baseOpacity = edge.failed ? 0.95 : isSource ? 0.4 : 0.65;
         /* An unavoidable card crossing is dimmed so it reads as running behind
-           the card rather than tangling with it. */
+           the card, clear of the tangle. */
         const opacity = route.crosses ? baseOpacity * CROSS_FADE : baseOpacity;
         const curve = route.d;
         const midX = route.mid.x;

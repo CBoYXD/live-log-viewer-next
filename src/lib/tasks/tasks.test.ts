@@ -184,7 +184,7 @@ describe("task command helpers", () => {
     const dropped = create({ pinned: true });
     expect(dropped.ok && dropped.task.pinned).toBe(true);
     /* The task panel / bulk bar seed a shared default point with pinned:false, so
-       the board's collision pass spreads them instead of stacking (issue #17). */
+       the board's collision pass spreads them and they never stack (issue #17). */
     const panelA = create({ pinned: false });
     const panelB = create({ pinned: false });
     expect(panelA.ok && panelA.task.pinned).toBe(false);

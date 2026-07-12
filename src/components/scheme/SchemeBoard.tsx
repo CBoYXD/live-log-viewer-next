@@ -424,8 +424,8 @@ export function SchemeBoard({
   );
   /* Route all task edges here (not in the layer) so the world box below can grow
      to include the routed geometry. Cached on a rounded geometry signature: the
-     10s poll hands fresh arrays every tick, so an unchanged board reuses routes
-     instead of re-running the pass on the render thread (issue #17). */
+     10s poll hands fresh arrays every tick, so an unchanged board reuses cached
+     routes and the pass re-runs on the render thread only for a real move (issue #17). */
   const taskRoutesSig = useMemo(
     () => taskEdgesSignature(taskEdges, taskCardObstacles, taskObstacles),
     [taskEdges, taskCardObstacles, taskObstacles],
@@ -439,7 +439,7 @@ export function SchemeBoard({
      layout box grown to swallow any card the placement pass (or a hand drag) put
      beyond or left/above it — AND every routed path/marker, since an obstacle
      detour can swing a connector or its retry badge past the card extent, so both
-     stay reachable and on the map instead of clipping out (issue #17). */
+     stay reachable and on the map, never clipping out (issue #17). */
   const world = useMemo(() => {
     const rects = [...taskRects.values()];
     const routeBox = routePathsBounds(taskRoutes.values());

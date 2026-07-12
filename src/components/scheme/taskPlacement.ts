@@ -14,7 +14,7 @@ export const TASK_GUTTER = 16;
 const MAX_RING = 48;
 
 /** Everything the placement pass needs from a task — kept structural so the
-    module tests with plain literals instead of full BoardTask fixtures. */
+    module tests with plain literals; no full BoardTask fixtures are needed. */
 export type PlaceableTask = Pick<BoardTask, "id" | "pos" | "text" | "assignments" | "source" | "pinned">;
 
 /** Do two rects come within `gap` of each other? Touching or closer counts;

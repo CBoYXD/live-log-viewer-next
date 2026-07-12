@@ -24,8 +24,8 @@ interface CameraOptions {
   layout: SchemeLayout;
   /** World box the camera clamps and fits to — the layout box grown to include
       every placed task card (issue #17), origin possibly negative. Panning,
-      fit and edge-keep all read this instead of the raw layout dimensions so a
-      relocated card is always reachable. */
+      fit and edge-keep all read this grown box, so a relocated card past the raw
+      layout dimensions is always reachable. */
   world: SchemeRect;
   /** Map mode (phone full-screen overlay): always opens fitted, never persists. */
   mapMode: boolean;

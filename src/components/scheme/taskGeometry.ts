@@ -58,8 +58,8 @@ function hardLineRows(line: string): number {
   let used = 0; // px consumed on the current row
   for (const token of line.match(/\s+|\S+/g) ?? []) {
     if (/\s/.test(token)) {
-      /* A tab consumes a whole tab stop, far more than a space — count each at
-         its upper-bound advance so a tab-laden line isn't undercounted. */
+      /* A tab consumes a whole tab stop (up to eight space widths) — count each
+         at its upper-bound advance so a tab-laden line keeps its full height. */
       for (const ch of token) used += ch === "\t" ? MAX_TAB_W : MAX_SPACE_W;
       while (used > BODY_CONTENT_W) {
         rows++;
@@ -361,8 +361,8 @@ function cubicHitsAny(
   /* Broad phase: a cubic never leaves the convex hull of its four control points,
      so its bounds are the min/max of those points (plus the clearance pad). An
      obstacle outside that box can't be hit — cull it with cheap number compares
-     before the per-segment Liang–Barsky test, so routing one edge stays near the
-     handful of cards actually near its path instead of scanning the whole board
+     before the per-segment Liang–Barsky test, so routing one edge scans only the
+     handful of cards actually near its path and skips the rest of the board
      (issue #17). */
   const hullMinX = Math.min(x1, c1x, c2x, x2) - ROUTE_CLEARANCE;
   const hullMaxX = Math.max(x1, c1x, c2x, x2) + ROUTE_CLEARANCE;
@@ -443,8 +443,8 @@ function segsMid(segs: readonly RouteSeg[]): { x: number; y: number } {
 function verticalDetour(edge: { x1: number; y1: number; x2: number; y2: number }, box: SchemeRect, side: number, off: number, laneOff: number): RouteSeg[] {
   const { x1, y1, x2, y2 } = edge;
   /* laneOff always stacks *outward* from the box (away from side), so successive
-     corridor lanes separate monotonically instead of being pushed back through
-     the obstacle and corrected onto a colliding track. */
+     corridor lanes separate monotonically; the obstacle never pushes a lane back
+     and corrects it onto a colliding track. */
   const X = side < 0 ? box.x - off - laneOff : box.x + box.w + off + laneOff;
   const ya = box.y - off;
   const yb = box.y + box.h + off;
@@ -634,8 +634,8 @@ export function edgeObstacles(
 
 /* Collinearity tolerances: endpoints within LINE_EPS (px) of the shared line
    count as on it, unit-direction cross within DIR_EPS counts as parallel, and
-   the projections must overlap by more than CORRIDOR_MIN (px) so a mere shared
-   endpoint (fan-in/out) is not treated as a shared corridor. */
+   the projections must overlap beyond CORRIDOR_MIN (px) so a mere shared
+   endpoint (fan-in/out) stays off the shared-corridor list. */
 const LINE_EPS = 1.5;
 const DIR_EPS = 0.02;
 const CORRIDOR_MIN = 8;
@@ -891,9 +891,9 @@ const CROSS_PASSES = 2;
    ceiling the global routing stays off the render thread's critical path. Below
    the cap, dense boards get full untangling. */
 const CROSS_REDUCE_MAX = 48;
-/* An edge already crossing more than this many others sits in a dense tangle no
-   single perpendicular bow can meaningfully untangle, so re-routing it is wasted
-   work — it is left for the fade. Also caps the per-edge cost in a pathological
+/* An edge whose crossing count exceeds this sits in a dense tangle no single
+   perpendicular bow can meaningfully untangle, so re-routing it is wasted work —
+   the fade handles it. Also caps the per-edge cost in a pathological
    all-overlapping cluster. */
 const CROSS_BUSY = 4;
 
@@ -909,7 +909,7 @@ const CROSS_BUSY = 4;
  * Any crossing that survives the pass — the diagonals of a box interleave, so no
  * bounded planar route separates them — is surfaced: of each still-crossing pair
  * the higher-key edge is marked `crosses`, so the layer fades it and it reads
- * as passing *behind* the other rather than tangling with it.
+ * as passing *behind* the other, clear of the tangle.
  *
  * Pure and order-independent: the crossing test is symmetric, the pass walks
  * edges in key order, and the fade always picks the higher key, so the result is
