@@ -46,6 +46,7 @@ export type CodexLiveLimitsReader = (account: Pick<CodexAccount, "id" | "kind" |
 
 const globalStore = globalThis as unknown as {
   __llvLimitsCache?: LimitsCache | null;
+  __llvLimitsInflight?: Map<string, Promise<ResolvedRead>>;
 };
 
 function isProvenance(value: unknown): value is { claude: LimitsProvenance; codex: LimitsProvenance } {
@@ -205,10 +206,41 @@ function cacheIsFresh(entry: EngineCacheEntry | null, now: number): boolean {
   return now - entry.at < CACHE_MS;
 }
 
+function inflightReads(): Map<string, Promise<ResolvedRead>> {
+  if (!globalStore.__llvLimitsInflight) globalStore.__llvLimitsInflight = new Map();
+  return globalStore.__llvLimitsInflight;
+}
+
 function logFallbackReasons(entries: ReadonlyArray<readonly [EngineName, LimitsProvenance]>): void {
   for (const [engine, meta] of entries) {
     if (meta.reason) console.warn(`[limits] ${engine} fallback: ${safeReason(meta.reason)}`);
   }
+}
+
+function resolveEngineRead(engine: EngineName, accountId: string, now: number, reader: () => Promise<LimitRead>): Promise<ResolvedRead> {
+  const cached = lastCache(engine, accountId);
+  if (cacheIsFresh(cached, now)) return Promise.resolve(cachedRead(cached!));
+
+  const key = `${engine}:${accountId}`;
+  const reads = inflightReads();
+  const existing = reads.get(key);
+  if (existing) return existing;
+
+  const pending = (async () => {
+    const latest = lastCache(engine, accountId);
+    if (cacheIsFresh(latest, now)) return cachedRead(latest!);
+    const read = await reader();
+    const resolved = resolveRead(read, latest, new Date(now).toISOString(), now);
+    logFallbackReasons([[engine, resolved.meta]]);
+    remember(engine, accountId, resolved, now);
+    return resolved;
+  })();
+  reads.set(key, pending);
+  const clear = () => {
+    if (reads.get(key) === pending) reads.delete(key);
+  };
+  void pending.then(clear, clear);
+  return pending;
 }
 
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
@@ -216,25 +248,11 @@ export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsRea
   const now = options.now?.() ?? Date.now();
   const claudeAccount = claudeAccountForSpawn();
   const codexAccount = accountForSpawn();
-  const cachedClaude = lastCache("claude", claudeAccount.id);
-  const cachedCodex = lastCache("codex", codexAccount.id);
-  const claudeFresh = cacheIsFresh(cachedClaude, now);
-  const codexFresh = cacheIsFresh(cachedCodex, now);
-  if (claudeFresh && codexFresh) {
-    return { claude: cachedClaude?.data ?? null, codex: cachedCodex?.data ?? null, claudeAccountId: claudeAccount.id, codexAccountId: codexAccount.id, provenance: { claude: cachedClaude?.provenance ?? { source: "unavailable", reason: "no cached Claude limits", staleSince: null }, codex: cachedCodex?.provenance ?? { source: "unavailable", reason: "no cached Codex limits", staleSince: null } }, staleSince: cachedClaude?.provenance.staleSince ?? cachedCodex?.provenance.staleSince ?? null };
-  }
-  const staleSince = new Date(now).toISOString();
-  const [claude, codex] = await Promise.all([
-    claudeFresh ? Promise.resolve(null) : fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")),
-    codexFresh ? Promise.resolve(null) : readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader }),
+  const [resolvedClaude, resolvedCodex] = await Promise.all([
+    resolveEngineRead("claude", claudeAccount.id, now, () => fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json"))),
+    resolveEngineRead("codex", codexAccount.id, now, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader })),
   ]);
-  const resolvedClaude = claudeFresh
-    ? cachedRead(cachedClaude!)
-    : resolveRead(claude!, cachedClaude, staleSince, now);
-  const resolvedCodex = codexFresh
-    ? cachedRead(cachedCodex!)
-    : resolveRead(codex!, cachedCodex, staleSince, now);
-  const data: LimitsPayload = {
+  return {
     claude: resolvedClaude.data,
     codex: resolvedCodex.data,
     claudeAccountId: claudeAccount.id,
@@ -242,13 +260,6 @@ export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsRea
     provenance: { claude: resolvedClaude.meta, codex: resolvedCodex.meta },
     staleSince: resolvedClaude.meta.staleSince ?? resolvedCodex.meta.staleSince,
   };
-  logFallbackReasons([
-    ...(!claudeFresh ? [["claude", data.provenance.claude] as const] : []),
-    ...(!codexFresh ? [["codex", data.provenance.codex] as const] : []),
-  ]);
-  if (!claudeFresh) remember("claude", claudeAccount.id, resolvedClaude, now);
-  if (!codexFresh) remember("codex", codexAccount.id, resolvedCodex, now);
-  return data;
 }
 
 /* ------------------------------- Claude ------------------------------- */

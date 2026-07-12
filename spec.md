@@ -1,15 +1,17 @@
-# Issue 26: TTS read answer aloud
+# PR #143: Claude limits backoff and footer visibility
 
 ## Task statement
 
-Add OpenAI text-to-speech for assistant answers through `/api/tts`, expose play/stop controls only when an environment API key is available, stream audio, and exclude tool calls and code blocks from spoken text.
+Back off Claude limits polling after provider failures, honor `Retry-After`, distinguish re-authentication failures, and keep footer status honest in English and Ukrainian.
 
 ## Acceptance criteria
 
-- AC1: OpenAI and ElevenLabs resolve independently through environment and key-file credentials, with environment/file backend selection and server-side voice/model configuration.
-- AC2: Every paid synthesis requires confirmation showing provider, model, voice, character count, billing disclosure, and AI-voice disclosure.
-- AC3: Assistant prose is Markdown-normalized and secret-redacted; tool calls, code, image payloads, URLs, hidden text, and memory metadata stay outside provider input.
-- AC4: Rapid interactions cancel stale synthesis and playback, propagate browser cancellation upstream, and bound provider requests with a timeout.
-- AC5: Answers above 4,000 characters require explicit consent to synthesize the first 4,000 characters.
-- AC6: Upstream responses require an `audio/*` content type and remain within 32 MB.
-- AC7: `bun test` and `bunx tsc --noEmit` pass.
+- AC1: Failed limits reads are cached per engine and account for a cooldown.
+- AC2: Consecutive Claude 429 responses use a 1m, 2m, 4m exponential schedule capped at 15m.
+- AC3: A valid `Retry-After` extends the cooldown when required by the provider.
+- AC4: Concurrent refreshes for one engine and account share one upstream request.
+- AC5: A successful read resets the 429 backoff and preserves the fresh-cache fast path.
+- AC6: Claude 429 provenance shows provider throttling and the next retry time, including when retained quota windows come from cache.
+- AC7: Claude 401 provenance shows re-login guidance, including when retained quota windows come from cache.
+- AC8: Footer status strings remain aligned in English and Ukrainian.
+- AC9: `bun test` and `bunx tsc --noEmit` pass.

@@ -34,6 +34,7 @@ const codexLiveReader = async () => ({
 
 function resetLimitsCache(): void {
   delete (globalThis as { __llvLimitsCache?: unknown }).__llvLimitsCache;
+  delete (globalThis as { __llvLimitsInflight?: unknown }).__llvLimitsInflight;
   fs.rmSync(path.join(process.env.LLV_STATE_DIR!, "limits-cache.json"), { force: true });
 }
 
@@ -251,6 +252,41 @@ test("a Claude success resets 429 backoff and preserves the fresh-cache fast pat
     const limitedAgain = await readLimits({ codexLiveReader, now: () => 4_090_002 });
     expect(limitedAgain.provenance.claude.retryAt).toBe(new Date(4_150_002).toISOString());
     expect(fetches).toBe(3);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("concurrent Claude refreshes share one provider request at each retry boundary", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  let response = deferred<Response>();
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    return response.promise;
+  }) as unknown as typeof fetch;
+  try {
+    const firstWave = Array.from({ length: 6 }, () => readLimits({ codexLiveReader, now: () => 5_000_000 }));
+    expect(fetches).toBe(1);
+    response.resolve(new Response(null, { status: 429 }));
+    const firstResults = await Promise.all(firstWave);
+    expect(firstResults.every((result) => result.provenance.claude.retryAt === new Date(5_060_000).toISOString())).toBeTrue();
+
+    response = deferred<Response>();
+    const secondWave = Array.from({ length: 6 }, () => readLimits({ codexLiveReader, now: () => 5_060_001 }));
+    expect(fetches).toBe(2);
+    response.resolve(new Response(null, { status: 429 }));
+    const secondResults = await Promise.all(secondWave);
+    expect(secondResults.every((result) => result.provenance.claude.retryAt === new Date(5_180_001).toISOString())).toBeTrue();
+
+    await readLimits({ codexLiveReader, now: () => 5_120_000 });
+    expect(fetches).toBe(2);
   } finally {
     globalThis.fetch = realFetch;
   }
