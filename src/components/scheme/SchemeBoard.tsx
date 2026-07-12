@@ -33,7 +33,19 @@ import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
 import { findFreeSlot } from "./findFreeSlot";
-import { buildTaskEdges, buildTaskTargetIndex, isPlacedTask, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import {
+  buildTaskEdges,
+  buildTaskTargetIndex,
+  isPlacedTask,
+  routePathsBounds,
+  routeTaskEdges,
+  TASK_W,
+  taskEdgesSignature,
+  taskRect,
+  taskWorldBounds,
+  type SchemeRect,
+} from "./taskGeometry";
+import { resolveTaskPlacements } from "./taskPlacement";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
@@ -391,16 +403,65 @@ export function SchemeBoard({
     const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
   }, [tasks, localTasks, project]);
-  /* Only pinned tasks have a board position; unplaced ones (panel/mobile
-     creation) live in the list until place-on-map pins them. Everything the
-     board draws or measures runs over this narrowed set. */
-  const placedTasks = useMemo(() => mergedTasks.filter(isPlacedTask), [mergedTasks]);
+  /* Panes, decks, stacks and drafts the cards must not bury (issue #17): the
+     placement pass spreads any pileup into their gaps. Group halos are derived
+     from these same rects, so nudging cards never disturbs a flow/pipeline
+     overlay. */
+  const taskObstacles = useMemo<SchemeRect[]>(
+    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts].map(({ x, y, w, h }) => ({ x, y, w, h })),
+    [layout],
+  );
+  /* Only placed tasks have a board position; unplaced ones (panel/mobile creation)
+     live in the list until place-on-map pins them. */
+  const boardTasks = useMemo(() => mergedTasks.filter(isPlacedTask), [mergedTasks]);
+  /* Collision-aware display positions: cards keep their stored spot unless they
+     overlap another card or pane, so hand-arranged boards pass through untouched
+     while the curator/inbox lattice pileup gets spread out and stays readable. */
+  const placement = useMemo(() => resolveTaskPlacements(boardTasks, taskObstacles), [boardTasks, taskObstacles]);
+  const placedTasks = useMemo(
+    () =>
+      boardTasks.map((task) => {
+        const spot = placement.get(task.id);
+        return spot && (spot.x !== task.pos.x || spot.y !== task.pos.y) ? { ...task, pos: spot } : task;
+      }),
+    [boardTasks, placement],
+  );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
     () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
     [placedTasks],
   );
   const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
+  /* Card rects the edge router steers around, each tagged with its task so an
+     edge is never counted as crossing the card it leaves from (issue #17). */
+  const taskCardObstacles = useMemo(
+    () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task) })),
+    [placedTasks],
+  );
+  /* Route all task edges here — the layer only renders them — so the world box below can grow
+     to include the routed geometry. Cached on a rounded geometry signature: the
+     10s poll hands fresh arrays every tick, so an unchanged board reuses cached
+     routes and the pass re-runs on the render thread only for a real move (issue #17). */
+  const taskRoutesSig = useMemo(
+    () => taskEdgesSignature(taskEdges, taskCardObstacles, taskObstacles),
+    [taskEdges, taskCardObstacles, taskObstacles],
+  );
+  const taskRoutes = useMemo(
+    () => routeTaskEdges(taskEdges, taskCardObstacles, taskObstacles),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the geometry signature; each poll gives the arrays a new identity while their content is unchanged
+    [taskRoutesSig],
+  );
+  /* World bounds the camera, minimap and task-edge SVG all read: the node-derived
+     layout box grown to swallow any card the placement pass (or a hand drag) put
+     beyond or left/above it — AND every routed path/marker, since an obstacle
+     detour can swing a connector or its retry badge past the card extent, so both
+     stay reachable and on the map, never clipping out (issue #17). */
+  const world = useMemo(() => {
+    const rects = [...taskRects.values()];
+    const routeBox = routePathsBounds(taskRoutes.values());
+    if (routeBox) rects.push(routeBox);
+    return taskWorldBounds(layout.width, layout.height, rects);
+  }, [layout.width, layout.height, taskRects, taskRoutes]);
 
   /* Place-on-map arms this ref with the id of an existing unplaced task; the
      next canvas click pins it instead of dropping a fresh sticky. */
@@ -460,6 +521,7 @@ export function SchemeBoard({
   } = useSchemeCamera({
     project,
     layout,
+    world,
     mapMode,
     focus,
     onNodePick,
@@ -769,7 +831,7 @@ export function SchemeBoard({
           onHandoff={handoffForNodes}
           onExpand={stableExpand}
         />
-        <TaskEdgesLayer edges={taskEdges} width={layout.width} height={layout.height} onRetry={retryEdge} />
+        <TaskEdgesLayer edges={taskEdges} world={world} routes={taskRoutes} onRetry={retryEdge} />
         <TasksLayer
           tasks={placedTasks}
           files={files}
@@ -888,7 +950,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} world={world} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this

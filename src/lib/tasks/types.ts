@@ -56,7 +56,11 @@ export interface BoardTask {
   /** Plain text, ≤ 6000 chars (server-enforced). First line acts as the
       title everywhere a compact label is needed. */
   text: string;
-  /** Placement state; `pinned` ⇔ `pos` present. */
+  /** Placement state (issue #17 owns `auto`): `pinned` ⇔ a human chose this exact
+      spot (`pos` present), and the board's collision pass treats it as law —
+      never nudged, even atop a pane. `auto` cards (curator/inbox lattice) also
+      carry a `pos` but get collision + obstacle clearance. `unplaced` has no
+      `pos` and is absent from the board until placed. */
   placement: TaskPlacement;
   /** Own world position on the board — the card is dragged freely. Absent
       while `placement` is `unplaced`. */

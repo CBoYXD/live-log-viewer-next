@@ -210,8 +210,8 @@ export function createTask(
     ...(placement === "pinned" && pos ? { pos } : {}),
     ...(due.dueAt ? { dueAt: due.dueAt, dueTz: due.dueTz } : {}),
     ...(attachments.attachments ? { attachments: attachments.attachments } : {}),
-    assignments: [],
     ...(source ? { source } : {}),
+    assignments: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -242,7 +242,8 @@ export function patchTask(existing: BoardTask[], id: string, input: PatchTaskInp
     const pos = normalizePos(input.pos);
     if (!pos) return { ok: false, error: "invalid task position", status: 400 };
     /* A pos always pins: place-on-map and free drags both land here, so an
-       unplaced task that gets a position becomes pinned in the same PATCH. */
+       unplaced task that gets a position becomes pinned in the same PATCH, and
+       the collision pass then leaves it exactly where the user dropped it. */
     patch.pos = pos;
     patch.placement = "pinned";
   }

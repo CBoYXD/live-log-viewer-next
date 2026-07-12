@@ -22,6 +22,11 @@ const reducedMotion = () => typeof matchMedia !== "undefined" && matchMedia("(pr
 interface CameraOptions {
   project: string;
   layout: SchemeLayout;
+  /** World box the camera clamps and fits to — the layout box grown to include
+      every placed task card (issue #17), origin possibly negative. Panning,
+      fit and edge-keep all read this grown box, so a relocated card past the raw
+      layout dimensions is always reachable. */
+  world: SchemeRect;
   /** Map mode (phone full-screen overlay): always opens fitted, never persists. */
   mapMode: boolean;
   /** Path to glide the camera to once its node exists in the layout. */
@@ -99,9 +104,20 @@ export interface SchemeCamera {
  * persists per project in sessionStorage. Selection lives in the caller; this
  * hook drives it through `setSelected` from the pointer and keyboard handlers.
  */
+/** Whether the board has anything to frame: nodes, drafts, or task cards. Task
+    cards count (issue #17) — a project with only cards must still init and fit
+    the camera, so both the fit guard and the one-time init effect read this. */
+export function hasBoardContent(
+  layout: Pick<SchemeLayout, "nodes" | "drafts">,
+  taskRects?: ReadonlyMap<string, SchemeRect>,
+): boolean {
+  return layout.nodes.length > 0 || layout.drafts.length > 0 || (taskRects?.size ?? 0) > 0;
+}
+
 export function useSchemeCamera({
   project,
   layout,
+  world,
   mapMode,
   focus,
   onNodePick,
@@ -187,11 +203,14 @@ export function useSchemeCamera({
      stays visible, so there is no "lost the canvas" state to recover from. */
   const clampCam = useCallback(
     (c: Camera): Camera => {
-      const x = Math.min(Math.max(c.x, EDGE_KEEP - layout.width * c.z), vp.w - EDGE_KEEP);
-      const y = Math.min(Math.max(c.y, EDGE_KEEP - layout.height * c.z), vp.h - EDGE_KEEP);
+      /* Keep a strip of the world on screen from either edge, measured against
+         the world box (origin world.x/world.y, which may be negative) rather
+         than a fixed (0,0) so a card left of/above the layout stays reachable. */
+      const x = Math.min(Math.max(c.x, EDGE_KEEP - (world.x + world.w) * c.z), vp.w - EDGE_KEEP - world.x * c.z);
+      const y = Math.min(Math.max(c.y, EDGE_KEEP - (world.y + world.h) * c.z), vp.h - EDGE_KEEP - world.y * c.z);
       return x === c.x && y === c.y ? c : { ...c, x, y };
     },
-    [layout.width, layout.height, vp],
+    [world, vp],
   );
 
   /* High-rate gestures (wheel, pointermove, pinch) coalesce into one camera
@@ -255,10 +274,14 @@ export function useSchemeCamera({
 
   const fitCam = useCallback((): Camera | null => {
     const rect = viewportRef.current?.getBoundingClientRect();
-    if (!rect || (!layout.nodes.length && !layout.drafts.length)) return null;
-    const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / layout.width, (rect.height - 48) / layout.height, 1)));
-    return { z, x: (rect.width - layout.width * z) / 2, y: (rect.height - layout.height * z) / 2 };
-  }, [layout]);
+    /* Task cards are board content too (issue #17): a project with only task
+       cards and no nodes/drafts must still fit, or Fit sits inert and a
+       relocated card can stay off-screen. `world` already spans the cards. */
+    if (!rect || !hasBoardContent(layout, taskRects)) return null;
+    const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / world.w, (rect.height - 48) / world.h, 1)));
+    return { z, x: (rect.width - world.w * z) / 2 - world.x * z, y: (rect.height - world.h * z) / 2 - world.y * z };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hasBoardContent reads only layout.nodes/drafts, whose lengths are already deps; subscribing to all of `layout` would re-fit on every unrelated relayout
+  }, [layout.nodes.length, layout.drafts.length, taskRects, world]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {
     /* Reduced motion: skip the CSS transition — the move lands instantly. */
@@ -337,7 +360,7 @@ export function useSchemeCamera({
   /* First layout of a project: restore the saved camera or fit everything.
      The map always opens fitted — its job is the whole picture. */
   useEffect(() => {
-    if (initedFor.current === project || (!layout.nodes.length && !layout.drafts.length)) return;
+    if (initedFor.current === project || !hasBoardContent(layout, taskRects)) return;
     initedFor.current = project;
     if (!mapMode) {
       try {
@@ -356,10 +379,9 @@ export function useSchemeCamera({
     }
     const c = fitCam();
     if (c) {
-
       setCam(c);
     }
-  }, [project, layout, fitCam, mapMode]);
+  }, [project, layout, taskRects, fitCam, mapMode]);
 
   /* Debounced: a pan produces hundreds of camera frames, storage needs only
      the resting position. The map never writes — the desktop camera survives. */

@@ -176,6 +176,19 @@ describe("task command helpers", () => {
     expect(result.task.status).toBe("inbox");
   });
 
+  test("placement: a pos pins the card, an explicit unplaced carries none", () => {
+    const create = (over: Record<string, unknown>) =>
+      createTask([], { project: "proj", text: "t", ...over }, [], { now: () => "n", id: () => "i" });
+    /* A create with a position is a board placement — pinned there. */
+    const pinned = create({ pos: { x: 120, y: 120 } });
+    expect(pinned.ok && pinned.task.placement).toBe("pinned");
+    expect(pinned.ok && pinned.task.pos).toEqual({ x: 120, y: 120 });
+    /* A panel/mobile create is unplaced: it holds no position until placed. */
+    const unplaced = create({ placement: "unplaced" });
+    expect(unplaced.ok && unplaced.task.placement).toBe("unplaced");
+    expect(unplaced.ok && unplaced.task.pos).toBeUndefined();
+  });
+
   test("patch is last-write-wins and delete wins late patches", () => {
     const initial = [task()];
     const first = patchTask(initial, "task-1", { text: "one" }, "2026-07-05T10:01:00.000Z");
