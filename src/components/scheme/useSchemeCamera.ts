@@ -280,6 +280,7 @@ export function useSchemeCamera({
     if (!rect || !hasBoardContent(layout, taskRects)) return null;
     const z = Math.min(MAX_Z, Math.max(MIN_Z, Math.min((rect.width - 48) / world.w, (rect.height - 48) / world.h, 1)));
     return { z, x: (rect.width - world.w * z) / 2 - world.x * z, y: (rect.height - world.h * z) / 2 - world.y * z };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- hasBoardContent reads only layout.nodes/drafts, whose lengths are already deps; subscribing to all of `layout` would re-fit on every unrelated relayout
   }, [layout.nodes.length, layout.drafts.length, taskRects, world]);
 
   const glideTo = useCallback((next: Camera | ((c: Camera) => Camera)) => {

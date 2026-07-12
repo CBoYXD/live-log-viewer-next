@@ -14,8 +14,8 @@ const TASK_MIN_H = 64;
    *upper* bound on the rendered height — underestimating lets a tall card render
    past its computed box and overlap its neighbour (issue #17) — so line count is
    figured against the widest glyphs a proportional bold font produces (W/M run
-   ~13px), never an average. Real text of the same length wraps to fewer lines,
-   so the estimate is conservative, and the body is capped either way. */
+   ~13px). Real text of the same length wraps to fewer lines, so the estimate is
+   conservative, and the body is capped either way. */
 const STRIP_H = 6;
 const PAD_Y = 20;
 const LINE_H = 17;
@@ -293,7 +293,7 @@ const ROUTE_BOW_STEP = 40;
 /* Max pixel gap between adjacent samples along a routed curve. Kept well under
    the shortest card side (a card is ≥ TASK_MIN_H = 64 tall, TASK_W = 260 wide)
    so no card can hide entirely between two samples, and each pair of samples is
-   tested as a segment (not two points) to close the gap completely. */
+   tested as a segment to close the gap completely. */
 const ROUTE_STEP = 24;
 const ROUTE_MIN_SEGMENTS = 8;
 /* Cap the sample count so a very long edge stays cheap; the segment test keeps
@@ -763,56 +763,47 @@ export function assignEdgeLanes(edges: readonly TaskEdgeGeom[]): Map<string, num
 }
 
 type RoutePoint = { x: number; y: number };
+type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 
-/* Polyline sampling density: one vertex roughly every SAMPLE_STEP px of curve so
-   the chord approximation stays tight regardless of length — a fixed count would
-   under-sample a long edge and miss a genuine crossing (issue #17). Bounded both
-   ways so short curves still get a few segments and a very long one stays cheap. */
-const SAMPLE_STEP = 22;
-const SAMPLE_MIN = 12;
-const SAMPLE_MAX = 32;
-
-/* Sample a routed path (one or several cubics) into a polyline for edge-vs-edge
-   crossing tests. Each cubic's segment count scales with its control-polygon
-   length, so the crossing detector never misses a transversal cross on a long
-   connector that fixed sampling would step over. */
-function sampleRoutePoints(d: string): RoutePoint[] {
+/* Parse a routed path ("M x y (C c1 c2 end)+") into its cubic segments — the
+   exact geometry the crossing test recurses on, so accuracy never depends on a
+   sampling density (issue #17: a fixed chord budget stepped over crossings on
+   very long edges). */
+function parseCubics(d: string): RouteSeg[] {
   const n = d.replace(/[MC,]/g, " ").trim().split(/\s+/).map(Number);
-  const pts: RoutePoint[] = [{ x: n[0]!, y: n[1]! }];
+  const out: RouteSeg[] = [];
   let x0 = n[0]!;
   let y0 = n[1]!;
   for (let i = 2; i + 6 <= n.length; i += 6) {
-    const c1x = n[i]!;
-    const c1y = n[i + 1]!;
-    const c2x = n[i + 2]!;
-    const c2y = n[i + 3]!;
-    const x2 = n[i + 4]!;
-    const y2 = n[i + 5]!;
-    const polyLen = Math.hypot(c1x - x0, c1y - y0) + Math.hypot(c2x - c1x, c2y - c1y) + Math.hypot(x2 - c2x, y2 - c2y);
-    const per = Math.max(SAMPLE_MIN, Math.min(SAMPLE_MAX, Math.ceil(polyLen / SAMPLE_STEP)));
-    for (let k = 1; k <= per; k++) {
-      const t = k / per;
-      pts.push({ x: cubicAt(t, x0, c1x, c2x, x2), y: cubicAt(t, y0, c1y, c2y, y2) });
-    }
-    x0 = x2;
-    y0 = y2;
+    out.push({ x1: x0, y1: y0, c1x: n[i]!, c1y: n[i + 1]!, c2x: n[i + 2]!, c2y: n[i + 3]!, x2: n[i + 4]!, y2: n[i + 5]! });
+    x0 = n[i + 4]!;
+    y0 = n[i + 5]!;
   }
-  return pts;
+  return out;
 }
 
-type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
+/* A cubic stays inside the convex hull of its four control points, so their
+   bounding box bounds the curve — the broad phase for both culling and recursion. */
+function segBounds(s: RouteSeg): Bounds {
+  return {
+    minX: Math.min(s.x1, s.c1x, s.c2x, s.x2),
+    maxX: Math.max(s.x1, s.c1x, s.c2x, s.x2),
+    minY: Math.min(s.y1, s.c1y, s.c2y, s.y2),
+    maxY: Math.max(s.y1, s.c1y, s.c2y, s.y2),
+  };
+}
 
-/* Axis-aligned bounds of a polyline — the broad phase for edge-vs-edge tests. */
-function boundsOf(pts: readonly RoutePoint[]): Bounds {
+function cubicsBounds(segs: readonly RouteSeg[]): Bounds {
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
+  for (const s of segs) {
+    const b = segBounds(s);
+    if (b.minX < minX) minX = b.minX;
+    if (b.maxX > maxX) maxX = b.maxX;
+    if (b.minY < minY) minY = b.minY;
+    if (b.maxY > maxY) maxY = b.maxY;
   }
   return { minX, minY, maxX, maxY };
 }
@@ -821,32 +812,13 @@ function boundsOverlap(a: Bounds, b: Bounds): boolean {
   return a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
 }
 
-/* Parametric intersection of segments a–b and c–d, or null when they miss or are
-   parallel. Inclusive of the segment ends, so a crossing that lands exactly on a
-   shared sample vertex (two box diagonals meeting dead-centre) is still found —
-   the degenerate case a strict orientation test silently drops. */
-function segIntersection(a: RoutePoint, b: RoutePoint, c: RoutePoint, d: RoutePoint): RoutePoint | null {
-  const rx = b.x - a.x;
-  const ry = b.y - a.y;
-  const sx = d.x - c.x;
-  const sy = d.y - c.y;
-  const den = rx * sy - ry * sx;
-  if (den === 0) return null; // parallel or collinear — never a transversal cross
-  const qx = c.x - a.x;
-  const qy = c.y - a.y;
-  const t = (qx * sy - qy * sx) / den;
-  const u = (qx * ry - qy * rx) / den;
-  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-  return { x: a.x + t * rx, y: a.y + t * ry };
-}
-
 /* A crossing within this many px of a point the two edges legitimately share
-   (a fan-in/out endpoint) is not a tangle — ignore it. */
+   (a fan-in/out endpoint) counts as a designed touch — ignore it. */
 const SHARED_ENDPOINT_EPS = 2;
 
 /* The endpoints two edges have in common: fan-in edges meeting at one target, or
-   fan-out edges leaving one card, touch there by design and must not be read as
-   crossing. */
+   fan-out edges leaving one card, touch there by design and must stay off the
+   crossing list. */
 function sharedEndpoints(a: TaskEdgeGeom, b: TaskEdgeGeom): RoutePoint[] {
   const ends = (e: TaskEdgeGeom): RoutePoint[] => [
     { x: e.x1, y: e.y1 },
@@ -861,15 +833,91 @@ function sharedEndpoints(a: TaskEdgeGeom, b: TaskEdgeGeom): RoutePoint[] {
   return out;
 }
 
-/* Do two routed polylines cross anywhere other than a point they legitimately
-   share? Robust to the crossing landing exactly on a sample vertex. */
-function routesCross(a: readonly RoutePoint[], b: readonly RoutePoint[], shared: readonly RoutePoint[]): boolean {
-  for (let i = 0; i + 1 < a.length; i++) {
-    for (let j = 0; j + 1 < b.length; j++) {
-      const p = segIntersection(a[i]!, a[i + 1]!, b[j]!, b[j + 1]!);
-      if (!p) continue;
-      if (shared.some((s) => Math.abs(s.x - p.x) <= SHARED_ENDPOINT_EPS && Math.abs(s.y - p.y) <= SHARED_ENDPOINT_EPS)) continue;
-      return true;
+/* Below this control-point deviation from its chord (px) a cubic is treated as a
+   straight segment, ending recursion. Tight so recursion isolates a shallow
+   near-endpoint crossing deeply enough that its tiny sub-chords truly intersect,
+   which a coarse chord (or a fixed sampling cap) steps over (issue #17). */
+const CUBIC_FLAT_EPS = 0.1;
+const CUBIC_MAX_DEPTH = 26;
+
+/* De Casteljau split of a cubic at t = 0.5 into its two halves. */
+function splitCubic(s: RouteSeg): [RouteSeg, RouteSeg] {
+  const abx = (s.x1 + s.c1x) / 2;
+  const aby = (s.y1 + s.c1y) / 2;
+  const bcx = (s.c1x + s.c2x) / 2;
+  const bcy = (s.c1y + s.c2y) / 2;
+  const cdx = (s.c2x + s.x2) / 2;
+  const cdy = (s.c2y + s.y2) / 2;
+  const abcx = (abx + bcx) / 2;
+  const abcy = (aby + bcy) / 2;
+  const bcdx = (bcx + cdx) / 2;
+  const bcdy = (bcy + cdy) / 2;
+  const mx = (abcx + bcdx) / 2;
+  const my = (abcy + bcdy) / 2;
+  return [
+    { x1: s.x1, y1: s.y1, c1x: abx, c1y: aby, c2x: abcx, c2y: abcy, x2: mx, y2: my },
+    { x1: mx, y1: my, c1x: bcdx, c1y: bcdy, c2x: cdx, c2y: cdy, x2: s.x2, y2: s.y2 },
+  ];
+}
+
+function segFlat(s: RouteSeg): boolean {
+  const ux = s.x2 - s.x1;
+  const uy = s.y2 - s.y1;
+  const len = Math.hypot(ux, uy);
+  if (len === 0) return true;
+  const d1 = Math.abs((s.c1x - s.x1) * uy - (s.c1y - s.y1) * ux) / len;
+  const d2 = Math.abs((s.c2x - s.x1) * uy - (s.c2y - s.y1) * ux) / len;
+  return d1 <= CUBIC_FLAT_EPS && d2 <= CUBIC_FLAT_EPS;
+}
+
+/* Proper intersection of segments a1–a2 and b1–b2 (t and u both in [0,1]), or
+   null. Inclusive of the ends so a crossing on a shared vertex is still found. */
+function segIntersection(a1: RoutePoint, a2: RoutePoint, b1: RoutePoint, b2: RoutePoint): RoutePoint | null {
+  const rx = a2.x - a1.x;
+  const ry = a2.y - a1.y;
+  const sx = b2.x - b1.x;
+  const sy = b2.y - b1.y;
+  const den = rx * sy - ry * sx;
+  if (den === 0) return null; // parallel or collinear — never a transversal cross
+  const qx = b1.x - a1.x;
+  const qy = b1.y - a1.y;
+  const t = (qx * sy - qy * sx) / den;
+  const u = (qx * ry - qy * rx) / den;
+  if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+  return { x: a1.x + t * rx, y: a1.y + t * ry };
+}
+
+/* Recursive cubic–cubic crossing: cull by control-hull bounds, split the curvy
+   side(s) until both are flat, then a chord intersection test. Exact regardless
+   of length — no sampling cap to step over a crossing — and cheap because a
+   far-apart pair is rejected at its first disjoint hull and a gentle curve
+   flattens within a few splits. Collinear overlap (a shared corridor) gives a
+   parallel chord test and no false crossing. A crossing within `SHARED_ENDPOINT_EPS`
+   of a point the edges legitimately share (a fan-in/out endpoint) is ignored. */
+function cubicPairCross(a: RouteSeg, b: RouteSeg, shared: readonly RoutePoint[], depth: number): boolean {
+  if (!boundsOverlap(segBounds(a), segBounds(b))) return false;
+  const flatA = segFlat(a);
+  const flatB = segFlat(b);
+  if ((flatA && flatB) || depth <= 0) {
+    const p = segIntersection({ x: a.x1, y: a.y1 }, { x: a.x2, y: a.y2 }, { x: b.x1, y: b.y1 }, { x: b.x2, y: b.y2 });
+    if (!p) return false;
+    return !shared.some((s) => Math.abs(s.x - p.x) <= SHARED_ENDPOINT_EPS && Math.abs(s.y - p.y) <= SHARED_ENDPOINT_EPS);
+  }
+  const as = flatA ? [a] : splitCubic(a);
+  const bs = flatB ? [b] : splitCubic(b);
+  for (const sa of as) {
+    for (const sb of bs) {
+      if (cubicPairCross(sa, sb, shared, depth - 1)) return true;
+    }
+  }
+  return false;
+}
+
+/* Do two routed paths cross anywhere other than a point they legitimately share? */
+function routesCross(a: readonly RouteSeg[], b: readonly RouteSeg[], shared: readonly RoutePoint[]): boolean {
+  for (const sa of a) {
+    for (const sb of b) {
+      if (cubicPairCross(sa, sb, shared, CUBIC_MAX_DEPTH)) return true;
     }
   }
   return false;
@@ -951,11 +999,11 @@ export function routeTaskEdges(
   }
 
   const byKey = new Map<string, TaskEdgeGeom>(edges.map((edge) => [edge.key, edge]));
-  const state = new Map<string, { route: TaskEdgeRoute; pts: RoutePoint[]; box: Bounds }>();
+  const state = new Map<string, { route: TaskEdgeRoute; cubics: RouteSeg[]; box: Bounds }>();
   const routeInto = (edge: TaskEdgeGeom, lane: number) => {
     const route = routeTaskEdge(edge, edgeObstacles(edge, cards, containers), lane);
-    const pts = sampleRoutePoints(route.d);
-    state.set(edge.key, { route, pts, box: boundsOf(pts) });
+    const cubics = parseCubics(route.d);
+    state.set(edge.key, { route, cubics, box: cubicsBounds(cubics) });
   };
   for (const edge of edges) routeInto(edge, lanes.get(edge.key) ?? 0);
 
@@ -963,14 +1011,14 @@ export function routeTaskEdges(
 
   /* How many *other* edges this route tangles with — a boolean per pair, robust
      to the exact crossing point, so a symmetric dead-centre crossing counts. The
-     bounding-box broad phase skips the O(segments²) test for every far-apart
-     edge, so the pass stays near-linear on a spread board (issue #17). */
-  const crossingsAgainstOthers = (key: string, pts: readonly RoutePoint[], box: Bounds): number => {
+     bounding-box broad phase skips the recursive test for every far-apart edge,
+     so the pass stays near-linear on a spread board (issue #17). */
+  const crossingsAgainstOthers = (key: string, cubics: readonly RouteSeg[], box: Bounds): number => {
     const edge = byKey.get(key)!;
     let total = 0;
     for (const [otherKey, other] of state) {
       if (otherKey === key || !boundsOverlap(box, other.box)) continue;
-      if (routesCross(pts, other.pts, sharedEndpoints(edge, byKey.get(otherKey)!))) total++;
+      if (routesCross(cubics, other.cubics, sharedEndpoints(edge, byKey.get(otherKey)!))) total++;
     }
     return total;
   };
@@ -985,7 +1033,7 @@ export function routeTaskEdges(
            from overdrawing, and parallel tracks never register as crossing. */
         if (corridorMate.has(edge.key)) continue;
         const current = state.get(edge.key)!;
-        let bestCrossings = crossingsAgainstOthers(edge.key, current.pts, current.box);
+        let bestCrossings = crossingsAgainstOthers(edge.key, current.cubics, current.box);
         if (bestCrossings === 0 || bestCrossings > CROSS_BUSY) continue;
         const obstacles = edgeObstacles(edge, cards, containers);
         const laneBase = lanes.get(edge.key) ?? 0;
@@ -999,11 +1047,11 @@ export function routeTaskEdges(
           const route = routeTaskEdge(edge, obstacles, laneBase + bow);
           const candObstacle = route.crosses ? 1 : 0;
           if (candObstacle > bestObstacle) continue; // would re-enter an obstacle — reject
-          const pts = sampleRoutePoints(route.d);
-          const box = boundsOf(pts);
-          const crossings = crossingsAgainstOthers(edge.key, pts, box);
+          const cubics = parseCubics(route.d);
+          const box = cubicsBounds(cubics);
+          const crossings = crossingsAgainstOthers(edge.key, cubics, box);
           if (candObstacle < bestObstacle || crossings < bestCrossings) {
-            best = { route, pts, box };
+            best = { route, cubics, box };
             bestObstacle = candObstacle;
             bestCrossings = crossings;
           }
@@ -1039,8 +1087,8 @@ export function routeTaskEdges(
         for (const step of CORRIDOR_LANES) {
           const route = routeTaskEdge(edge, obstacles, laneBase + step);
           if (route.corridor && !clashes(route.corridor)) {
-            const pts = sampleRoutePoints(route.d);
-            state.set(edge.key, { route, pts, box: boundsOf(pts) });
+            const cubics = parseCubics(route.d);
+            state.set(edge.key, { route, cubics, box: cubicsBounds(cubics) });
             corridor = route.corridor;
             break;
           }
@@ -1062,7 +1110,7 @@ export function routeTaskEdges(
       const sa = state.get(a.key)!;
       const sb = state.get(b.key)!;
       if (!boundsOverlap(sa.box, sb.box)) continue;
-      if (!routesCross(sa.pts, sb.pts, sharedEndpoints(a, b))) continue;
+      if (!routesCross(sa.cubics, sb.cubics, sharedEndpoints(a, b))) continue;
       faded.add(a.key < b.key ? b.key : a.key);
     }
   }

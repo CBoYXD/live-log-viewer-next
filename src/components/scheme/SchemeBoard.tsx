@@ -422,7 +422,7 @@ export function SchemeBoard({
     () => placedTasks.map((task) => ({ id: task.id, ...taskRect(task) })),
     [placedTasks],
   );
-  /* Route all task edges here (not in the layer) so the world box below can grow
+  /* Route all task edges here — the layer only renders them — so the world box below can grow
      to include the routed geometry. Cached on a rounded geometry signature: the
      10s poll hands fresh arrays every tick, so an unchanged board reuses cached
      routes and the pass re-runs on the render thread only for a real move (issue #17). */

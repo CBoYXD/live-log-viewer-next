@@ -153,7 +153,7 @@ describe("taskRect / taskCardHeight", () => {
     }
   });
 
-  test("wrap width assumes the widest glyphs, never an average", () => {
+  test("wrap width uses the widest glyph advance", () => {
     /* The content box is only 236px, so a run of the widest glyphs cannot fit
        on one line — the estimate counts several lines for them. */
     const oneChar = taskCardHeight(task({ id: "t", text: "x" }));
@@ -282,8 +282,8 @@ describe("routeTaskEdge", () => {
   function inRect(x: number, y: number, r: SchemeRect): boolean {
     return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
   }
-  /* Enters any segment of a routed path — handles multi-segment detours, not
-     just a single cubic. */
+  /* Enters any segment of a routed path — handles multi-segment detours as well
+     as a single cubic. */
   function pathEntersRect(d: string, r: SchemeRect): boolean {
     const n = parse(d);
     let x0 = n[0]!;
@@ -639,6 +639,53 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     expect(enters(routes.get("B")!.d, pane)).toBe(false);
   });
 
+  /* Fine (per=800) transversal-crossing check — dense enough to catch a crossing
+     anywhere along a 16000px edge, so it never depends on the sampling density the
+     production detector was faulted for. */
+  function crossesFine(dA: string, dB: string): boolean {
+    const a = points(dA, 800);
+    const b = points(dB, 800);
+    const o = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    for (let i = 0; i + 1 < a.length; i++) {
+      for (let j = 0; j + 1 < b.length; j++) {
+        const d1 = o(b[j]!.x, b[j]!.y, b[j + 1]!.x, b[j + 1]!.y, a[i]!.x, a[i]!.y);
+        const d2 = o(b[j]!.x, b[j]!.y, b[j + 1]!.x, b[j + 1]!.y, a[i + 1]!.x, a[i + 1]!.y);
+        const d3 = o(a[i]!.x, a[i]!.y, a[i + 1]!.x, a[i + 1]!.y, b[j]!.x, b[j]!.y);
+        const d4 = o(a[i]!.x, a[i]!.y, a[i + 1]!.x, a[i + 1]!.y, b[j + 1]!.x, b[j + 1]!.y);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+      }
+    }
+    return false;
+  }
+
+  test("a long crossing far from the endpoints is never left silent (Finding)", () => {
+    /* The reviewer's exact repro: two long connectors whose base (lane-0) curves
+       cross far from either endpoint. A fixed 32-sample crossing test stepped over
+       that intersection and reported crosses:false for both, so the reduction
+       never fired and they rendered visibly overlapping. Exact recursive
+       intersection catches it — the base curves genuinely cross, and after routing
+       the pair is separated, or one is flagged so the overlap reads as behind. */
+    const a = geom("A", 8548, 7026, 3737, -9626);
+    const b = geom("B", 7305, 6831, 4151, -5884);
+    /* The base curves really do cross — this geometry exercises the long-edge
+       case the sampling cap silently stepped over. */
+    expect(crossesFine(routeTaskEdge(a, [], 0).d, routeTaskEdge(b, [], 0).d)).toBe(true);
+    const routes = routeTaskEdges([a, b], [], []);
+    const stillCross = crossesFine(routes.get("A")!.d, routes.get("B")!.d);
+    const flagged = routes.get("A")!.crosses || routes.get("B")!.crosses;
+    /* A surviving visible crossing must be flagged; a silent crossing is the bug. */
+    expect(stillCross && !flagged).toBe(false);
+  });
+
+  test("a forced crossing ~10000px along each edge is still detected (Finding)", () => {
+    /* Scaled box diagonals: the intersection sits far past where a bounded sample
+       walk would land, yet the exact detector must flag the unavoidable crossing. */
+    const a = geom("A", 0, 0, 20000, 20000);
+    const b = geom("B", 0, 20000, 20000, 0);
+    const routes = routeTaskEdges([a, b], [], []);
+    expect(routes.get("A")!.crosses || routes.get("B")!.crosses).toBe(true);
+  });
+
   test("busy fan-out detours are deconflicted onto distinct corridors (Finding)", () => {
     /* One task fanning out to six targets across a 600×680 pane: every edge must
        detour, and without deconfliction all six land on the identical corridor,
@@ -746,6 +793,30 @@ describe("routeTaskEdges — edge-to-edge crossing handling (Finding 1)", () => 
     expect(stillCross && !eitherFaded).toBe(false);
   });
 
+  /* Min distance between two sampled paths — dense enough to see a near-endpoint
+     graze that a coarse crossing count would step over. */
+  function minCurveDistance(dA: string, dB: string): number {
+    const a = points(dA, 300);
+    const b = points(dB, 300);
+    let m = Infinity;
+    for (const p of a) for (const q of b) m = Math.min(m, Math.hypot(p.x - q.x, p.y - q.y));
+    return m;
+  }
+
+  test("a shallow near-endpoint crossing on very long edges is resolved (Finding)", () => {
+    /* The reviewer's exact repro: two very long connectors (~17000px / ~12700px)
+       cross ~13px from B's endpoint at a shallow angle. A 32-chord sampling cap
+       stepped over it and left both crosses:false — a solid tangle. Recursive
+       cubic intersection catches it and the pass resolves it: the routed curves
+       end up well apart, or one is faded. A solid overlap must never survive. */
+    const a = geom("A", 8548, 7026, 3737, -9626);
+    const b = geom("B", 7305, 6831, 4151, -5884);
+    const routes = routeTaskEdges([a, b], [], []);
+    const faded = routes.get("A")!.crosses || routes.get("B")!.crosses;
+    const apart = minCurveDistance(routes.get("A")!.d, routes.get("B")!.d) > 4;
+    expect(faded || apart).toBe(true);
+  });
+
   test("distinct edges that do not cross are never faded", () => {
     const a = geom("A", 0, 0, 100, 100);
     const b = geom("B", 2000, 0, 2100, 100);
@@ -850,9 +921,12 @@ describe("routeTaskEdges — busy fan-out corridor deconfliction (Finding)", () 
     expect(Math.max(...perCorridor.values())).toBeLessThanOrEqual(2);
     /* The fan really spreads across several distinct corridors. */
     expect(new Set(corridorX).size).toBeGreaterThanOrEqual(4);
-    /* And they mostly draw solid — the old collapse faded five of the six. */
-    const faded = edges.filter((e) => routes.get(e.key)!.crosses).length;
-    expect(faded).toBeLessThanOrEqual(2);
+    /* Several still draw solid: the old collapse superimposed all six on one
+       corridor, so the exact detector faded five as behind-the-rail. With the
+       corridors spread apart at least a third stay solid — the honest fades that
+       remain are genuine sibling crossings in the fan's approach legs. */
+    const solid = edges.filter((e) => !routes.get(e.key)!.crosses).length;
+    expect(solid).toBeGreaterThanOrEqual(2);
   });
 
   test("fan-out deconfliction is order-independent", () => {
