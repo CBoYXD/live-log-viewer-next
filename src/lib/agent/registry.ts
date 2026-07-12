@@ -690,6 +690,7 @@ function adoptProvisionalOwner(
       childConversationId: edge.childConversationId === owner.id ? target.id : edge.childConversationId,
       parentConversationId: edge.parentConversationId === owner.id ? target.id : edge.parentConversationId,
     };
+    if (reassigned.childConversationId === reassigned.parentConversationId) continue;
     const existing = reassignedEdges[reassigned.childConversationId];
     if (!existing || edge.childConversationId === target.id) reassignedEdges[reassigned.childConversationId] = reassigned;
   }

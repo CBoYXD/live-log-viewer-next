@@ -747,6 +747,45 @@ describe("agent registry", () => {
     });
   });
 
+  test("provisional successor adoption discards lineage that canonicalizes to a self-edge", () => {
+    const store = registry();
+    const sourcePath = "/sessions/source-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const successorPath = "/sessions/successor-019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl";
+    const canonical = store.ensureConversation("codex", sourcePath, "terra");
+    store.reconcileConversations([{
+      engine: "codex",
+      path: successorPath,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: canonical.id }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+    const provisional = store.conversationForPath(successorPath)!;
+    expect(store.snapshot().lineageEdges[provisional.id]).toMatchObject({
+      childConversationId: provisional.id,
+      parentConversationId: canonical.id,
+      source: "engine-native",
+    });
+    const migration = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "work",
+      conversationId: canonical.id,
+      purpose: "migration-successor",
+      expectedArtifactPath: successorPath,
+    });
+    if (migration.kind !== "created") throw new Error("expected migration receipt");
+
+    expect(store.settleSpawn(migration.receipt.launchId, spawnEntry(successorPath, "work"))).toMatchObject({
+      kind: "settled",
+      conversation: { id: canonical.id },
+    });
+    const snapshot = store.snapshot();
+    expect(snapshot.conversationAliases[provisional.id]).toBe(canonical.id);
+    expect(snapshot.lineageEdges[canonical.id]).toBeUndefined();
+    expect(Object.values(snapshot.lineageEdges).some((edge) => edge.childConversationId === edge.parentConversationId)).toBe(false);
+  });
+
   test("stronger engine-native evidence corrects an inferred parent", () => {
     const store = registry();
     const parentA = store.ensureConversation("codex", "/sessions/parent-a-019f4906-3f67-7b72-9fbc-9ec3b5ad1301.jsonl", "terra");
