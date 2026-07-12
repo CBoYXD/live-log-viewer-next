@@ -33,6 +33,7 @@ import type { TaskCardHandlers } from "./TaskCard";
 import { TaskEdgesLayer } from "./TaskEdgesLayer";
 import { TasksLayer } from "./TasksLayer";
 import { buildTaskEdges, buildTaskTargetIndex, TASK_W, taskRect, type SchemeRect } from "./taskGeometry";
+import { resolveTaskPlacements } from "./taskPlacement";
 import { useLasso } from "./useLasso";
 import { useSchemeCamera } from "./useSchemeCamera";
 import { useSpatialNav } from "./useSpatialNav";
@@ -379,12 +380,32 @@ export function SchemeBoard({
     const fresh = localTasks.filter((task) => !have.has(task.id) && task.project === project);
     return fresh.length ? [...tasks, ...fresh] : tasks;
   }, [tasks, localTasks, project]);
+  /* Panes, decks, stacks and drafts the cards must not bury (issue #17): the
+     placement pass spreads any pileup into their gaps. Group halos are derived
+     from these same rects, so nudging cards never disturbs a flow/pipeline
+     overlay. */
+  const taskObstacles = useMemo<SchemeRect[]>(
+    () => [...layout.nodes, ...layout.decks, ...layout.stacks, ...layout.drafts].map(({ x, y, w, h }) => ({ x, y, w, h })),
+    [layout],
+  );
+  /* Collision-aware display positions: cards keep their stored spot unless they
+     overlap another card, so hand-arranged boards pass through untouched while
+     the curator/inbox lattice pileup gets spread out and stays readable. */
+  const placement = useMemo(() => resolveTaskPlacements(mergedTasks, taskObstacles), [mergedTasks, taskObstacles]);
+  const placedTasks = useMemo(
+    () =>
+      mergedTasks.map((task) => {
+        const spot = placement.get(task.id);
+        return spot && (spot.x !== task.pos.x || spot.y !== task.pos.y) ? { ...task, pos: spot } : task;
+      }),
+    [mergedTasks, placement],
+  );
   /* Camera-facing rects: focus glides and map taps resolve task keys. */
   const taskRects = useMemo(
-    () => new Map(mergedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
-    [mergedTasks],
+    () => new Map(placedTasks.map((task) => ["task::" + task.id, taskRect(task)] as const)),
+    [placedTasks],
   );
-  const taskEdges = useMemo(() => buildTaskEdges(mergedTasks, buildTaskTargetIndex(layout)), [mergedTasks, layout]);
+  const taskEdges = useMemo(() => buildTaskEdges(placedTasks, buildTaskTargetIndex(layout)), [placedTasks, layout]);
 
   const onPlaceTask = useCallback((wx: number, wy: number) => {
     setPendingTask({ x: Math.round(wx - TASK_W / 2), y: Math.round(wy - 14) });
@@ -721,7 +742,7 @@ export function SchemeBoard({
         />
         <TaskEdgesLayer edges={taskEdges} width={layout.width} height={layout.height} onRetry={retryEdge} />
         <TasksLayer
-          tasks={mergedTasks}
+          tasks={placedTasks}
           files={files}
           interactive={!handLike && !session}
           lite={mapMode}
@@ -837,7 +858,7 @@ export function SchemeBoard({
         />
       ) : null}
 
-      <Minimap layout={layout} tasks={mergedTasks} cam={cam} vp={vp} onJump={jump} />
+      <Minimap layout={layout} tasks={placedTasks} cam={cam} vp={vp} onJump={jump} />
     </div>
     {/* The full-window conversation: the same pane component over the whole
         viewport, with the live feed and the composer of exactly this

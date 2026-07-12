@@ -41,11 +41,17 @@ export const TaskEdgesLayer = memo(function TaskEdgesLayer({
         const isSource = edge.relation === "source";
         const color = edge.failed ? FAILED_COLOR : isSource ? SOURCE_COLOR : TASK_TONES[edge.status].color;
         const opacity = edge.failed ? 0.95 : isSource ? 0.4 : 0.65;
-        const mx = (edge.x1 + edge.x2) / 2;
-        const curve = `M ${edge.x1} ${edge.y1} C ${mx} ${edge.y1}, ${mx} ${edge.y2}, ${edge.x2} ${edge.y2}`;
-        /* Cubic with these controls passes through the plain midpoint. */
+        /* Tangent follows the dominant axis: a mostly-vertical hop curves with
+           vertical control handles so it hugs the gap between columns instead
+           of bowing sideways across a neighbouring card, and vice versa. Both
+           forms are symmetric cubics that pass through the plain midpoint, so
+           the failed-edge ⚠ badge below still lands on the curve. */
         const midX = (edge.x1 + edge.x2) / 2;
         const midY = (edge.y1 + edge.y2) / 2;
+        const vertical = Math.abs(edge.y2 - edge.y1) > Math.abs(edge.x2 - edge.x1);
+        const curve = vertical
+          ? `M ${edge.x1} ${edge.y1} C ${edge.x1} ${midY}, ${edge.x2} ${midY}, ${edge.x2} ${edge.y2}`
+          : `M ${edge.x1} ${edge.y1} C ${midX} ${edge.y1}, ${midX} ${edge.y2}, ${edge.x2} ${edge.y2}`;
         return (
           <g key={edge.key} opacity={opacity}>
             <path
