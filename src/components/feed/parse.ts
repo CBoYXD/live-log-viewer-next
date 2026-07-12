@@ -12,6 +12,7 @@ import type { FileEntry } from "@/lib/types";
 
 import type { GlyphName } from "../icons";
 import { hhmm } from "../utils";
+import { decodeTerminalText } from "./ansi";
 import { diffFromApplyPatch, normalizeEdit, type DiffModel, type FileDiff } from "./diff";
 import { familyOf, summarizeTool, type ArgChip, type ToolFamily } from "./tools";
 
@@ -1007,13 +1008,18 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
   const attach = (callRec: CallRec | undefined, output: string, errFlag?: boolean) => {
     if (!callRec) return null;
     const code = output.match(/exited with code (\d+)/)?.[1];
-    /* Codex wraps every custom-tool result in a `Script completed / Wall time N
-       seconds / Output:` preamble; strip it, and treat a bare `{}` (a script
-       that returned nothing) as no output at all, so an apply_patch card is not
-       trailed by a signal-free block (issue #90). */
-    const cleaned = output
+    /* Codex interactive-shell wall time, read before the preamble is stripped, so
+       an empty `wait` can render a compact "waiting Ns" line (issue #141). */
+    const wallSeconds = output.match(/Wall time:?\s*([\d.]+)\s*seconds?/i)?.[1];
+    /* Codex wraps every custom-tool / interactive-shell result in a `Chunk ID /
+       Wall time / Process … / Original token count / Output:` preamble; strip it,
+       decode the terminal payload (real newlines, ANSI removed — issue #141), and
+       treat a bare `{}` (a script that returned nothing) as no output at all, so
+       an apply_patch card is not trailed by a signal-free block (issue #90). */
+    const cleaned = decodeTerminalText(output)
       .replace(/^Chunk ID:[^\n]*\n/, "")
       .replace(/Wall time:[^\n]*\n/, "")
+      .replace(/^Process (?:running with session ID|exited with code)[^\n]*\n/gm, "")
       .replace(/Original token count:[^\n]*\n?/, "")
       .replace(/^Script completed[ \t]*\r?\n/, "")
       .replace(/^Wall time [\d.]+ seconds?[ \t]*\r?\n/, "")
@@ -1022,6 +1028,9 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const body = cleaned === "{}" ? "" : cleaned;
     const isErr = errFlag === true || (code !== undefined && code !== "0");
     const prev = callRec.event;
+    /* An empty codex wait/stdin chunk collapses to "waiting Ns" rather than an
+       "ok" with a signal-free block (issue #141 §4). */
+    const idleWait = !body && (prev.tool === "wait" || prev.tool === "write_stdin") && wallSeconds !== undefined;
     let outputPreview = prev.outputPreview;
     let outputTruncated = prev.outputTruncated;
     if (body) {
@@ -1033,7 +1042,11 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
     const event: ToolEvent = {
       ...prev,
       status: isErr ? "err" : "ok",
-      statusLabel: isErr ? (code && code !== "0" ? "exit " + code : tr("render.error")) : "ok",
+      statusLabel: isErr
+        ? (code && code !== "0" ? "exit " + code : tr("render.error"))
+        : idleWait
+          ? tr("tools.waitingSeconds", { n: Math.round(Number(wallSeconds)) })
+          : "ok",
       open: prev.open || isErr,
       srcResult: curSrc,
       outputPreview,
@@ -1259,7 +1272,10 @@ export function createFeedSession(cfg: FeedSessionConfig): FeedSession {
         if (name === "apply_patch") {
           return void addPatch(ts, String(args.input ?? ""), textPart(p.call_id));
         }
-        if (name === "write_stdin") return addSvc(tr("render.stdinSession", { id: String(args.session_id ?? "") }));
+        /* write_stdin / wait fall through to the generic tool path so they render
+           as real cards — the keys sent and the decoded output — instead of an
+           opaque "session_id" service line (issue #141). summarizeTool owns their
+           summary; attach() decodes and collapses their output. */
         if (name === "exec" || name === "functions.exec") return void emitCustomTool(ts, name, textPart(args.input), textPart(p.call_id));
         return void registerCall(newToolEvent({ ts, id: textPart(p.call_id) || "plain-" + pushSeq + "-" + String(ts ?? ""), tool: name, args, engine: "codex" }));
       }
