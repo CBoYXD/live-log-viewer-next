@@ -18,12 +18,11 @@ import { ReviewCard } from "./cards/ReviewCard";
 import { SysMsgCard } from "./cards/SysMsgCard";
 import { ToolCard } from "./cards/ToolCard";
 import { SpeakButton } from "./SpeakButton";
-import { spokenAnswerText } from "@/lib/tts";
 
 /* Memoized: feed items are immutable after buildFeed, so a pane re-render
    (poll tick, camera state, files refresh) skips re-parsing markdown for
    every message that did not change. */
-export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
+export const FeedItem = memo(function FeedItem({ item, speakText }: { item: Item; speakText?: string }) {
   if (item.kind === "image") return <ImageCard media={item.media} data={item.data} w={item.w} h={item.h} bytes={item.bytes} />;
   if (item.kind === "inbox-image") return <InboxImageCard name={item.name} path={item.path} />;
   if (item.kind === "blob") return <BlobCard bytes={item.bytes} text={item.text} />;
@@ -42,7 +41,7 @@ export const FeedItem = memo(function FeedItem({ item }: { item: Item }) {
         <div className="relative min-w-0 flex-1 whitespace-pre-wrap break-words">
           {hhmm(item.ts) ? <div className="mb-0.5 text-[11px] text-dim">{hhmm(item.ts)}</div> : null}
           <div className="absolute right-0 top-0 flex items-center gap-0.5">
-            <SpeakButton text={spokenAnswerText(item.text)} />
+            {speakText ? <SpeakButton text={speakText} /> : null}
             <CopyButton
               text={item.text}
               label={tr("feed.copyMd")}

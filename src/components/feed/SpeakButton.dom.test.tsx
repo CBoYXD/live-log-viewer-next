@@ -15,6 +15,7 @@ Object.assign(globalThis, {
   Node: dom.Node,
   HTMLElement: dom.HTMLElement,
   Event: dom.Event,
+  KeyboardEvent: dom.KeyboardEvent,
   MouseEvent: dom.MouseEvent,
 });
 
@@ -57,37 +58,58 @@ afterEach(() => {
 test("a second click cancels pending synthesis and ignores its stale response", async () => {
   let resolvePost!: (response: Response) => void;
   let postSignal: AbortSignal | undefined;
+  let configRequests = 0;
   globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
-    if (!init?.method) return Response.json(backendInfo);
+    if (!init?.method) { configRequests += 1; return Response.json(backendInfo); }
     postSignal = init.signal as AbortSignal;
     return new Promise<Response>((resolve) => { resolvePost = resolve; });
   }) as unknown as typeof fetch;
   const createObjectURL = mock(() => "blob:tts");
   URL.createObjectURL = createObjectURL;
+  globalThis.Audio = class {
+    muted = false;
+    src = "";
+    currentTime = 0;
+    duration = 0;
+    onloadedmetadata: (() => void) | null = null;
+    ontimeupdate: (() => void) | null = null;
+    onended: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(src = "") { this.src = src; }
+    pause() {}
+    async play() {}
+  } as unknown as typeof Audio;
 
   const view = await mount("Read me");
+  const other = await mount("Another answer");
+  expect(configRequests).toBe(1);
   flushSync(() => { view.button.click(); });
   expect(view.host.textContent).toContain("Billed to your openai account per character");
   expect(view.host.textContent).toContain("AI-generated voice");
   expect(postSignal).toBeUndefined();
   const confirm = [...view.host.querySelectorAll("button")].find((button) => button.textContent === "Speak")!;
   flushSync(() => { confirm.click(); });
+  await drainUpdates();
   expect(view.button.getAttribute("aria-label")).toContain("Stop");
   flushSync(() => { view.button.click(); });
+  await drainUpdates();
   expect(postSignal?.aborted).toBe(true);
-  expect(view.button.getAttribute("aria-label")).toContain("Read answer");
 
   resolvePost(new Response(new Blob(["late"])));
   await drainUpdates();
   expect(createObjectURL).not.toHaveBeenCalled();
   flushSync(() => { view.root.unmount(); });
+  flushSync(() => { other.root.unmount(); });
   view.host.remove();
+  other.host.remove();
 });
 
-test("long answers are bounded before synthesis", async () => {
+test("long answers require consent and cached replay makes no paid request", async () => {
   let sentText = "";
+  let postRequests = 0;
   globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
     if (!init?.method) return Response.json(backendInfo);
+    postRequests += 1;
     sentText = (JSON.parse(String(init.body)) as { text: string }).text;
     return new Response(new Blob(["audio"]));
   }) as unknown as typeof fetch;
@@ -95,10 +117,21 @@ test("long answers are bounded before synthesis", async () => {
   const revokeObjectURL = mock(() => {});
   URL.revokeObjectURL = revokeObjectURL;
   globalThis.Audio = class {
+    muted = false;
+    src = "";
+    currentTime = 0;
+    duration = 10;
+    private authorized = false;
+    onloadedmetadata: (() => void) | null = null;
+    ontimeupdate: (() => void) | null = null;
     onended: (() => void) | null = null;
     onerror: (() => void) | null = null;
+    constructor(src = "") { this.src = src; }
     pause() {}
-    async play() {}
+    async play() {
+      if (this.muted && this.src.startsWith("data:audio/wav")) this.authorized = true;
+      if (!this.authorized && !this.src.startsWith("blob:")) throw new DOMException("blocked", "NotAllowedError");
+    }
   } as unknown as typeof Audio;
 
   const view = await mount("x".repeat(MAX_TTS_TEXT_LENGTH + 100));
@@ -108,7 +141,55 @@ test("long answers are bounded before synthesis", async () => {
   flushSync(() => { confirm.click(); });
   await drainUpdates();
   expect(sentText).toHaveLength(MAX_TTS_TEXT_LENGTH);
+  expect(postRequests).toBe(1);
+  expect(view.host.querySelector('[role="alert"]')).toBeNull();
+  flushSync(() => { view.button.click(); });
+  expect(view.button.getAttribute("aria-label")).toContain("Replay");
+  flushSync(() => { view.button.click(); });
+  expect(postRequests).toBe(1);
+  expect(view.button.getAttribute("aria-label")).toContain("Stop");
   flushSync(() => { view.button.click(); view.root.unmount(); });
-  expect(revokeObjectURL).toHaveBeenCalledWith("blob:tts");
+  expect(revokeObjectURL).not.toHaveBeenCalled();
+  view.host.remove();
+});
+
+test("the confirmation dialog supports Escape, focus restoration, and Enter", async () => {
+  let postRequests = 0;
+  globalThis.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+    if (!init?.method) return Response.json(backendInfo);
+    postRequests += 1;
+    return new Response(new Blob(["audio"]));
+  }) as unknown as typeof fetch;
+  URL.createObjectURL = () => "blob:keyboard";
+  globalThis.Audio = class {
+    muted = false;
+    src = "";
+    currentTime = 0;
+    duration = 1;
+    onloadedmetadata: (() => void) | null = null;
+    ontimeupdate: (() => void) | null = null;
+    onended: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor(src = "") { this.src = src; }
+    pause() {}
+    async play() {}
+  } as unknown as typeof Audio;
+
+  const view = await mount("Keyboard answer");
+  flushSync(() => { view.button.click(); });
+  await drainUpdates();
+  let dialog = view.host.querySelector('[role="dialog"]') as HTMLElement;
+  expect(dialog.contains(document.activeElement)).toBe(true);
+  flushSync(() => { dialog.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as unknown as Event); });
+  await drainUpdates();
+  expect(view.host.querySelector('[role="dialog"]')).toBeNull();
+  expect(document.activeElement).toBe(view.button);
+
+  flushSync(() => { view.button.click(); });
+  dialog = view.host.querySelector('[role="dialog"]') as HTMLElement;
+  flushSync(() => { dialog.dispatchEvent(new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as unknown as Event); });
+  await drainUpdates();
+  expect(postRequests).toBe(1);
+  flushSync(() => { view.button.click(); view.root.unmount(); });
   view.host.remove();
 });

@@ -104,4 +104,21 @@ describe("/api/tts", () => {
     expect((await pending).status).toBe(499);
     expect(providerSignal?.aborted).toBe(true);
   });
+
+  test("admits three concurrent syntheses and releases every slot", async () => {
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.LLV_TTS_BACKEND = "openai";
+    const pending: Array<(response: Response) => void> = [];
+    globalThis.fetch = mock(async () => new Promise<Response>((resolve) => pending.push(resolve))) as unknown as typeof fetch;
+    const requests = [1, 2, 3].map((n) => POST(request(JSON.stringify({ text: `Hello ${n}` }))));
+    while (pending.length < 3) await Promise.resolve();
+    expect((await POST(request(JSON.stringify({ text: "Fourth" })))).status).toBe(429);
+    for (const resolve of pending) resolve(new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } }));
+    for (const response of await Promise.all(requests)) await response.arrayBuffer();
+
+    globalThis.fetch = mock(async () => new Response(new Uint8Array([1]), { headers: { "content-type": "audio/mpeg" } })) as unknown as typeof fetch;
+    const afterRelease = await POST(request(JSON.stringify({ text: "After" })));
+    expect(afterRelease.status).toBe(200);
+    await afterRelease.arrayBuffer();
+  });
 });
