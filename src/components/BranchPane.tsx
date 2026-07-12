@@ -1,6 +1,6 @@
 "use client";
 
-import { CornerDownRight, GitBranch, Maximize2, Minimize2 } from "lucide-react";
+import { CornerDownRight, GitBranch, Maximize2, Minimize2, Unlink2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ChevronRight, X } from "@/components/icons";
@@ -16,6 +16,7 @@ import { registerLinkTarget } from "./AgentLink";
 import { DeleteFileButton } from "./DeleteFileButton";
 import { MigrationDivider, MigrationRibbon } from "./MigrationRibbon";
 import { EffortPills } from "./EffortPills";
+import { AgentRuntimeControls } from "./AgentRuntimeControls";
 import { FlipRow } from "./FlipRow";
 import { LogFeed } from "./LogFeed";
 import { paneState, type PaneState } from "./paneState";
@@ -44,6 +45,18 @@ export function kindLabel(t: TFunction, kind: string): string {
   if (kind === "job") return t("kind.job");
   if (kind === "background") return t("kind.background");
   return kind;
+}
+
+export function ParentRemovedChip() {
+  const { t } = useLocale();
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-dim"
+      title={t("lineage.parentRemovedTitle")}
+    >
+      <Unlink2 className="h-2.5 w-2.5" aria-hidden /> {t("lineage.parentRemoved")}
+    </span>
+  );
 }
 
 /** Ticking "time since the transcript last grew" — the last sign of life.
@@ -233,11 +246,13 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
               </span>
             )}
             <EffortPills file={file} />
+            {file.proc === "running" && !file.parent && (file.engine === "claude" || file.engine === "codex") ? <AgentRuntimeControls file={file} /> : null}
             <RateLimitBadge rateLimit={file.rateLimit} />
+            {file.parentRemoved ? <ParentRemovedChip /> : null}
             {/* The phone header keeps only actionable or alarming chips: ctx
                 appears once it nears the limit, the worktree name and the
                 branch-kind label yield their room to the rest of the row. */}
-            {file.ctx && (!isMobile || file.ctx.pct >= 70) ? <CtxChip ctx={file.ctx} /> : null}
+            {file.ctx && (!isMobile || (file.ctx.pct !== null && file.ctx.pct >= 70)) ? <CtxChip ctx={file.ctx} /> : null}
             {file.worktree && !isMobile ? (
               <span
                 className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-line/80 px-1.5 py-0.5 font-mono text-[9.5px] text-dim"

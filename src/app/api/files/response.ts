@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { loadPipelines } from "@/lib/pipelines/store";
@@ -14,8 +16,10 @@ import { loadTasks } from "@/lib/tasks/store";
 import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
+import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
+import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
 import type { FilesResponse } from "@/lib/types";
 
 interface FilesRouteDependencies {
@@ -34,6 +38,60 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
+  const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
+  const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
+  const filesByPath = new Map(files.map((file) => [file.path, file]));
+  for (let index = 0; index < files.length; index += 1) {
+    const child = files[index]!;
+    const childConversation = conversationForPath(child.path);
+    const current = childConversation?.generations.at(-1);
+    if (!childConversation || current?.path !== child.path) continue;
+    const rawParentId = registrySnapshot.lineageEdges[childConversation.id]?.parentConversationId
+      ?? current.launchProfile.parentConversationId;
+    if (!rawParentId) continue;
+    const parentId = conversationLookup.canonicalConversationId(rawParentId);
+    const parentConversation = registrySnapshot.conversations[parentId];
+    const parentGeneration = parentConversation?.generations.at(-1);
+    const parentPath = parentGeneration?.path;
+    if (!parentConversation || !parentGeneration || !parentPath || filesByPath.has(parentPath)) continue;
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(parentPath);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const rootPath = parentConversation.engine === "codex"
+      ? codexSessionRootFor(parentPath)
+      : claudeProjectRootFor(parentPath);
+    const placeholder = {
+      path: parentPath,
+      root: parentConversation.engine === "codex" ? "codex-sessions" as const : "claude-projects" as const,
+      name: rootPath ? path.relative(rootPath, parentPath) : path.basename(parentPath),
+      project: parentGeneration.launchProfile.project ?? child.project,
+      title: parentGeneration.launchProfile.title ?? path.basename(parentPath, path.extname(parentPath)),
+      engine: parentConversation.engine,
+      kind: "session",
+      fmt: parentConversation.engine,
+      parent: null,
+      mtime: stat.mtimeMs / 1000,
+      size: stat.size,
+      activity: "idle" as const,
+      activityReason: "lineage_placeholder",
+      proc: null,
+      pid: null,
+      model: parentGeneration.launchProfile.model,
+      launchModel: parentGeneration.launchProfile.model,
+      effort: parentGeneration.launchProfile.effort,
+      pendingQuestion: null,
+      plan: parentGeneration.launchProfile.plan,
+      goal: parentGeneration.launchProfile.goal,
+      waitingInput: null,
+    };
+    files.push(placeholder);
+    filesByPath.set(parentPath, placeholder);
+  }
+  const scannedPaths = new Set(files.map((file) => file.path));
   const ownsPath = (conversation: (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations], pathname: string) =>
     conversation.generations.some((generation) => generation.path === pathname)
     || conversation.continuityPaths.includes(pathname);
@@ -64,7 +122,15 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.plan = profile.plan ?? file.plan;
       const parentConversationId = registrySnapshot.lineageEdges[conversation.id]?.parentConversationId ?? profile.parentConversationId;
       if (parentConversationId) {
-        file.parent = registrySnapshot.conversations[parentConversationId]?.generations.at(-1)?.path ?? file.parent;
+        const canonicalParentId = conversationLookup.canonicalConversationId(parentConversationId);
+        const parentPath = registrySnapshot.conversations[canonicalParentId]?.generations.at(-1)?.path ?? null;
+        if (parentPath && scannedPaths.has(parentPath)) {
+          file.parent = parentPath;
+          delete file.parentRemoved;
+        } else if (!parentPath || !fs.existsSync(parentPath)) {
+          file.parent = null;
+          file.parentRemoved = { conversationId: canonicalParentId, path: parentPath };
+        }
       }
     }
     if (conversation.migration && conversation.migration.phase !== "committed") {
@@ -92,16 +158,87 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   overlaySessionTitles(files);
+  /* Human-authorship pin for the board's worker-class auto-collapse (issue
+     #112): the reaper's sticky evidence (PR #125) marks any transcript that
+     carries a real user message. Both authorship and fail-closed freshness span
+     the WHOLE stable conversation — every native generation and continuity path,
+     not just the current transcript and one predecessor. After a migration
+     A → B → C a user message recorded on A must still pin C, and an unscanned
+     predecessor must hold C unverified, or the owner's message would be lost the
+     moment the historical entries leave the rendered board.
+     `authorshipUnverified` fails the exemption CLOSED — a claude/codex worker the
+     reaper has not scanned since its latest write (fresh owner message, cold
+     start, or an unstamped generation) is pinned until a cycle confirms it, so a
+     just-finished reviewer never collapses on stale evidence. The freshness is
+     PATH-SCOPED (`scannedAt[path]`), not a single global cycle timestamp: a
+     global stamp advances every cycle regardless of which paths were scanned, so
+     a worker that exited before the reaper ever reached it would be falsely
+     certified clean. A generation with no stamp stays unverified; an archived
+     (out-of-scan) generation is immutable, so any stamp certifies it. */
+  const conversationByPath = new Map<string, (typeof registrySnapshot.conversations)[keyof typeof registrySnapshot.conversations]>();
+  for (const conversation of Object.values(registrySnapshot.conversations)) {
+    for (const generation of conversation.generations) conversationByPath.set(generation.path, conversation);
+    for (const continuityPath of conversation.continuityPaths) conversationByPath.set(continuityPath, conversation);
+  }
+  const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
+  /* Live on-disk mtime probe, memoized per request. A clean stamp must be
+     checked against the LIVE filesystem, not the scan snapshot's mtime: the
+     files scan is a cache that a GET may reuse (scanCache) while a user appends a
+     message, so a stamp taken before the append would look fresh against the
+     stale cached mtime and falsely certify a now-owner-authored transcript. A
+     `mtime` probe sees the append and re-pins it unverified. A CONFIRMED absence
+     (ENOENT) means the transcript is gone — immutable and off the board — so the
+     snapshot mtime stands. Any OTHER stat error (EACCES, EIO, transient
+     exhaustion) leaves freshness UNKNOWN, and the hard exemption fails closed:
+     unknown → unverified. Bounded — only paths that carry a stamp reach here. */
+  type MtimeProbe = { kind: "mtime"; value: number } | { kind: "gone" } | { kind: "uncertain" };
+  const mtimeProbes = new Map<string, MtimeProbe>();
+  const probeMtime = (pathname: string): MtimeProbe => {
+    const cached = mtimeProbes.get(pathname);
+    if (cached) return cached;
+    let probe: MtimeProbe;
+    try {
+      probe = { kind: "mtime", value: fs.statSync(pathname).mtimeMs / 1000 };
+    } catch (error) {
+      probe = (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "gone" } : { kind: "uncertain" };
+    }
+    mtimeProbes.set(pathname, probe);
+    return probe;
+  };
+  for (const file of files) {
+    if (file.engine !== "claude" && file.engine !== "codex") continue;
+    const conversation = conversationByPath.get(file.path);
+    const lineage = new Set<string>([file.path]);
+    if (file.predecessorPath) lineage.add(file.predecessorPath);
+    if (conversation) {
+      for (const generation of conversation.generations) lineage.add(generation.path);
+      for (const continuityPath of conversation.continuityPaths) lineage.add(continuityPath);
+    }
+    if ([...lineage].some((pathname) => userAuthoredPaths.has(pathname))) {
+      file.userAuthored = true;
+      continue;
+    }
+    const unverified = [...lineage].some((pathname) => {
+      const stamp = scannedAt.get(pathname);
+      if (stamp === undefined) return true;
+      const probe = probeMtime(pathname);
+      if (probe.kind === "uncertain") return true; // fail closed on an unreadable transcript
+      if (probe.kind === "mtime") return stamp < probe.value;
+      /* Confirmed gone: immutable, so the last-known snapshot mtime certifies it. */
+      const cachedMtime = filesByPath.get(pathname)?.mtime;
+      return cachedMtime !== undefined && stamp < cachedMtime;
+    });
+    if (unverified) file.authorshipUnverified = true;
+  }
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
-    conversationIdForPath: (pathname) => Object.values(registrySnapshot.conversations).find((conversation) =>
-      ownsPath(conversation, pathname))?.id ?? null,
+    conversationIdForPath: (pathname) => conversationLookup.conversationForPath(pathname)?.id ?? null,
     canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registry.canonicalConversationId(conversationId as `conversation_${string}`)
+      ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
       : null,
     pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registry.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
+      ? conversationLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
       : null,
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);

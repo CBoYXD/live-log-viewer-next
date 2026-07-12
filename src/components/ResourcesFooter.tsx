@@ -159,6 +159,9 @@ export function ResourcesFooter() {
                 note={t("resources.used", { amount: fmtBytes(system.swapUsed) })}
               />
             ) : null}
+            <span className="mt-1.5 block text-right text-[9.5px] tabular-nums text-dim">
+              {t("resources.captured", { age: fmtAge(Date.parse(system.capturedAt) / 1000) })}
+            </span>
           </>
         ) : (
           <span className="text-[11px] font-semibold text-ink">{t("resources.title")}</span>
@@ -397,6 +400,7 @@ function SessionRow({
   const { t } = useLocale();
   const tint = engineTintOf(session.engine ?? "");
   const live = session.activity === "live";
+  const hostConflict = session.hostConflict === true;
   const lastActive = session.lastActiveAt !== null ? Date.parse(session.lastActiveAt) / 1000 : null;
   /* Live rows keep the kill button locked; the first click only arms it and a
      second, now-red click actually kills — a guard against taking down an
@@ -417,10 +421,10 @@ function SessionRow({
           title={[session.cwd, session.target, t("resources.procs", { count: session.procCount })].filter(Boolean).join(" · ")}
         >
           <span className="block truncate text-[12px] font-semibold">
-            {session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
+            {hostConflict ? t("resources.hostConflict") : session.title ?? (session.cwd ? tailPath(session.cwd) : t("resources.orphan"))}
           </span>
           <span className="block truncate text-[10.5px] text-dim">
-            {session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
+            {hostConflict ? t("resources.hostConflictHint") + " · " : session.title === null ? t("resources.orphan") + " · " : session.project ? session.project + " · " : ""}
             {lastActive !== null ? fmtAge(lastActive) : session.target}
           </span>
         </span>

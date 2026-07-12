@@ -1,6 +1,6 @@
 "use client";
 
-import { List, ListTodo, Menu, Network } from "lucide-react";
+import { List, ListTodo, Menu, MessageSquarePlus, Network } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { queueColumnOpen, useBoardState } from "@/hooks/useBoardState";
@@ -15,7 +15,7 @@ import { MAX_VISIBLE_PATHS } from "@/lib/view/types";
 import type { Workflow } from "@/lib/workflows/types";
 
 import { TaskStrip } from "./BranchPane";
-import { clearDraftStorage, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
+import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, setDraftText } from "./DraftAgentPane";
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
@@ -23,6 +23,8 @@ import { PipelineStrip } from "./pipelines/PipelineStrip";
 import { pipelinesForProject, pipelineStripDomId, renderableFlowIds } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { deckKey } from "./scheme/agentLinks";
+import { collapsibleWorkerFiles, groupWorkerStacks, protectedReviewerNodes } from "./scheme/workerCollapse";
+import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
 import { WorkflowStrip } from "./workflows/WorkflowStrip";
 import { isWorkflowDraftId, workflowsForProject } from "./workflows/workflowModel";
@@ -191,6 +193,13 @@ export function ProjectDashboard({
   );
   const taskPanelOpen = board.prefs.taskPanelOpen;
   const [drafts, setDrafts] = useState<string[]>([]);
+  /* Desktop `+ Task`: bump drops the inline sticky composer in a free slot on
+     the board (pinned near the button). */
+  const [newTaskNonce, setNewTaskNonce] = useState(0);
+  /* Mobile `+ Task`: bump opens the TaskSheet's create view. */
+  const [taskSheetNonce, setTaskSheetNonce] = useState(0);
+  /* Place-on-map: the unplaced task whose next board click pins it. */
+  const [placeTask, setPlaceTask] = useState<BoardTask | null>(null);
   const [pipelineDialogOpen, setPipelineDialogOpen] = useState(false);
   const [highlight, setHighlight] = useState<string | null>(null);
   /* Jump targets the scheme would otherwise skip (a stalled root builds no
@@ -199,6 +208,18 @@ export function ProjectDashboard({
      reload — the queue can route to its quietest members while the manual
      column state stays untouched. */
   const [ephemeral, setEphemeral] = useState<string[]>([]);
+  /* Wall clock for the worker auto-collapse idle window (issue #112). Starts at
+     0 so the server render and first client render agree (no hydration skew);
+     the first tick lands the real time, and reviewer verdicts collapse without
+     waiting on the clock at all. */
+  const [nowMs, setNowMs] = useState(0);
+
+  useEffect(() => {
+    const tick = () => setNowMs(Date.now());
+    tick();
+    const id = window.setInterval(tick, 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   useEffect(() => {
     /* eslint-disable-next-line react-hooks/set-state-in-effect */
@@ -233,25 +254,54 @@ export function ProjectDashboard({
     for (const path of prefs.expanded) paths.add(path);
     return paths;
   }, [expandedFlowConversations, prefs.expanded]);
+  /* Worker-class auto-collapse (issue #112): a card is pinned against collapse
+     by a GENUINE user placement (`explicitManual`, not the roots reconcile-roots
+     auto-seeds into `prefs.manual`) or a manual expansion. */
+  const pinnedPaths = useMemo(
+    () => new Set([...board.explicitManual, ...prefs.expanded]),
+    [board.explicitManual, prefs.expanded],
+  );
+  /* Fold every reviewer transcript into its round deck. Reviewers with no deck
+     that must stay visible — an owner-pinned one opened from a worker stack, or
+     one carrying authorship protection — are recovered by protectedReviewerNodes
+     and materialized as standalone nodes (issue #112), so folding is
+     unconditional here. */
   const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
+  /* Collapse-eligible worker conversations, derived BEFORE layout so their
+     quiet full columns are removed from the scheme rather than left as
+     full-size cards (a spawned worker stays a column under an active parent
+     otherwise). Reviewers of active flows stay in their round deck and are
+     kept out of the stacks after layout via deckReviewerPaths. */
+  const collapsibleWorkers = useMemo(
+    () => collapsibleWorkerFiles({ files, project, flows, pipelines, pinnedPaths, nowMs }),
+    [files, project, flows, pipelines, pinnedPaths, nowMs],
+  );
+  const collapsedPaths = useMemo(() => new Set(collapsibleWorkers.map((file) => file.path)), [collapsibleWorkers]);
+  /* The board layout's file set with collapsed workers removed. Kept separate
+     from `groupFiles` so board-membership reconciliation still sees the full
+     catalog and never retires a collapsed worker's durable placement. */
+  const sceneFiles = useMemo(
+    () => (collapsedPaths.size ? groupFiles.filter((file) => !collapsedPaths.has(file.path)) : groupFiles),
+    [groupFiles, collapsedPaths],
+  );
   const projectPipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
   /* Stage actions that route to a transcript are disabled once it leaves the
      scan, so gate them on the current file paths (AC4). */
   const renderablePaths = useMemo(() => new Set(files.map((entry) => entry.path)), [files]);
   const projectWorkflows = useMemo(() => workflowsForProject(workflows, project, files), [workflows, project, files]);
   const groups = useMemo(
-    () => buildBranchGroups(groupFiles, project, { expandedConversationPaths: expandedConversations }),
-    [groupFiles, project, expandedConversations],
+    () => buildBranchGroups(sceneFiles, project, { expandedConversationPaths: expandedConversations }),
+    [sceneFiles, project, expandedConversations],
   );
   const activeRoots = useMemo(() => new Set(groups.map((group) => group.key)), [groups]);
-  const cards = useMemo(() => collapsedTrees(groupFiles, project, activeRoots), [groupFiles, project, activeRoots]);
+  const cards = useMemo(() => collapsedTrees(sceneFiles, project, activeRoots), [sceneFiles, project, activeRoots]);
   const quietActiveRoots = useMemo(
-    () => quietRootsWithActiveDescendants(groupFiles, project, activeRoots),
-    [groupFiles, project, activeRoots],
+    () => quietRootsWithActiveDescendants(sceneFiles, project, activeRoots),
+    [sceneFiles, project, activeRoots],
   );
   const residual = useMemo(
-    () => residualItems(groupFiles, project, activeRoots, quietActiveRoots),
-    [groupFiles, project, activeRoots, quietActiveRoots],
+    () => residualItems(sceneFiles, project, activeRoots, quietActiveRoots),
+    [sceneFiles, project, activeRoots, quietActiveRoots],
   );
   const autoPaths = useMemo(
     () => new Set(groups.flatMap((group) => group.columns.map((column) => column.file.path))),
@@ -260,16 +310,18 @@ export function ProjectDashboard({
   const hiddenSet = useMemo(() => new Set(prefs.hidden), [prefs.hidden]);
   const projectTasks = useMemo(() => tasks.filter((task) => task.project === project), [tasks, project]);
   const manualNodes = useMemo(() => {
-    const byPath = new Map(groupFiles.map((file) => [file.path, file]));
+    const byPath = new Map(sceneFiles.map((file) => [file.path, file]));
     return prefs.manual
       .map((path) => byPath.get(path))
       .filter(
         (file): file is FileEntry =>
           file !== undefined && projectKey(file) === project && !autoPaths.has(file.path) && !hiddenSet.has(file.path),
       );
-  }, [prefs.manual, groupFiles, project, autoPaths, hiddenSet]);
+  }, [prefs.manual, sceneFiles, project, autoPaths, hiddenSet]);
   /* Ephemeral jump targets render exactly like manual nodes; paths the scheme
-     already draws (auto columns, manual entries) filter out. */
+     already draws (auto columns, manual entries) filter out. Resolved against
+     the full catalog (not sceneFiles) so an explicit jump can still reveal a
+     collapsed worker as a transient node (#112). */
   const schemeManual = useMemo(() => {
     const byPath = new Map(groupFiles.map((file) => [file.path, file]));
     const manualPaths = new Set(manualNodes.map((file) => file.path));
@@ -284,8 +336,24 @@ export function ProjectDashboard({
           !manualPaths.has(file.path) &&
           (!autoPaths.has(file.path) || hiddenSet.has(file.path)),
       );
-    return extra.length ? [...manualNodes, ...extra] : manualNodes;
-  }, [ephemeral, groupFiles, project, autoPaths, hiddenSet, manualNodes]);
+    /* Reviewers whose flow has NO rendered deck (a closed flow, or an active flow
+       whose implementer is hidden/unplaced) render as standalone nodes so an
+       owner-pinned or owner-touched reviewer is always on the board. Resolved
+       from the full file set (they are folded out of groupFiles) and skipped when
+       a deck already shows them. `placedNodePaths` is what the layout actually
+       draws — a hidden group column is NOT placed (so it has no deck), but a
+       hidden implementer revealed by an ephemeral jump IS placed (its deck
+       renders, so its reviewer must not be duplicated here). */
+    const placedNodePaths = new Set<string>([
+      ...[...autoPaths].filter((path) => !hiddenSet.has(path)),
+      ...manualPaths,
+      ...extra.map((file) => file.path),
+    ]);
+    const protectedNodes = protectedReviewerNodes({ files, flows, renderedNodePaths: placedNodePaths, hiddenPaths: hiddenSet, pinnedPaths })
+      .filter((file) => projectKey(file) === project);
+    const extras = [...extra, ...protectedNodes];
+    return extras.length ? [...manualNodes, ...extras] : manualNodes;
+  }, [ephemeral, groupFiles, files, flows, project, autoPaths, hiddenSet, manualNodes, pinnedPaths]);
   const liveCount = useMemo(
     () =>
       groups.reduce(
@@ -355,6 +423,25 @@ export function ProjectDashboard({
     flashNode("task::" + task.id);
   };
 
+  /* Desktop `+ Task`: drop the inline sticky composer in a free slot near the
+     button (the board resolves the world anchor + findFreeSlot). Voice, images
+     and a deadline all live in that on-board composer. */
+  const addTask = () => {
+    onUserNavigate?.();
+    setNewTaskNonce((n) => n + 1);
+  };
+  /* Mobile `+ Task`: open the full-screen sheet's create view. */
+  const addTaskMobile = () => {
+    onUserNavigate?.();
+    setTaskSheetNonce((n) => n + 1);
+  };
+  /* `place on map`: close the panel focus into board placement mode; the next
+     canvas click pins the card exactly where clicked (identity unchanged). */
+  const placeOnMap = (task: BoardTask) => {
+    board.setTaskPanelOpen(false);
+    setPlaceTask(task);
+  };
+
   const persistDrafts = (next: string[]) => {
     setDrafts(next);
     sessionStorage.setItem(draftsKey(project), JSON.stringify(next));
@@ -390,13 +477,15 @@ export function ProjectDashboard({
      repeat click refocuses the existing draft instead of stacking duplicates. */
   const addHandoffDraft = (file: FileEntry) => {
     onUserNavigate?.();
-    const existing = drafts.find((id) => draftSrc(id) === file.path);
+    const existing = drafts.find((id) => (file.conversationId
+      && draftParentConversationId(id) === file.conversationId)
+      || draftSrc(id) === file.path);
     if (existing) {
       flashNode("draft::" + existing);
       return;
     }
     const id = newDraftId();
-    setDraftSrc(id, file.path);
+    setDraftSrc(id, file.path, file.conversationId);
     persistDrafts([...drafts, id]);
     pendingFocusRef.current = "draft::" + id;
   };
@@ -573,9 +662,20 @@ export function ProjectDashboard({
     [files, project],
   );
   const historyRows = useMemo(() => quietHistoryRows(files, project), [files, project]);
+  /* The archive fallback rebuilds from the full catalog, so it must honor the
+     same two removals the live scene does — closed columns (`hiddenSet`) AND
+     auto-collapsed workers (`collapsedPaths`). Without the collapse filter a
+     quiet worker-only or closed-flow project would resurrect every folded
+     worker as a full archive card, undoing the collapse the stacks promise. */
   const archiveGroups = useMemo(
-    () => (hasNodes ? [] : buildArchiveBranchGroups(groupFiles.filter((file) => !hiddenSet.has(file.path)), project, 100)),
-    [hasNodes, groupFiles, hiddenSet, project],
+    () => (hasNodes
+      ? []
+      : buildArchiveBranchGroups(
+        groupFiles.filter((file) => !hiddenSet.has(file.path) && !collapsedPaths.has(file.path)),
+        project,
+        100,
+      )),
+    [hasNodes, groupFiles, hiddenSet, collapsedPaths, project],
   );
   const hasArchiveNodes = archiveGroups.length > 0;
   const schemeAvailable = hasNodes || hasArchiveNodes;
@@ -585,6 +685,21 @@ export function ProjectDashboard({
      unplaced (hidden/tombstoned) implementer disables the action (#93 finding). */
   const pipelineLayout = buildSchemeLayout(hasNodes ? schemeGroups : archiveGroups, hasNodes ? schemeManual : [], files, flows, hasNodes ? drafts : [], pipelines);
   const renderableFlows = renderableFlowIds(flows, new Set(pipelineLayout.nodes.map((node) => node.file.path)));
+  /* Worker rows the scheme still draws in a retained form — an active flow's
+     reviewer round deck keeps its finished rounds as deck tabs. Those are
+     re-admitted here so a folded reviewer is never listed twice (its deck AND a
+     worker stack). Derived inline (like pipelineLayout above) so the React
+     Compiler owns the caching — a manual useMemo over the non-memoized
+     pipelineLayout can't be preserved. */
+  const deckReviewerPaths = new Set<string>();
+  for (const deck of pipelineLayout.decks) for (const round of deck.rounds) if (round.file) deckReviewerPaths.add(round.file.path);
+  /* Stacks render regardless of `hasNodes` (the WorkerStacks strip sits outside
+     the scheme/list switch), so a worker-only or fully-closed project still
+     shows its folded workers instead of an empty board. `hiddenSet` joins the
+     exclude set: a closed worker is a tombstone — it must not resurface as a
+     stack member (its manual/expanded pin was dropped on close, so it would
+     otherwise re-qualify as a plain collapse candidate). */
+  const workerStacks = groupWorkerStacks(collapsibleWorkers, flows, new Set([...deckReviewerPaths, ...hiddenSet]));
   const listAvailable = historyRows.length > 0;
   const projectView = resolveProjectView({
     preferredView: board.prefs.viewMode,
@@ -647,15 +762,31 @@ export function ProjectDashboard({
         <DeleteProjectButton files={projectFiles} />
         {isMobile ? (
           <>
-            <span className="ml-auto" aria-hidden />
-            {attention}
+            {/* Order: ml-auto → attention → + Agent → + Task. Both keep ≥40px
+                touch targets; below 380px they collapse to icon-only (a `+`
+                glyph plus the icon) while the aria-labels stay, and the
+                attention pill truncates first so the buttons stay reachable. */}
+            <span className="ml-auto min-w-0" aria-hidden />
+            <span className="min-w-0 shrink truncate">{attention}</span>
             <button
               type="button"
               onClick={addDraft}
               aria-label={t("dash.newConvo")}
-              className="flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
             >
-              <span className="text-[13px] leading-none text-accent">+</span> {t("dash.agent")}
+              <span className="text-[13px] leading-none text-accent">+</span>
+              <MessageSquarePlus className="h-3.5 w-3.5" aria-hidden />
+              <span className="max-[379px]:hidden">{t("dash.agent")}</span>
+            </button>
+            <button
+              type="button"
+              onClick={addTaskMobile}
+              aria-label={t("dash.newTask")}
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-2.5 py-1 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+            >
+              <span className="text-[13px] leading-none text-accent">+</span>
+              <ListTodo className="h-3.5 w-3.5" aria-hidden />
+              <span className="max-[379px]:hidden">{t("dash.task")}</span>
             </button>
           </>
         ) : (
@@ -753,6 +884,7 @@ export function ProjectDashboard({
               onDraftClose={removeDraft}
               onDraftSpawned={draftSpawned}
               onHandoff={addHandoffDraft}
+              taskSheetNonce={taskSheetNonce}
             />
           ) : listAvailable ? (
             <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
@@ -789,6 +921,9 @@ export function ProjectDashboard({
                 onDraftSpawned={draftSpawned}
                 onHandoff={addHandoffDraft}
                 onTaskDraft={openTaskDraft}
+                placeTaskId={placeTask?.id ?? null}
+                onTaskPlaced={() => setPlaceTask(null)}
+                newTaskNonce={newTaskNonce}
               />
             ) : listAvailable ? (
               <QuietFileList files={historyRows} activeRootPaths={quietActiveRoots} onOpen={openSwitchboardFile} />
@@ -814,6 +949,14 @@ export function ProjectDashboard({
               </button>
               <button
                 type="button"
+                onClick={addTask}
+                aria-label={t("dash.newTask")}
+                className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+              >
+                <span className="text-[13px] leading-none text-accent">+</span> {t("dash.task")}
+              </button>
+              <button
+                type="button"
                 onClick={() => setPipelineDialogOpen(true)}
                 aria-label={t("board.newPipeline")}
                 className="pointer-events-auto flex shrink-0 items-center gap-1 rounded-[8px] border border-line bg-panel px-3 py-1.5 text-[11.5px] font-bold text-ink shadow-card hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
@@ -822,7 +965,9 @@ export function ProjectDashboard({
               </button>
             </div>
           </div>
-          {taskPanelOpen ? <TaskPanel tasks={tasks} project={project} onOpenTask={openTask} onClose={toggleTaskPanel} /> : null}
+          {taskPanelOpen ? (
+            <TaskPanel tasks={tasks} project={project} onOpenTask={openTask} onPlaceOnMap={placeOnMap} onClose={toggleTaskPanel} />
+          ) : null}
         </div>
       )}
 
@@ -830,6 +975,13 @@ export function ProjectDashboard({
           phone the strip, the map and the toast cover its job. */}
       {isMobile ? null : <Switchboard files={files} flows={flows} project={project} loaded={loaded} onOpenFile={openSwitchboardFile} />}
 
+      {/* Worker-class cards that have auto-collapsed fold into per-flow /
+          per-worktree stacks here (issue #112) instead of vanishing to the
+          switchboard; owner-touched and live cards are never included. */}
+      <WorkerStacks stacks={workerStacks} files={files} flows={flows} onSelect={openSwitchboardFile} />
+
+      {/* `residual` is derived from `sceneFiles`, which already excludes every
+          collapsed worker, so a card never appears in both a stack and here. */}
       {!hasArchiveNodes && residual.length ? (
         <ResidualStrip items={residual} activeRootPaths={quietActiveRoots} onSelect={openSwitchboardFile} />
       ) : null}

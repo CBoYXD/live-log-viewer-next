@@ -17,6 +17,11 @@ import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
 
 const CACHE_MS = 10_000;
 
+function captureSystemMemory(): ResourcesPayload["system"] {
+  const system = procBackend.systemMemory();
+  return system ? { ...system, capturedAt: new Date().toISOString() } : null;
+}
+
 /** What the kill path needs to take a snapshot session down safely: the
     stable `%N` pane id to address, and the pane pid to verify it against. */
 export type KillTargetRef = TmuxAttachReference;
@@ -70,6 +75,10 @@ export function canonicalResourceEntry(
   return null;
 }
 
+export function conflictingResourceHost(snapshot: TranscriptHostSnapshot, host: TranscriptHost): boolean {
+  return snapshot.conflicts?.some((conflict) => conflict.paneIds.includes(host.paneId)) ?? false;
+}
+
 function isoFromUnix(seconds: number): string {
   return new Date(seconds * 1000).toISOString();
 }
@@ -78,8 +87,7 @@ function isoFromUnix(seconds: number): string {
     rebuild triggered right after a kill would otherwise read 5s-old caches
     and re-list (and re-allowlist) the session that was just killed. */
 async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
-  const capturedAt = new Date().toISOString();
-  const system = procBackend.systemMemory();
+  const system = captureSystemMemory();
 
   const hosts = await readTranscriptHosts(fresh);
   const sessions: ResourceSession[] = [];
@@ -126,6 +134,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
         panePid: host.panePid,
         path: entry?.path ?? null,
         engine: host.engine,
+        hostConflict: conflictingResourceHost(hosts, host),
         title: entry?.title ?? null,
         project: entry?.project || null,
         activity: entry?.activity ?? null,
@@ -147,7 +156,7 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
   }
 
   return {
-    system: system ? { ...system, capturedAt } : null,
+    system,
     sessions,
   };
 }
@@ -157,7 +166,12 @@ async function buildResources(fresh: boolean): Promise<ResourcesPayload> {
     the shorter session list show up immediately. */
 export async function readResources(fresh = false): Promise<ResourcesPayload> {
   const cached = globalStore.__llvResourcesCache;
-  if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return cached.data;
+  /* Pane discovery is the expensive cached half. Host pressure comes from a
+     new /proc/meminfo snapshot on every request, so RAM and swap never inherit
+     the age of a pane/session snapshot. */
+  if (!fresh && cached && Date.now() - cached.at < CACHE_MS) {
+    return { ...cached.data, system: captureSystemMemory() };
+  }
   const data = await buildResources(fresh);
   globalStore.__llvResourcesCache = { at: Date.now(), data };
   return data;

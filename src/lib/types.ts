@@ -51,6 +51,8 @@ export interface FileEntry {
   fmt: Fmt;
   /** Absolute path of the parent node (tree link) or null for roots. */
   parent: string | null;
+  /** Durable lineage tombstone when the parent conversation transcript is gone. */
+  parentRemoved?: { conversationId: string; path: string | null };
   /** Unix seconds. */
   mtime: number;
   size: number;
@@ -62,6 +64,19 @@ export interface FileEntry {
   pid: number | null;
   /** Set when this conversation was spawned by a handoff from `parent`. */
   handoff?: boolean;
+  /** At least one human-authored message exists in the transcript (issue #112).
+      Sourced from the reaper's sticky authorship evidence (PR #125), which
+      filters Claude task-notification records and viewer-injected relays. A
+      hard pin against worker-class auto-collapse — an owner-touched card never
+      collapses. Absent when unknown (no reaper observation yet). */
+  userAuthored?: boolean;
+  /** The reaper has NOT scanned this transcript since its latest activity, so
+      its authorship is unconfirmed (issue #112). The board's worker
+      auto-collapse fails closed on this — an unverified worker is pinned like an
+      owner-authored one until a reaper cycle clears it. Set for claude/codex
+      transcripts whose mtime is newer than the reaper's last run (or when the
+      reaper has never run). */
+  authorshipUnverified?: boolean;
   /** Short model name (fable, gpt-5.5, sonnet…) or null when unknown. */
   model: string | null;
   /** Exact model identifier recorded by the agent CLI. Kept separate from the
@@ -71,6 +86,8 @@ export interface FileEntry {
   /** Reasoning-effort tier (minimal|low|medium|high|xhigh|max|ultra) or null
       when no reliable source exists (claude transcripts carry none). */
   effort?: string | null;
+  /** Codex service tier read from the live argv; null when unavailable. */
+  fast?: boolean | null;
   /** Structured Claude prompt that is currently blocking the live agent. */
   pendingQuestion: PendingQuestion | null;
   /** Newest TodoWrite/update_plan state — the agent's plan and current goal. */
@@ -166,11 +183,21 @@ export type PlanStepStatus = "pending" | "in_progress" | "completed";
 
 /** How full an agent's context window is (codex token_count events; claude
     assistant usage vs the model's window). */
+export type CtxSource = "runtime" | "provider" | "registry" | "unknown";
+export type CtxConfidence = "exact" | "approximate" | "unknown";
+
 export interface CtxUsage {
   usedTokens: number;
-  windowTokens: number;
-  /** Rounded 0–100. */
-  pct: number;
+  /** Null when the transcript and known-model table cannot establish it. */
+  windowTokens: number | null;
+  /** Rounded 0–100, or null along with an unknown window. */
+  pct: number | null;
+  source: CtxSource;
+  confidence: CtxConfidence;
+  /** Bundled snapshot id, present for registry-derived capacity. */
+  registryVersion?: string;
+  /** ISO timestamp of the transcript usage record, with scan time fallback. */
+  observedAt: string;
 }
 
 /** Codex thread goal (update_goal tool / thread_goal_updated events): the
@@ -302,7 +329,12 @@ export interface LimitsProvenance {
   source: "live" | "transcript" | "cache" | "unavailable";
   reason: string | null;
   staleSince: string | null;
+  /** ISO timestamp for the next provider refresh after a failed read. */
+  retryAt?: string | null;
 }
+
+export const LIMITS_RATE_LIMITED_REASON = "oauth-rate-limited";
+export const LIMITS_REAUTH_REQUIRED_REASON = "oauth-reauthentication-required";
 
 export interface LimitsPayload {
   claude: EngineLimits | null;
@@ -316,6 +348,45 @@ export interface LimitsPayload {
   provenance: { claude: LimitsProvenance; codex: LimitsProvenance };
   /** ISO timestamp from the first failed refresh behind this fallback payload. */
   staleSince?: string | null;
+}
+
+/** One remaining-quota sample of the burndown series: `remaining` is the
+    percent of quota left (0–100 = 100 − usedPercent) at unix second `t`. */
+export interface LimitSample {
+  t: number;
+  remaining: number;
+}
+
+/** A burndown series for one engine window (5h session or weekly). The ideal
+    even-pace diagonal runs 100% at `windowStart` → 0% at `resetsAt`; the actual
+    curve is `samples`, filtered to the current window. */
+export interface BurndownSeries {
+  /** Unix seconds at the window's opening (resetsAt − windowSeconds), or null
+      when the reset moment is unknown. */
+  windowStart: number | null;
+  /** Unix seconds when the window resets, or null when unknown. */
+  resetsAt: number | null;
+  /** Window length in seconds (5h = 18000, weekly = 604800; Codex may differ). */
+  windowSeconds: number;
+  /** Remaining-quota samples inside the current window, oldest first. */
+  samples: LimitSample[];
+}
+
+/** Both windows' burndown series for one engine. */
+export interface EngineBurndown {
+  session: BurndownSeries;
+  weekly: BurndownSeries;
+}
+
+/** Burndown history for both engines, returned by GET /api/limits/history. */
+export interface BurndownPayload {
+  claude: EngineBurndown | null;
+  codex: EngineBurndown | null;
+  claudeAccountId: string | null;
+  codexAccountId: string | null;
+  /** ISO time the forward poll history began accruing, for the sparse-state
+      hint on engines (Claude) that can only be sampled going forward. */
+  historySince: string | null;
 }
 
 /** Host memory pressure for the rail block, all byte fields absolute.
@@ -337,6 +408,8 @@ export interface ResourceSession {
   panePid: number;
   path: string | null;
   engine: "claude" | "codex" | null;
+  /** Several live panes claim the same stable conversation identity. */
+  hostConflict?: boolean;
   title: string | null;
   project: string | null;
   activity: Activity | null;

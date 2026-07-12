@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { EngineLimits, LimitsPayload, LimitsProvenance } from "@/lib/types";
 
-import { codexLimitsForActiveAccount, createLatestLimitsLoader, fmtStaleSince, stickyPayload } from "./LimitsFooter";
+import { codexLimitsForActiveAccount, createLatestLimitsLoader, fmtLimitsFailureReason, fmtStaleSince, stickyPayload } from "./LimitsFooter";
 
 const live: LimitsProvenance = { source: "live", reason: null, staleSince: null };
 const unavailable: LimitsProvenance = {
@@ -140,4 +140,47 @@ test("fmtStaleSince returns null when there is nothing to explain", () => {
   expect(fmtStaleSince(null, "en")).toBeNull();
   expect(fmtStaleSince(undefined, "en")).toBeNull();
   expect(fmtStaleSince("not-a-date", "en")).toBeNull();
+});
+
+test("unavailable Claude provenance explains provider throttling in English and Ukrainian", () => {
+  const provenance: LimitsProvenance = {
+    source: "unavailable",
+    reason: "oauth-rate-limited",
+    staleSince: "2026-07-12T10:00:00.000Z",
+    retryAt: "2026-07-12T10:15:00.000Z",
+  };
+  expect(fmtLimitsFailureReason(provenance, "en")).toContain("Retry at");
+  expect(fmtLimitsFailureReason(provenance, "uk")).toContain("Наступна спроба");
+});
+
+test("unavailable Claude 401 provenance asks for re-login in English and Ukrainian", () => {
+  const provenance: LimitsProvenance = {
+    source: "unavailable",
+    reason: "oauth-reauthentication-required",
+    staleSince: "2026-07-12T10:00:00.000Z",
+  };
+  expect(fmtLimitsFailureReason(provenance, "en")).toBe("Re-login to Claude is required.");
+  expect(fmtLimitsFailureReason(provenance, "uk")).toBe("Потрібно повторно увійти в Claude.");
+});
+
+test("cached Claude 429 provenance keeps throttling visible beside retained windows", () => {
+  const provenance: LimitsProvenance = {
+    source: "cache",
+    reason: "oauth-rate-limited",
+    staleSince: "2026-07-12T10:00:00.000Z",
+    retryAt: "2026-07-12T10:15:00.000Z",
+  };
+  expect(fmtLimitsFailureReason(provenance, "en")).toContain("Retry at");
+  expect(fmtLimitsFailureReason(provenance, "uk")).toContain("Наступна спроба");
+});
+
+test("cached Claude 401 provenance keeps re-login guidance visible beside retained windows", () => {
+  const provenance: LimitsProvenance = {
+    source: "cache",
+    reason: "oauth-reauthentication-required",
+    staleSince: "2026-07-12T10:00:00.000Z",
+    retryAt: "2026-07-12T10:01:00.000Z",
+  };
+  expect(fmtLimitsFailureReason(provenance, "en")).toBe("Re-login to Claude is required.");
+  expect(fmtLimitsFailureReason(provenance, "uk")).toBe("Потрібно повторно увійти в Claude.");
 });

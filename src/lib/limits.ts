@@ -7,9 +7,16 @@ import { managedCodexRuntime } from "@/lib/accounts/codexRuntime";
 import type { AppServerRateLimits } from "@/lib/accounts/codexAppServer";
 import { redactAppServerDetail } from "@/lib/accounts/codexAppServerProtocol";
 import { statePath } from "@/lib/configDir";
-import type { EngineLimits, LimitsPayload, LimitsProvenance, LimitWindow } from "./types";
+import { WINDOW_SECONDS, clampPercent, mergeSamples, type WindowKey } from "@/lib/burndown";
+import { historySamples, historySince, recordLimitSample, RETENTION_S } from "@/lib/limitsHistoryStore";
+import { LIMITS_RATE_LIMITED_REASON, LIMITS_REAUTH_REQUIRED_REASON, type BurndownPayload, type BurndownSeries, type EngineBurndown, type EngineLimits, type LimitSample, type LimitsPayload, type LimitsProvenance, type LimitWindow } from "./types";
 
-const LIMITS_CACHE_FILE = statePath("limits-cache.json");
+/** Resolved at call time (not module load) so LLV_STATE_DIR set after this
+    module is first evaluated — e.g. in tests importing it statically — still
+    points reads and writes at the right state dir. */
+function limitsCacheFile(): string {
+  return statePath("limits-cache.json");
+}
 const OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 
 /** How far back into a session file to look for the last rate-limit event. */
@@ -17,15 +24,29 @@ const TAIL_BYTES = 192 * 1024;
 /** Newest session files to try before giving up (fresh ones may lack limits). */
 const MAX_FILES = 12;
 const CACHE_MS = 30_000;
+const FAILURE_COOLDOWN_MS = 60_000;
+const MAX_RATE_LIMIT_BACKOFF_MS = 15 * 60_000;
 
 type EngineName = "claude" | "codex";
-type EngineCacheEntry = { at: number; data: EngineLimits; provenance: LimitsProvenance };
+type EngineCacheEntry = {
+  at: number;
+  data: EngineLimits | null;
+  provenance: LimitsProvenance;
+  retryAt?: number | null;
+  consecutive429s?: number;
+};
 type LimitsCache = { version: 2; engines: Record<EngineName, Record<string, EngineCacheEntry>> };
-export type LimitRead = { data: EngineLimits | null; reason: string | null; source: "live" | "transcript" | "unavailable" };
+export type LimitRead = {
+  data: EngineLimits | null;
+  reason: string | null;
+  source: "live" | "transcript" | "unavailable";
+  retryAt?: number;
+};
 export type CodexLiveLimitsReader = (account: Pick<CodexAccount, "id" | "kind" | "home" | "sessionsDir">) => Promise<AppServerRateLimits>;
 
 const globalStore = globalThis as unknown as {
   __llvLimitsCache?: LimitsCache | null;
+  __llvLimitsInflight?: Map<string, Promise<ResolvedRead>>;
 };
 
 function isProvenance(value: unknown): value is { claude: LimitsProvenance; codex: LimitsProvenance } {
@@ -35,7 +56,8 @@ function isProvenance(value: unknown): value is { claude: LimitsProvenance; code
     if (!meta) return false;
     return (meta.source === "live" || meta.source === "transcript" || meta.source === "cache" || meta.source === "unavailable") &&
       (typeof meta.reason === "string" || meta.reason === null) &&
-      (typeof meta.staleSince === "string" || meta.staleSince === null);
+      (typeof meta.staleSince === "string" || meta.staleSince === null) &&
+      (meta.retryAt === undefined || typeof meta.retryAt === "string" || meta.retryAt === null);
   };
   return valid(record.claude) && valid(record.codex);
 }
@@ -47,17 +69,20 @@ function emptyCache(): LimitsCache {
 function safeCacheEntry(value: unknown): EngineCacheEntry | null {
   if (!value || typeof value !== "object") return null;
   const entry = value as Partial<EngineCacheEntry>;
-  if (typeof entry.at !== "number" || !entry.data || !entry.provenance) return null;
+  if (typeof entry.at !== "number" || entry.data === undefined || !entry.provenance) return null;
   const provenance = entry.provenance as Partial<LimitsProvenance>;
   if ((provenance.source !== "live" && provenance.source !== "transcript" && provenance.source !== "cache" && provenance.source !== "unavailable") ||
       (typeof provenance.reason !== "string" && provenance.reason !== null) ||
-      (typeof provenance.staleSince !== "string" && provenance.staleSince !== null)) return null;
+      (typeof provenance.staleSince !== "string" && provenance.staleSince !== null) ||
+      (provenance.retryAt !== undefined && typeof provenance.retryAt !== "string" && provenance.retryAt !== null) ||
+      (entry.retryAt !== undefined && entry.retryAt !== null && typeof entry.retryAt !== "number") ||
+      (entry.consecutive429s !== undefined && (!Number.isInteger(entry.consecutive429s) || entry.consecutive429s < 0))) return null;
   return entry as EngineCacheEntry;
 }
 
 function readDiskCache(): LimitsCache {
   try {
-    const raw = JSON.parse(fs.readFileSync(LIMITS_CACHE_FILE, "utf8")) as Partial<LimitsCache> & { at?: unknown; accountId?: unknown; data?: LimitsPayload };
+    const raw = JSON.parse(fs.readFileSync(limitsCacheFile(), "utf8")) as Partial<LimitsCache> & { at?: unknown; accountId?: unknown; data?: LimitsPayload };
     if (raw.version === 2 && raw.engines && typeof raw.engines === "object") {
       const cache = emptyCache();
       for (const engine of ["claude", "codex"] as const) {
@@ -88,7 +113,7 @@ function cache(): LimitsCache {
 
 function writeDiskCache(value: LimitsCache): void {
   try {
-    fs.mkdirSync(path.dirname(LIMITS_CACHE_FILE), { recursive: true });
+    fs.mkdirSync(path.dirname(limitsCacheFile()), { recursive: true });
     const latest = (engine: EngineName): [string, EngineCacheEntry] | null => Object.entries(value.engines[engine]).sort(([, a], [, b]) => b.at - a.at)[0] ?? null;
     const claude = latest("claude"); const codex = latest("codex");
     // Keep a read-only v1 projection during the cache migration so a rolling
@@ -108,7 +133,7 @@ function writeDiskCache(value: LimitsCache): void {
         staleSince: claude?.[1].provenance.staleSince ?? codex[1].provenance.staleSince,
       },
     } : {};
-    fs.writeFileSync(LIMITS_CACHE_FILE, JSON.stringify({ ...value, ...projection }, null, 2) + "\n", "utf8");
+    fs.writeFileSync(limitsCacheFile(), JSON.stringify({ ...value, ...projection }, null, 2) + "\n", "utf8");
   } catch (err) {
     console.warn("[limits] failed to persist cache", err);
   }
@@ -118,51 +143,118 @@ function lastCache(engine: EngineName, accountId: string): EngineCacheEntry | nu
   return cache().engines[engine][accountId] ?? null;
 }
 
-function remember(engine: EngineName, accountId: string, resolved: { data: EngineLimits | null; meta: LimitsProvenance }): void {
-  if (!resolved.data || resolved.meta.source === "cache" || resolved.meta.source === "unavailable") return;
-  cache().engines[engine][accountId] = { at: Date.now(), data: resolved.data, provenance: resolved.meta };
+type ResolvedRead = {
+  data: EngineLimits | null;
+  meta: LimitsProvenance;
+  retryAt: number | null;
+  consecutive429s: number;
+};
+
+function remember(engine: EngineName, accountId: string, resolved: ResolvedRead, now: number): void {
+  cache().engines[engine][accountId] = {
+    at: now,
+    data: resolved.data,
+    provenance: resolved.meta,
+    retryAt: resolved.retryAt,
+    consecutive429s: resolved.consecutive429s,
+  };
   writeDiskCache(cache());
+  if (!resolved.data || (resolved.meta.source !== "live" && resolved.meta.source !== "transcript")) return;
+  // A fresh live/transcript value is also a burndown sample. The browser's 60s
+  // poll drives this, so forward history accrues without a separate sampler.
+  try {
+    recordLimitSample(engine, accountId, resolved.data);
+  } catch (err) {
+    console.warn("[limits] failed to record burndown sample", err);
+  }
 }
 
 function safeReason(reason: string): string {
   return redactAppServerDetail(reason);
 }
 
-function provenance(read: LimitRead, cached: EngineCacheEntry | null, staleSince: string): { data: EngineLimits | null; meta: LimitsProvenance } {
-  if (read.data) return { data: read.data, meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null } };
-  if (cached) return { data: cached.data, meta: { source: "cache", reason: read.reason, staleSince: cached.provenance.staleSince ?? staleSince } };
-  return { data: null, meta: { source: "unavailable", reason: read.reason, staleSince } };
+function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSince: string, now: number): ResolvedRead {
+  if (read.data) {
+    return { data: read.data, meta: { source: read.source, reason: read.reason, staleSince: read.reason ? staleSince : null, retryAt: null }, retryAt: null, consecutive429s: 0 };
+  }
+  const consecutive429s = read.reason === LIMITS_RATE_LIMITED_REASON ? (cached?.consecutive429s ?? 0) + 1 : 0;
+  const exponentialMs = consecutive429s > 0
+    ? Math.min(FAILURE_COOLDOWN_MS * (2 ** (consecutive429s - 1)), MAX_RATE_LIMIT_BACKOFF_MS)
+    : FAILURE_COOLDOWN_MS;
+  const retryAt = Math.max(now + exponentialMs, read.retryAt ?? 0);
+  const meta: LimitsProvenance = {
+    source: cached?.data ? "cache" : "unavailable",
+    reason: read.reason,
+    staleSince: cached?.provenance.staleSince ?? staleSince,
+    retryAt: new Date(retryAt).toISOString(),
+  };
+  return { data: cached?.data ?? null, meta, retryAt, consecutive429s };
 }
 
-function logFallbackReasons(claude: LimitsProvenance, codex: LimitsProvenance): void {
-  for (const [engine, meta] of Object.entries({ claude, codex })) {
+function cachedRead(entry: EngineCacheEntry): ResolvedRead {
+  return {
+    data: entry.data,
+    meta: entry.provenance,
+    retryAt: entry.retryAt ?? null,
+    consecutive429s: entry.consecutive429s ?? 0,
+  };
+}
+
+function cacheIsFresh(entry: EngineCacheEntry | null, now: number): boolean {
+  if (!entry) return false;
+  if (entry.retryAt) return now < entry.retryAt;
+  return now - entry.at < CACHE_MS;
+}
+
+function inflightReads(): Map<string, Promise<ResolvedRead>> {
+  if (!globalStore.__llvLimitsInflight) globalStore.__llvLimitsInflight = new Map();
+  return globalStore.__llvLimitsInflight;
+}
+
+function logFallbackReasons(entries: ReadonlyArray<readonly [EngineName, LimitsProvenance]>): void {
+  for (const [engine, meta] of entries) {
     if (meta.reason) console.warn(`[limits] ${engine} fallback: ${safeReason(meta.reason)}`);
   }
 }
 
+function resolveEngineRead(engine: EngineName, accountId: string, now: number, clock: () => number, reader: () => Promise<LimitRead>): Promise<ResolvedRead> {
+  const cached = lastCache(engine, accountId);
+  if (cacheIsFresh(cached, now)) return Promise.resolve(cachedRead(cached!));
+
+  const key = `${engine}:${accountId}`;
+  const reads = inflightReads();
+  const existing = reads.get(key);
+  if (existing) return existing;
+
+  const pending = (async () => {
+    const latest = lastCache(engine, accountId);
+    if (cacheIsFresh(latest, now)) return cachedRead(latest!);
+    const read = await reader();
+    const resolvedAt = clock();
+    const resolved = resolveRead(read, latest, new Date(resolvedAt).toISOString(), resolvedAt);
+    logFallbackReasons([[engine, resolved.meta]]);
+    remember(engine, accountId, resolved, now);
+    return resolved;
+  })();
+  reads.set(key, pending);
+  const clear = () => {
+    if (reads.get(key) === pending) reads.delete(key);
+  };
+  void pending.then(clear, clear);
+  return pending;
+}
+
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
-export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsReader } = {}): Promise<LimitsPayload> {
+export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsReader; now?: () => number } = {}): Promise<LimitsPayload> {
+  const clock = options.now ?? Date.now;
+  const now = clock();
   const claudeAccount = claudeAccountForSpawn();
   const codexAccount = accountForSpawn();
-  const cachedClaude = lastCache("claude", claudeAccount.id);
-  const cachedCodex = lastCache("codex", codexAccount.id);
-  const claudeFresh = Boolean(cachedClaude && Date.now() - cachedClaude.at < CACHE_MS);
-  const codexFresh = Boolean(cachedCodex && Date.now() - cachedCodex.at < CACHE_MS);
-  if (claudeFresh && codexFresh) {
-    return { claude: cachedClaude?.data ?? null, codex: cachedCodex?.data ?? null, claudeAccountId: claudeAccount.id, codexAccountId: codexAccount.id, provenance: { claude: cachedClaude?.provenance ?? { source: "unavailable", reason: "no cached Claude limits", staleSince: null }, codex: cachedCodex?.provenance ?? { source: "unavailable", reason: "no cached Codex limits", staleSince: null } }, staleSince: cachedClaude?.provenance.staleSince ?? cachedCodex?.provenance.staleSince ?? null };
-  }
-  const staleSince = new Date().toISOString();
-  const [claude, codex] = await Promise.all([
-    claudeFresh ? Promise.resolve(null) : fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json")),
-    codexFresh ? Promise.resolve(null) : readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader }),
+  const [resolvedClaude, resolvedCodex] = await Promise.all([
+    resolveEngineRead("claude", claudeAccount.id, now, clock, () => fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json"), clock)),
+    resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader })),
   ]);
-  const resolvedClaude = claudeFresh
-    ? { data: cachedClaude!.data, meta: cachedClaude!.provenance }
-    : provenance(claude!, cachedClaude, staleSince);
-  const resolvedCodex = codexFresh
-    ? { data: cachedCodex!.data, meta: cachedCodex!.provenance }
-    : provenance(codex!, cachedCodex, staleSince);
-  const data: LimitsPayload = {
+  return {
     claude: resolvedClaude.data,
     codex: resolvedCodex.data,
     claudeAccountId: claudeAccount.id,
@@ -170,10 +262,6 @@ export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsRea
     provenance: { claude: resolvedClaude.meta, codex: resolvedCodex.meta },
     staleSince: resolvedClaude.meta.staleSince ?? resolvedCodex.meta.staleSince,
   };
-  logFallbackReasons(data.provenance.claude, data.provenance.codex);
-  if (!claudeFresh) remember("claude", claudeAccount.id, resolvedClaude);
-  if (!codexFresh) remember("codex", codexAccount.id, resolvedCodex);
-  return data;
 }
 
 /* ------------------------------- Claude ------------------------------- */
@@ -188,7 +276,7 @@ interface OauthWindow {
  * from ~/.claude/.credentials.json stays inside the server process; the
  * browser only ever sees percentages.
  */
-export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitRead> {
+export async function fetchClaudeLimits(credentialsPath: string, clock: () => number = Date.now): Promise<LimitRead> {
   let accessToken = "";
   let plan: string | null = null;
   try {
@@ -209,6 +297,8 @@ export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitR
       },
       signal: AbortSignal.timeout(8000),
     });
+    if (res.status === 429) return { data: null, reason: LIMITS_RATE_LIMITED_REASON, source: "unavailable", retryAt: retryAfterAt(res.headers.get("retry-after"), clock()) };
+    if (res.status === 401) return { data: null, reason: LIMITS_REAUTH_REQUIRED_REASON, source: "unavailable" };
     if (!res.ok) return { data: null, reason: `oauth usage status ${res.status}`, source: "unavailable" };
     const json = (await res.json()) as { five_hour?: OauthWindow; seven_day?: OauthWindow };
     const data = {
@@ -224,6 +314,15 @@ export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitR
   }
 }
 
+function retryAfterAt(value: string | null, now: number): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return now + seconds * 1000;
+  const date = Date.parse(value);
+  if (!Number.isFinite(date)) return undefined;
+  return Math.max(now, date);
+}
+
 function oauthWindow(w: OauthWindow | undefined): LimitWindow | null {
   if (!w || typeof w.utilization !== "number") return null;
   const resets = typeof w.resets_at === "string" ? Date.parse(w.resets_at) : NaN;
@@ -236,6 +335,7 @@ interface CodexWindow {
   used_percent?: unknown;
   resets_at?: unknown;
   resets_in_seconds?: unknown;
+  window_minutes?: unknown;
 }
 
 interface CodexRateLimits {
@@ -294,8 +394,9 @@ function listDesc(dir: string): string[] {
   }
 }
 
-/** Session transcripts for one Codex account home, newest first. */
-function* latestSessionFiles(sessionsDir: string): Generator<string> {
+/** Session transcripts for one Codex account home, newest first, each with its
+    mtime so callers can stop once files fall outside their window. */
+function* sessionFiles(sessionsDir: string, max: number): Generator<{ p: string; m: number }> {
   let yielded = 0;
   for (const year of listDesc(sessionsDir)) {
     for (const month of listDesc(path.join(sessionsDir, year))) {
@@ -313,12 +414,16 @@ function* latestSessionFiles(sessionsDir: string): Generator<string> {
         }
         entries.sort((a, b) => b.m - a.m);
         for (const entry of entries) {
-          yield entry.p;
-          if (++yielded >= MAX_FILES) return;
+          yield entry;
+          if (++yielded >= max) return;
         }
       }
     }
   }
+}
+
+function* latestSessionFiles(sessionsDir: string): Generator<string> {
+  for (const entry of sessionFiles(sessionsDir, MAX_FILES)) yield entry.p;
 }
 
 function readTail(file: string, bytes: number): string | null {
@@ -373,4 +478,158 @@ function codexWindow(w: CodexWindow | undefined, capturedAt: number | null): Lim
   if (typeof w.resets_at === "number") resetsAt = w.resets_at;
   else if (typeof w.resets_in_seconds === "number" && capturedAt !== null) resetsAt = capturedAt + w.resets_in_seconds;
   return { usedPercent: w.used_percent, resetsAt };
+}
+
+/* ----------------------------- Burndown series ----------------------------- */
+
+/** Newest files to scan for the weekly series — a backstop far above a normal
+    week's worth of Codex sessions. */
+const SERIES_MAX_FILES = 400;
+/** Whole-file read cap; larger transcripts fall back to a tail read. */
+const SERIES_MAX_BYTES = 8 * 1024 * 1024;
+
+function windowSecondsOf(w: CodexWindow | undefined): number | null {
+  if (w && typeof w.window_minutes === "number" && w.window_minutes > 0) return Math.round(w.window_minutes * 60);
+  return null;
+}
+
+function readAll(file: string): string | null {
+  try {
+    if (fs.statSync(file).size > SERIES_MAX_BYTES) return readTail(file, SERIES_MAX_BYTES);
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return readTail(file, SERIES_MAX_BYTES);
+  }
+}
+
+export interface CodexTranscriptSeries {
+  session: LimitSample[];
+  weekly: LimitSample[];
+  /** Window definition from the newest event, for the ideal diagonal. */
+  sessionWindowSeconds: number | null;
+  weeklyWindowSeconds: number | null;
+  sessionResetsAt: number | null;
+  weeklyResetsAt: number | null;
+}
+
+/** All `rate_limits` events across the Codex session transcripts touched since
+    `sinceUnix`, reconstructing the weekly/5h remaining-quota curves retroactively
+    so the chart is populated on first open. Files whose mtime predates the
+    window are skipped unread; the newest event fixes each window's diagonal. */
+export function collectCodexRateLimitSeries(sessionsDir: string, sinceUnix: number): CodexTranscriptSeries {
+  const session: LimitSample[] = [];
+  const weekly: LimitSample[] = [];
+  const seen = new Set<number>();
+  let latestT = -Infinity;
+  let sessionWindowSeconds: number | null = null;
+  let weeklyWindowSeconds: number | null = null;
+  let sessionResetsAt: number | null = null;
+  let weeklyResetsAt: number | null = null;
+  for (const { p, m } of sessionFiles(sessionsDir, SERIES_MAX_FILES)) {
+    if (m / 1000 < sinceUnix) continue;
+    const text = readAll(p);
+    if (!text) continue;
+    for (const line of text.split("\n")) {
+      if (!line.includes('"rate_limits"')) continue;
+      try {
+        const row = JSON.parse(line) as { timestamp?: unknown; payload?: { rate_limits?: CodexRateLimits } };
+        const rl = row.payload?.rate_limits;
+        if (!rl) continue;
+        const ts = typeof row.timestamp === "string" ? Date.parse(row.timestamp) : NaN;
+        if (!Number.isFinite(ts)) continue;
+        const t = Math.round(ts / 1000);
+        if (t < sinceUnix || seen.has(t)) continue;
+        seen.add(t);
+        const prim = codexWindow(rl.primary, t);
+        const sec = codexWindow(rl.secondary, t);
+        if (prim) session.push({ t, remaining: clampPercent(100 - prim.usedPercent) });
+        if (sec) weekly.push({ t, remaining: clampPercent(100 - sec.usedPercent) });
+        if (t > latestT) {
+          latestT = t;
+          if (prim) { sessionResetsAt = prim.resetsAt; sessionWindowSeconds = windowSecondsOf(rl.primary); }
+          if (sec) { weeklyResetsAt = sec.resetsAt; weeklyWindowSeconds = windowSecondsOf(rl.secondary); }
+        }
+      } catch {
+        /* partial or non-JSON line */
+      }
+    }
+  }
+  session.sort((a, b) => a.t - b.t);
+  weekly.sort((a, b) => a.t - b.t);
+  return { session, weekly, sessionWindowSeconds, weeklyWindowSeconds, sessionResetsAt, weeklyResetsAt };
+}
+
+/** Assemble one window's burndown from forward poll samples, an optional
+    transcript backfill and the current live value, scoped to the current window.
+    Exported for the window-scoping regression test. */
+export function buildSeries(
+  forward: LimitSample[],
+  backfill: LimitSample[],
+  live: LimitWindow | null,
+  now: number,
+  windowSeconds: number,
+  backfillResetsAt: number | null,
+): BurndownSeries {
+  const resetsAt = live?.resetsAt ?? backfillResetsAt ?? null;
+  const windowStart = resetsAt !== null ? resetsAt - windowSeconds : null;
+  const livePoint: LimitSample[] = live && typeof live.usedPercent === "number" ? [{ t: now, remaining: clampPercent(100 - live.usedPercent) }] : [];
+  const merged = mergeSamples(forward, backfill, livePoint);
+  // Strictly scope to the current window: a sample from before windowStart
+  // belongs to the previous window, and after a rollover it would sit in the
+  // series as a low pre-reset value ahead of the ~100% post-reset point. That
+  // boundary rise reads as a refill and would suppress the pace projection for
+  // the whole new window, so those pre-window samples are dropped here.
+  const samples = windowStart !== null ? merged.filter((s) => s.t >= windowStart) : merged;
+  return { windowStart, resetsAt, windowSeconds, samples };
+}
+
+function buildEngineBurndown(
+  engine: EngineName,
+  accountId: string,
+  limits: EngineLimits | null,
+  now: number,
+  backfill: CodexTranscriptSeries | null,
+): EngineBurndown {
+  const forward = (window: WindowKey) => historySamples(engine, accountId, window, now);
+  const session = buildSeries(
+    forward("session"),
+    backfill?.session ?? [],
+    limits?.session ?? null,
+    now,
+    backfill?.sessionWindowSeconds ?? WINDOW_SECONDS.session,
+    backfill?.sessionResetsAt ?? null,
+  );
+  const weekly = buildSeries(
+    forward("weekly"),
+    backfill?.weekly ?? [],
+    limits?.weekly ?? null,
+    now,
+    backfill?.weeklyWindowSeconds ?? WINDOW_SECONDS.weekly,
+    backfill?.weeklyResetsAt ?? null,
+  );
+  return { session, weekly };
+}
+
+/** Burndown history for both engines. Reads the current live snapshot (which
+    also records a forward sample), merges the persisted poll history, and
+    backfills the Codex curve from transcripts so it is never empty. */
+export async function readBurndown(options: { codexLiveReader?: CodexLiveLimitsReader } = {}): Promise<BurndownPayload> {
+  const payload = await readLimits(options);
+  const now = Math.round(Date.now() / 1000);
+  const since = now - RETENTION_S;
+  const claude = payload.claudeAccountId
+    ? buildEngineBurndown("claude", payload.claudeAccountId, payload.claude, now, null)
+    : null;
+  let codex: EngineBurndown | null = null;
+  if (payload.codexAccountId) {
+    const backfill = collectCodexRateLimitSeries(accountForSpawn().sessionsDir, since);
+    codex = buildEngineBurndown("codex", payload.codexAccountId, payload.codex, now, backfill);
+  }
+  return {
+    claude,
+    codex,
+    claudeAccountId: payload.claudeAccountId,
+    codexAccountId: payload.codexAccountId,
+    historySince: historySince(),
+  };
 }

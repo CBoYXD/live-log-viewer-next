@@ -24,6 +24,7 @@ function task(overrides: Partial<BoardTask> = {}): BoardTask {
     project: "proj",
     status: "inbox",
     text: "First line\nbody",
+    placement: "pinned",
     pos: { x: 10, y: 20 },
     assignments: [],
     createdAt: "2026-07-05T10:00:00.000Z",
@@ -166,6 +167,7 @@ describe("task command helpers", () => {
         pos: { x: 0, y: 0 },
         source: { path: "/session.jsonl", ts: null, text: "Fix the dashboard", fingerprint: "fp", engine: "claude" },
       },
+      [],
       { now: () => "now", id: () => "id" },
     );
     expect(result.ok).toBe(true);
@@ -174,24 +176,17 @@ describe("task command helpers", () => {
     expect(result.task.status).toBe("inbox");
   });
 
-  test("placement intent: source heuristic, board drop, and default panel seed", () => {
+  test("placement: a pos pins the card, an explicit unplaced carries none", () => {
     const create = (over: Record<string, unknown>) =>
-      createTask([], { project: "proj", text: "t", pos: { x: 120, y: 120 }, ...over }, { now: () => "n", id: () => "i" });
-    /* A source-less card with no explicit intent is a deliberate hand placement. */
-    const heuristic = create({});
-    expect(heuristic.ok && heuristic.task.pinned).toBe(true);
-    /* The board «task» tool passes pinned:true — the user chose the spot. */
-    const dropped = create({ pinned: true });
-    expect(dropped.ok && dropped.task.pinned).toBe(true);
-    /* The task panel / bulk bar seed a shared default point with pinned:false, so
-       the board's collision pass spreads them and they never stack (issue #17). */
-    const panelA = create({ pinned: false });
-    const panelB = create({ pinned: false });
-    expect(panelA.ok && panelA.task.pinned).toBe(false);
-    expect(panelB.ok && panelB.task.pinned).toBe(false);
-    /* An auto-captured source card stays unpinned (undefined) for the lattice. */
-    const sourced = create({ source: { path: "/s.jsonl", ts: null, text: "t", fingerprint: "fp", engine: "claude" } });
-    expect(sourced.ok && sourced.task.pinned).toBeUndefined();
+      createTask([], { project: "proj", text: "t", ...over }, [], { now: () => "n", id: () => "i" });
+    /* A create with a position is a board placement — pinned there. */
+    const pinned = create({ pos: { x: 120, y: 120 } });
+    expect(pinned.ok && pinned.task.placement).toBe("pinned");
+    expect(pinned.ok && pinned.task.pos).toEqual({ x: 120, y: 120 });
+    /* A panel/mobile create is unplaced: it holds no position until placed. */
+    const unplaced = create({ placement: "unplaced" });
+    expect(unplaced.ok && unplaced.task.placement).toBe("unplaced");
+    expect(unplaced.ok && unplaced.task.pos).toBeUndefined();
   });
 
   test("patch is last-write-wins and delete wins late patches", () => {

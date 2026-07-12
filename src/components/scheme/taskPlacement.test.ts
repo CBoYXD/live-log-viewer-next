@@ -1,7 +1,5 @@
 import { describe, expect, test } from "bun:test";
 
-import type { BoardTask } from "@/lib/tasks/types";
-
 import type { SchemeRect } from "./layout";
 import { isAutoPlaceable, resolveTaskPlacements, TASK_GUTTER, type PlaceableTask } from "./taskPlacement";
 import { TASK_W, taskCardHeight, taskRect } from "./taskGeometry";
@@ -62,7 +60,7 @@ describe("resolveTaskPlacements", () => {
 
   test("the raw dense fixture really does overlap (guards the fixture)", () => {
     const tasks = densePileup(16);
-    const rects = tasks.map((t) => taskRect(t as BoardTask));
+    const rects = tasks.map((t) => taskRect(t));
     let overlaps = 0;
     for (let a = 0; a < rects.length; a++) {
       for (let b = a + 1; b < rects.length; b++) {
@@ -110,11 +108,12 @@ describe("resolveTaskPlacements", () => {
   });
 
   test("a relocated auto card clears pane obstacles as well as other cards", () => {
-    /* A pinned anchor ("a") the user dropped holds its exact spot; the colliding
-       auto card ("b", sourced + on the lattice) relocates and must clear both
-       the anchor and the pane. */
+    /* A held anchor ("a", hand-placed with no source) holds its exact spot; the
+       colliding auto card ("b", sourced + on the lattice) relocates and must
+       clear both the anchor and the pane. */
     const pane: SchemeRect = { x: 700, y: 60, w: 600, h: 680 };
-    const tasks = [task("a", 740, 130, { pinned: true }), task("b", 740, 120, { source: SRC })];
+    const tasks = [task("a", 740, 130), task("b", 740, 120, { source: SRC })];
+    expect(isAutoPlaceable(tasks[0]!)).toBe(false);
     expect(isAutoPlaceable(tasks[1]!)).toBe(true);
     const placement = resolveTaskPlacements(tasks, [pane]);
     expect(placement.get("a")).toEqual({ x: 740, y: 130 });
@@ -133,37 +132,36 @@ describe("resolveTaskPlacements", () => {
     expect(clash(rectAt(tasks[0]!, spot), pane, 0)).toBe(false);
   });
 
-  test("a pinned card the user placed on a pane is preserved exactly", () => {
+  test("a hand-placed card on a pane is preserved exactly", () => {
     /* An explicit hand placement over a pane (allowed by design) survives — a
-       pinned card is law and is never nudged, colliding pane or not. */
+       source-less card is law and is never nudged, colliding pane or not. */
     const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
-    const tasks = [task("solo", 100, 100, { pinned: true, source: SRC })];
+    const tasks = [task("solo", 100, 100)];
     expect(resolveTaskPlacements(tasks, [pane]).get("solo")).toEqual({ x: 100, y: 100 });
   });
 
-  test("pinned cards hold their exact spot even when they overlap", () => {
-    /* Two pinned cards the user stacked stay put — the pass never overrides an
-       explicit placement, so a deliberate overlap is the user's to keep. */
-    const tasks = [task("a", 200, 200, { pinned: true }), task("b", 210, 205, { pinned: true })];
+  test("held cards hold their exact spot even when they overlap", () => {
+    /* Two hand-placed cards the user stacked stay put — the pass never overrides
+       an explicit placement, so a deliberate overlap is the user's to keep. */
+    const tasks = [task("a", 200, 200), task("b", 210, 205)];
     const placement = resolveTaskPlacements(tasks, []);
     expect(placement.get("a")).toEqual({ x: 200, y: 200 });
     expect(placement.get("b")).toEqual({ x: 210, y: 205 });
   });
 
-  test("legacy manual card (no pinned, no source) is never relocated", () => {
-    /* Pre-`pinned` hand-created cards carry neither flag. They must hold their
-       operator-chosen spot — even parked over a pane — through the first render
-       after upgrade, staying where the operator left them. */
+  test("a hand-created card (no source) is never relocated", () => {
+    /* «Task» tool drops carry no source. They hold their operator-chosen spot —
+       even parked over a pane — staying exactly where the operator left them. */
     const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
-    const tasks = [task("legacy", 100, 100)];
+    const tasks = [task("manual", 100, 100)];
     expect(isAutoPlaceable(tasks[0]!)).toBe(false);
-    expect(resolveTaskPlacements(tasks, [pane]).get("legacy")).toEqual({ x: 100, y: 100 });
+    expect(resolveTaskPlacements(tasks, [pane]).get("manual")).toEqual({ x: 100, y: 100 });
   });
 
-  test("legacy sourced card dragged off the lattice is preserved", () => {
-    /* A pre-`pinned` inbox card the user had dragged sits off the autoPos
-       lattice; with no flag to read, being off the lattice is the signal that a
-       human moved it, so it holds even overlapping a pane. */
+  test("a sourced card dragged off the lattice is preserved", () => {
+    /* An inbox card the user has dragged sits off the autoPos lattice; being off
+       the lattice is the signal that a human moved it, so it holds even
+       overlapping a pane. */
     const pane: SchemeRect = { x: 0, y: 0, w: 600, h: 680 };
     const tasks = [task("dragged", 315, 402, { source: SRC })];
     expect(isAutoPlaceable(tasks[0]!)).toBe(false);
@@ -174,36 +172,19 @@ describe("resolveTaskPlacements", () => {
     expect(isAutoPlaceable(task("a", 740, 120, { source: SRC }))).toBe(true); // new inbox/curator card
     expect(isAutoPlaceable(task("b", 1040, 360, { source: SRC }))).toBe(true); // other column, deeper row
     expect(isAutoPlaceable(task("c", 741, 120, { source: SRC }))).toBe(false); // one px off the lattice
-    expect(isAutoPlaceable(task("d", 740, 120, { source: SRC, pinned: true }))).toBe(false); // dragged onto lattice
     expect(isAutoPlaceable(task("e", 740, 120))).toBe(false); // no source = hand-created
-    expect(isAutoPlaceable(task("f", 120, 120, { pinned: false }))).toBe(true); // panel default seed
-  });
-
-  test("panel-created cards (pinned:false at a shared default) are spread apart", () => {
-    /* The task sheet and bulk bar seed every card at one point with pinned:false.
-       Without spreading they'd stack forever unreadable (issue #17). */
-    const tasks = [
-      task("p1", 120, 120, { pinned: false }),
-      task("p2", 120, 120, { pinned: false }),
-      task("p3", 120, 120, { pinned: false }),
-    ];
-    const placement = resolveTaskPlacements(tasks, []);
-    const rects = tasks.map((t) => rectAt(t, placement.get(t.id)!));
-    for (let a = 0; a < rects.length; a++) {
-      for (let b = a + 1; b < rects.length; b++) {
-        expect(clash(rects[a]!, rects[b]!, TASK_GUTTER - 1)).toBe(false);
-      }
-    }
+    expect(isAutoPlaceable(task("f", 120, 120))).toBe(false); // off-lattice, no source
   });
 
   test("adding a task never reshuffles the cards that predate it (Finding)", () => {
-    /* Two panel cards at the shared seed, then a third added later whose UUID
-       sorts *before* both. Ordering by creation time (not id) keeps the two
-       existing cards exactly where they were; only the newcomer flows around. */
-    const old1 = task("zzz-1", 120, 120, { pinned: false, createdAt: "2026-07-01T00:00:00.000Z" });
-    const old2 = task("zzz-2", 120, 120, { pinned: false, createdAt: "2026-07-02T00:00:00.000Z" });
+    /* Two sourced lattice cards at the shared autoPos seed, then a third added
+       later whose UUID sorts *before* both. Ordering by creation time (not id)
+       keeps the two existing cards exactly where they were; only the newcomer
+       flows around. */
+    const old1 = task("zzz-1", 740, 120, { source: SRC, createdAt: "2026-07-01T00:00:00.000Z" });
+    const old2 = task("zzz-2", 740, 120, { source: SRC, createdAt: "2026-07-02T00:00:00.000Z" });
     const before = resolveTaskPlacements([old1, old2], []);
-    const newer = task("aaa-3", 120, 120, { pinned: false, createdAt: "2026-07-03T00:00:00.000Z" });
+    const newer = task("aaa-3", 740, 120, { source: SRC, createdAt: "2026-07-03T00:00:00.000Z" });
     const after = resolveTaskPlacements([old1, old2, newer], []);
     expect(after.get("zzz-1")).toEqual(before.get("zzz-1"));
     expect(after.get("zzz-2")).toEqual(before.get("zzz-2"));

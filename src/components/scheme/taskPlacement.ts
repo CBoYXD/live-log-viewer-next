@@ -14,8 +14,10 @@ export const TASK_GUTTER = 16;
 const MAX_RING = 48;
 
 /** Everything the placement pass needs from a task — kept structural so the
-    module tests with plain literals; no full BoardTask fixtures are needed. */
-export type PlaceableTask = Pick<BoardTask, "id" | "pos" | "text" | "assignments" | "source" | "pinned" | "createdAt">;
+    module tests with plain literals; no full BoardTask fixtures are needed. Only
+    placed cards reach the pass (the board filters `unplaced` first), so `pos` is
+    required here even though it is optional on `BoardTask`. */
+export type PlaceableTask = Pick<BoardTask, "id" | "text" | "assignments" | "source" | "createdAt"> & { pos: { x: number; y: number } };
 
 /** Do two rects come within `gap` of each other? Touching or closer counts;
     exactly `gap` apart does not, so a resolved slot keeps a real gutter. */
@@ -77,11 +79,10 @@ function findSlot(card: SchemeRect, placedCards: readonly SchemeRect[], obstacle
   return cardClearFallback ?? { x: card.x, y: card.y };
 }
 
-/* The historical autoPos lattice both curator.ts and inboxScanner.ts write:
-   x ∈ {740, 1040} (740 + (i%2)·300), y = 120 + k·120. Used only to classify
-   cards saved before the `pinned` field existed — a sourced card still resting
-   on the lattice was never touched by a human and is fair game to spread;
-   anything nudged off it reads as a deliberate placement and is held. */
+/* The autoPos lattice both curator.ts and inboxScanner.ts write: x ∈ {740, 1040}
+   (740 + (i%2)·300), y = 120 + k·120. A sourced card still resting on it was
+   never moved by a human and is fair game to spread; anything nudged off it reads
+   as a deliberate placement and is held. */
 function onAutoLattice(pos: { x: number; y: number }): boolean {
   const col = pos.x - 740;
   if (col !== 0 && col !== 300) return false;
@@ -90,25 +91,14 @@ function onAutoLattice(pos: { x: number; y: number }): boolean {
 }
 
 /**
- * Is this card the pass's to move? Only auto-lattice cards (curator/inbox) are.
- *
- * The signals, in order:
- *  - `pinned === true` — a human placed or dragged it: law, never moved.
- *  - `pinned === false` — an explicit *default* placement (the task panel / bulk
- *    bar seed every card at one shared point), so the pass may spread it even
- *    though it has no source.
- *  - no `source` — the «task» tool never records a source, so a source-less
- *    card was hand-created and is held. This also rescues *legacy* manual cards
- *    saved before `pinned` existed (they carry neither flag): without it a card
- *    a user parked at, say, (100,100) would be flung across the board on the
- *    first render after upgrade.
- *  - a sourced card is auto only while it still sits on the autoPos lattice.
- *    A new inbox/curator card satisfies this; a legacy sourced card a user had
- *    dragged off the lattice (also missing `pinned`) is preserved.
+ * Is this card the pass's to move? Only auto-captured curator/inbox cards still
+ * resting on their lattice seed are. Everything else — a card placed with the
+ * «task» tool (no `source`), or a curator card a human has since dragged off the
+ * lattice — is a deliberate placement and is held exactly where it sits, even
+ * atop a pane. A user drag lands a `pinned` placement and (all but pixel-exactly)
+ * moves the card off the lattice, so `source` + lattice cleanly separates the two.
  */
 export function isAutoPlaceable(task: PlaceableTask): boolean {
-  if (task.pinned === true) return false;
-  if (task.pinned === false) return true;
   if (!task.source) return false;
   return onAutoLattice(task.pos);
 }
