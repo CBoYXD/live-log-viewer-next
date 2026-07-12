@@ -217,6 +217,36 @@ test("Claude 429 honors Retry-After when it exceeds the exponential delay", asyn
   }
 });
 
+test("Claude 429 preserves an HTTP-date Retry-After deadline across response latency", async () => {
+  resetLimitsCache();
+  const realFetch = globalThis.fetch;
+  let now = 10_000_000;
+  let fetches = 0;
+  const retryHeader = new Date(10_121_000).toUTCString();
+  const retryAt = Date.parse(retryHeader);
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    if (fetches === 1) {
+      now = 10_001_500;
+      return new Response(null, { status: 429, headers: { "retry-after": retryHeader } });
+    }
+    return claudeUsage();
+  }) as unknown as typeof fetch;
+  try {
+    const limited = await readLimits({ codexLiveReader, now: () => now });
+    expect(limited.provenance.claude.retryAt).toBe(new Date(retryAt).toISOString());
+    now = retryAt - 1;
+    await readLimits({ codexLiveReader, now: () => now });
+    expect(fetches).toBe(1);
+    now = retryAt + 1;
+    const recovered = await readLimits({ codexLiveReader, now: () => now });
+    expect(recovered.provenance.claude.source).toBe("live");
+    expect(fetches).toBe(2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("Claude 401 records re-authentication provenance", async () => {
   resetLimitsCache();
   const realFetch = globalThis.fetch;

@@ -40,7 +40,7 @@ export type LimitRead = {
   data: EngineLimits | null;
   reason: string | null;
   source: "live" | "transcript" | "unavailable";
-  retryAfterMs?: number;
+  retryAt?: number;
 };
 export type CodexLiveLimitsReader = (account: Pick<CodexAccount, "id" | "kind" | "home" | "sessionsDir">) => Promise<AppServerRateLimits>;
 
@@ -181,7 +181,7 @@ function resolveRead(read: LimitRead, cached: EngineCacheEntry | null, staleSinc
   const exponentialMs = consecutive429s > 0
     ? Math.min(FAILURE_COOLDOWN_MS * (2 ** (consecutive429s - 1)), MAX_RATE_LIMIT_BACKOFF_MS)
     : FAILURE_COOLDOWN_MS;
-  const retryAt = now + Math.max(exponentialMs, read.retryAfterMs ?? 0);
+  const retryAt = Math.max(now + exponentialMs, read.retryAt ?? 0);
   const meta: LimitsProvenance = {
     source: cached?.data ? "cache" : "unavailable",
     reason: read.reason,
@@ -217,7 +217,7 @@ function logFallbackReasons(entries: ReadonlyArray<readonly [EngineName, LimitsP
   }
 }
 
-function resolveEngineRead(engine: EngineName, accountId: string, now: number, reader: () => Promise<LimitRead>): Promise<ResolvedRead> {
+function resolveEngineRead(engine: EngineName, accountId: string, now: number, clock: () => number, reader: () => Promise<LimitRead>): Promise<ResolvedRead> {
   const cached = lastCache(engine, accountId);
   if (cacheIsFresh(cached, now)) return Promise.resolve(cachedRead(cached!));
 
@@ -230,7 +230,8 @@ function resolveEngineRead(engine: EngineName, accountId: string, now: number, r
     const latest = lastCache(engine, accountId);
     if (cacheIsFresh(latest, now)) return cachedRead(latest!);
     const read = await reader();
-    const resolved = resolveRead(read, latest, new Date(now).toISOString(), now);
+    const resolvedAt = clock();
+    const resolved = resolveRead(read, latest, new Date(resolvedAt).toISOString(), resolvedAt);
     logFallbackReasons([[engine, resolved.meta]]);
     remember(engine, accountId, resolved, now);
     return resolved;
@@ -245,12 +246,13 @@ function resolveEngineRead(engine: EngineName, accountId: string, now: number, r
 
 /** Claude Code + Codex plan limits, cached briefly so UI polling stays cheap. */
 export async function readLimits(options: { codexLiveReader?: CodexLiveLimitsReader; now?: () => number } = {}): Promise<LimitsPayload> {
-  const now = options.now?.() ?? Date.now();
+  const clock = options.now ?? Date.now;
+  const now = clock();
   const claudeAccount = claudeAccountForSpawn();
   const codexAccount = accountForSpawn();
   const [resolvedClaude, resolvedCodex] = await Promise.all([
-    resolveEngineRead("claude", claudeAccount.id, now, () => fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json"))),
-    resolveEngineRead("codex", codexAccount.id, now, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader })),
+    resolveEngineRead("claude", claudeAccount.id, now, clock, () => fetchClaudeLimits(path.join(claudeAccount.home, ".credentials.json"), clock)),
+    resolveEngineRead("codex", codexAccount.id, now, clock, () => readCodexLimits({ account: codexAccount, liveReader: options.codexLiveReader })),
   ]);
   return {
     claude: resolvedClaude.data,
@@ -274,7 +276,7 @@ interface OauthWindow {
  * from ~/.claude/.credentials.json stays inside the server process; the
  * browser only ever sees percentages.
  */
-export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitRead> {
+export async function fetchClaudeLimits(credentialsPath: string, clock: () => number = Date.now): Promise<LimitRead> {
   let accessToken = "";
   let plan: string | null = null;
   try {
@@ -295,7 +297,7 @@ export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitR
       },
       signal: AbortSignal.timeout(8000),
     });
-    if (res.status === 429) return { data: null, reason: LIMITS_RATE_LIMITED_REASON, source: "unavailable", retryAfterMs: retryAfterMs(res.headers.get("retry-after")) };
+    if (res.status === 429) return { data: null, reason: LIMITS_RATE_LIMITED_REASON, source: "unavailable", retryAt: retryAfterAt(res.headers.get("retry-after"), clock()) };
     if (res.status === 401) return { data: null, reason: LIMITS_REAUTH_REQUIRED_REASON, source: "unavailable" };
     if (!res.ok) return { data: null, reason: `oauth usage status ${res.status}`, source: "unavailable" };
     const json = (await res.json()) as { five_hour?: OauthWindow; seven_day?: OauthWindow };
@@ -312,13 +314,13 @@ export async function fetchClaudeLimits(credentialsPath: string): Promise<LimitR
   }
 }
 
-function retryAfterMs(value: string | null, now = Date.now()): number | undefined {
+function retryAfterAt(value: string | null, now: number): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  if (Number.isFinite(seconds) && seconds >= 0) return now + seconds * 1000;
   const date = Date.parse(value);
   if (!Number.isFinite(date)) return undefined;
-  return Math.max(0, date - now);
+  return Math.max(now, date);
 }
 
 function oauthWindow(w: OauthWindow | undefined): LimitWindow | null {
