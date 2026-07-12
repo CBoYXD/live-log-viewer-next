@@ -5,7 +5,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog } from "@/lib/scanner";
-import { agentRegistry } from "@/lib/agent/registry";
+import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
 import { loadFlows } from "@/lib/flows/store";
 import { loadPipelines } from "@/lib/pipelines/store";
@@ -37,9 +37,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   // the external scheduler, keeping repeated GETs byte-stable for state files.
   const registry = agentRegistry();
   const registrySnapshot = registry.snapshot();
-  const conversationForPath = (pathname: string) => Object.values(registrySnapshot.conversations).find((conversation) =>
-    conversation.generations.some((generation) => generation.path === pathname)
-    || conversation.continuityPaths.includes(pathname));
+  const conversationLookup = conversationLookupFromSnapshot(registrySnapshot);
+  const conversationForPath = (pathname: string) => conversationLookup.conversationForPath(pathname);
   const filesByPath = new Map(files.map((file) => [file.path, file]));
   for (let index = 0; index < files.length; index += 1) {
     const child = files[index]!;
@@ -49,7 +48,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const rawParentId = registrySnapshot.lineageEdges[childConversation.id]?.parentConversationId
       ?? current.launchProfile.parentConversationId;
     if (!rawParentId) continue;
-    const parentId = registry.canonicalConversationId(rawParentId);
+    const parentId = conversationLookup.canonicalConversationId(rawParentId);
     const parentConversation = registrySnapshot.conversations[parentId];
     const parentGeneration = parentConversation?.generations.at(-1);
     const parentPath = parentGeneration?.path;
@@ -122,7 +121,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.plan = profile.plan ?? file.plan;
       const parentConversationId = registrySnapshot.lineageEdges[conversation.id]?.parentConversationId ?? profile.parentConversationId;
       if (parentConversationId) {
-        const canonicalParentId = registry.canonicalConversationId(parentConversationId);
+        const canonicalParentId = conversationLookup.canonicalConversationId(parentConversationId);
         const parentPath = registrySnapshot.conversations[canonicalParentId]?.generations.at(-1)?.path ?? null;
         if (parentPath && scannedPaths.has(parentPath)) {
           file.parent = parentPath;
@@ -161,13 +160,12 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   const tasks = reconcileTasks(files, loadTasks(), {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
-    conversationIdForPath: (pathname) => Object.values(registrySnapshot.conversations).find((conversation) =>
-      ownsPath(conversation, pathname))?.id ?? null,
+    conversationIdForPath: (pathname) => conversationLookup.conversationForPath(pathname)?.id ?? null,
     canonicalConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registry.canonicalConversationId(conversationId as `conversation_${string}`)
+      ? conversationLookup.canonicalConversationId(conversationId as `conversation_${string}`)
       : null,
     pathForConversationId: (conversationId) => conversationId.startsWith("conversation_")
-      ? registry.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
+      ? conversationLookup.conversation(conversationId as `conversation_${string}`)?.generations.at(-1)?.path ?? null
       : null,
   });
   const workflows = filterWorkflowsForFileScan(loadWorkflows(), files);

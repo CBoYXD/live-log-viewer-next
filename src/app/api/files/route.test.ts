@@ -408,6 +408,80 @@ test("an existing durable parent omitted from the scan enters the response closu
   });
 });
 
+test("lineage projection uses one registry revision during provisional parent adoption", async () => {
+  const registry = agentRegistry();
+  const sourcePath = "/sessions/source-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1324.jsonl";
+  const parentPath = "/sessions/provisional-parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1325.jsonl";
+  const childPath = "/sessions/child-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+  const canonicalParent = registry.ensureConversation("codex", sourcePath, null);
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: parentPath,
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-12T12:00:00.000Z",
+  }]);
+  const provisionalParent = registry.conversationForPath(parentPath)!;
+  const migration = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    conversationId: canonicalParent.id,
+    purpose: "migration-successor",
+    expectedArtifactPath: parentPath,
+  });
+  if (migration.kind !== "created") throw new Error("expected migration receipt");
+  const child = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: "/repo",
+    parentConversationId: provisionalParent.id,
+    parentArtifactPath: parentPath,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo", parentConversationId: provisionalParent.id }),
+  });
+  if (child.kind !== "created") throw new Error("expected child receipt");
+  registry.settleSpawn(child.receipt.launchId, {
+    key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1326" },
+    artifactPath: childPath,
+    cwd: "/repo",
+    accountId: null,
+    status: "unhosted",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  scannedFiles = [file(parentPath), file(childPath)];
+
+  const originalSnapshot = registry.snapshot.bind(registry);
+  let adopted = false;
+  registry.snapshot = () => {
+    const snapshot = originalSnapshot();
+    if (!adopted) {
+      adopted = true;
+      registry.settleSpawn(migration.receipt.launchId, {
+        key: { engine: "codex", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1325" },
+        artifactPath: parentPath,
+        cwd: "/repo",
+        accountId: null,
+        status: "unhosted",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+    }
+    return snapshot;
+  };
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const projectedChild = body.files.find((entry) => entry.path === childPath);
+
+  expect(projectedChild?.parent).toBe(parentPath);
+  expect(projectedChild?.parentRemoved).toBeUndefined();
+  expect(originalSnapshot().conversationAliases[provisionalParent.id]).toBe(canonicalParent.id);
+});
+
 test("a custom session title (issue #33) overrides the derived title and keeps it as autoTitle", async () => {
   const sessionUuid = "019f4906-3f67-7b72-9fbc-9ec3b5ad1399";
   const sessionPath = `/sessions/rollout-2026-07-12T00-00-00-${sessionUuid}.jsonl`;

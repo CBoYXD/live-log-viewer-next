@@ -1044,10 +1044,19 @@ export class AgentRegistry {
     )) return conflict("spawn_pane_conflict");
     if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath) return conflict("spawn_artifact_conflict");
     if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
-    const occupied = file.entries[sessionKeyId(entry.key)];
-    if (occupied && occupied.artifactPath !== entry.artifactPath && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))) return conflict("spawn_artifact_conflict");
-
     const existingConversation = file.conversations[receipt.conversationId];
+    const occupied = file.entries[sessionKeyId(entry.key)];
+    const occupiedGeneration = occupied && existingConversation?.generations.find((generation) => generation.path === occupied.artifactPath);
+    const successorNativeId = existingConversation
+      ? sessionKeyFromTranscript(existingConversation.engine, entry.artifactPath)?.sessionId ?? nativeGenerationId(entry.artifactPath)
+      : null;
+    const replacesOwnedGeneration = receipt.purpose === "resume-successor"
+      && occupiedGeneration?.id === entry.key.sessionId
+      && successorNativeId === entry.key.sessionId;
+    if (occupied && occupied.artifactPath !== entry.artifactPath
+      && (!prior || sessionKeyId(prior.key) !== sessionKeyId(entry.key))
+      && !replacesOwnedGeneration) return conflict("spawn_artifact_conflict");
+
     const createdAt = now();
     const conversation = existingConversation ?? {
       id: receipt.conversationId,
