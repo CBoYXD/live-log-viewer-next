@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 
 import { NextResponse } from "next/server";
 
@@ -117,6 +118,26 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
   }
   const filesByPath = new Map(files.map((file) => [file.path, file] as const));
   const { userAuthoredPaths, scannedAt } = readAuthorshipEvidence();
+  /* Current on-disk mtime, memoized per request. A clean stamp must be checked
+     against the LIVE filesystem, not the scan snapshot's mtime: the files scan
+     is a cache that a GET may reuse (scanCache) while a user appends a message,
+     so a stamp taken before the append would look fresh against the stale
+     cached mtime and falsely certify a now-owner-authored transcript. statSync
+     sees the append and re-pins it unverified. Bounded — only paths that carry a
+     stamp reach here (an unstamped lineage path already fails closed). */
+  const liveMtime = new Map<string, number | null>();
+  const currentMtime = (pathname: string): number | null => {
+    const cached = liveMtime.get(pathname);
+    if (cached !== undefined) return cached;
+    let observed: number | null = null;
+    try {
+      observed = fs.statSync(pathname).mtimeMs / 1000;
+    } catch {
+      observed = null;
+    }
+    liveMtime.set(pathname, observed);
+    return observed;
+  };
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     const conversation = conversationByPath.get(file.path);
@@ -133,11 +154,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     const unverified = [...lineage].some((pathname) => {
       const stamp = scannedAt.get(pathname);
       if (stamp === undefined) return true;
-      const known = filesByPath.get(pathname);
-      /* In-scan generation: require freshness against its current mtime. An
-         archived generation the scan no longer lists is immutable — the stamp
-         alone certifies it. */
-      return known ? stamp < known.mtime : false;
+      /* Prefer the live on-disk mtime; fall back to the scan snapshot only when
+         the transcript is gone (a deleted transcript is immutable — the stamp
+         stands, and there is nothing left to collapse anyway). */
+      const observed = currentMtime(pathname) ?? filesByPath.get(pathname)?.mtime;
+      return observed !== undefined && stamp < observed;
     });
     if (unverified) file.authorshipUnverified = true;
   }

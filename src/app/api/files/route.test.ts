@@ -417,6 +417,31 @@ test("a worker whose transcript changed after its last clean scan re-pins as unv
   expect(body.files[0]?.authorshipUnverified).toBe(true);
 });
 
+test("a message appended after a cached clean scan re-pins as unverified against live mtime (issue #112 finding)", async () => {
+  /* The scan is a cache: a GET can reuse a snapshot whose mtime predates a
+     just-appended owner message. A clean stamp taken before the append would
+     look fresh against that stale cached mtime, so freshness must be checked
+     against the LIVE filesystem, not the snapshot. */
+  const workerPath = path.join(stateDir, "appended-worker.jsonl");
+  fs.writeFileSync(workerPath, "line\n");
+  const stampMtime = 4000;
+  const liveMtime = 5000; // the real file grew after the clean scan
+  fs.utimesSync(workerPath, liveMtime, liveMtime);
+  fs.writeFileSync(path.join(stateDir, "reaper-state.json"), JSON.stringify({
+    version: 1,
+    firstObservedAt: {},
+    userAuthoredPaths: {},
+    scannedAt: { [workerPath]: stampMtime },
+  }));
+  // The cached snapshot still carries the pre-append mtime.
+  scannedFiles = [{ ...file(workerPath), engine: "codex", mtime: stampMtime }];
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+  const worker = body.files.find((entry) => entry.path === workerPath);
+  expect(worker?.authorshipUnverified).toBe(true);
+});
+
 test("authorship aggregates across the whole conversation lineage (issue #112 finding)", async () => {
   /* A user message recorded on an earlier generation/continuity path must pin
      the current generation even after the historical entry leaves the board. */
