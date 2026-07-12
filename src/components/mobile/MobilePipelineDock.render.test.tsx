@@ -33,11 +33,18 @@ test("mobile dock surfaces the full plan + 44px controls for a memberless pipeli
   expect(controlRows.length).toBeGreaterThanOrEqual(2);
 });
 
-test("a paused pipeline shows Resume; a finished one hides run controls", () => {
+test("a paused pipeline shows Resume; a completed one keeps Close but drops pause/resume", () => {
   const paused = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "paused" } as Pipeline} />);
   expect(paused).toContain("aria-label=\"Resume pipeline\"");
 
+  /* Completed ≠ closed: it stays active until dismissed, so Close must remain the
+     escape hatch, while pause/resume drop away (review round 4). */
   const done = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "completed" } as Pipeline} />);
   expect(done).not.toContain("aria-label=\"Pause pipeline\"");
-  expect(done).not.toContain("aria-label=\"Close pipeline\"");
+  expect(done).not.toContain("aria-label=\"Resume pipeline\"");
+  expect(done).toContain("aria-label=\"Close pipeline\"");
+
+  /* A truly closed pipeline is gone — no controls at all. */
+  const closed = renderToStaticMarkup(<MobilePipelineDock pipeline={{ ...provisioning, state: "closed" } as Pipeline} />);
+  expect(closed).not.toContain("aria-label=\"Close pipeline\"");
 });

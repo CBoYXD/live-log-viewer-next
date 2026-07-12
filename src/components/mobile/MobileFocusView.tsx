@@ -618,7 +618,11 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
         })}
       </div>
       {error ? <span className="text-[11px] font-semibold text-err" role="alert">{error}</span> : null}
-      {finished ? null : (
+      {/* A closed pipeline is gone, so no controls; every other state — including
+          completed — keeps Close so the operator can always dismiss it. Only
+          pause/resume and retry/skip are gated on `finished` (mirrors the desktop
+          PipelineStrip). Fixes the completed-pipeline dead end (review round 4). */}
+      {pipeline.state === "closed" ? null : (
         <div className="flex flex-wrap items-center gap-1.5">
           {parked ? (
             <>
@@ -626,7 +630,7 @@ export function MobilePipelineDock({ pipeline }: { pipeline: Pipeline }) {
               <button type="button" className="inline-flex h-11 items-center rounded-full border border-line bg-bg px-3.5 text-[11px] font-bold text-dim focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
             </>
           ) : null}
-          {pipeline.state === "paused" ? (
+          {finished ? null : pipeline.state === "paused" ? (
             <button type="button" className="inline-flex h-11 items-center gap-1 rounded-full border border-ok/40 bg-[#eef8f0] px-3.5 text-[11px] font-bold text-ok focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}>
               <Play className="h-4 w-4" aria-hidden /> {t("pipelineStrip.resume")}
             </button>
