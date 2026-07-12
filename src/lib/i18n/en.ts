@@ -145,6 +145,9 @@ export const en = {
   "accounts.effective": "{pct}%",
   "accounts.effectiveTip": "{window} binds",
   "accounts.effectiveStale": "{window} binds · stale",
+  "accounts.limitsAria": "Quota windows for {label}",
+  "accounts.limitsStale": "Last known values",
+  "accounts.limitsStaleTip": "Last known values — not a live read",
   // Claude sign-in slice (#61)
   "accounts.claudeLoginStarted": "Sign-in started for {label}",
   "accounts.claudeLogin.starting": "Starting sign-in…",
