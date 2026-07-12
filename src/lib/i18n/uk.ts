@@ -889,6 +889,9 @@ export const uk: Record<keyof typeof en, Message> = {
   "limits.week": "Тиждень",
   "limits.accountsOpenAria": "Акаунти Codex — змінити або додати",
   "limits.noDataYet": "поки немає даних",
+  "limits.rateLimited": "Провайдер обмежує частоту запитів.",
+  "limits.rateLimitedRetry": "Провайдер обмежує частоту запитів. Наступна спроба о {time}.",
+  "limits.reauthRequired": "Потрібно повторно увійти в Claude.",
 
   // Burndown chart (issue #36)
   "burndown.title": "витрати",
