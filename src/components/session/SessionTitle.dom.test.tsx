@@ -341,6 +341,60 @@ test("an instance with no autoEditToken never auto-opens (the node's board pane 
   expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
 });
 
+const sessionA = () => entry({ path: "/home/u/.claude/projects/proj/aaaaaaaa-2222-4333-8444-555555555555.jsonl", conversationId: "conversation_A", title: "Session A" });
+const sessionB = () => entry({ path: "/home/u/.claude/projects/proj/bbbbbbbb-2222-4333-8444-555555555555.jsonl", conversationId: "conversation_B", title: "Session B" });
+
+test("switching sessions before a save settles resets the editor and shows the new session", () => {
+  const view = mount(sessionA());
+  // Open A's editor and type an unsaved draft.
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "A draft not saved"));
+
+  // The pane is reused for session B (scheme board expands a different node).
+  view.rerender(sessionB());
+
+  // No leftover editor, and B shows its own title — A's draft cannot be blurred
+  // into a rename of B.
+  expect(view.host.querySelector('input[aria-label="Session title"]')).toBeNull();
+  expect(view.host.querySelector('span[role="button"]')!.textContent).toContain("Session B");
+  expect(view.host.textContent).not.toContain("A draft not saved");
+});
+
+test("an optimistic rename does not leak onto a different reused session", async () => {
+  const view = mount(sessionA());
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "A renamed"));
+  flushSync(() => dispatch(input, new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+  await settle();
+  // A shows its optimistic title.
+  expect(view.host.querySelector('span[role="button"]')!.textContent).toContain("A renamed");
+
+  // Reuse for B before A's rename settles via polling.
+  view.rerender(sessionB());
+  const title = view.host.querySelector('span[role="button"]')!;
+  expect(title.textContent).toContain("Session B");
+  expect(title.textContent).not.toContain("A renamed");
+});
+
+test("a failed save after a session switch never arms the reused session's retry", async () => {
+  (globalThis as { fetch?: unknown }).fetch = async () => { throw new Error("network down"); };
+  const view = mount(sessionA());
+  flushSync(() => (view.host.querySelector('button[aria-label^="Rename"]') as HTMLButtonElement).click());
+  const input = view.host.querySelector('input[aria-label="Session title"]') as HTMLInputElement;
+  flushSync(() => typeInto(input, "A rename"));
+  flushSync(() => dispatch(input, new dom.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+
+  // Switch to B before A's (failing) save resolves.
+  view.rerender(sessionB());
+  await settle();
+
+  // A's failure must not arm B with a retry button carrying A's value.
+  expect(view.host.textContent).not.toContain("Retry");
+  expect(view.host.querySelector('span[role="button"]')!.textContent).toContain("Session B");
+});
+
 test("the mobile variant renders an always-visible 44px launcher", () => {
   const host = document.createElement("div");
   document.body.append(host);

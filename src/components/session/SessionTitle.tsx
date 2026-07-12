@@ -59,6 +59,31 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
      users must not lose their place after Enter/Escape/Reset/Cancel). */
   const restoreFocus = useRef(false);
 
+  // Reset all edit state when the session identity changes, so a parent that
+  // reuses this component for a different session (e.g. the scheme board's
+  // expanded overlay switching A→B) never keeps A's editor, optimistic title,
+  // or retry — a stale blur/retry would otherwise submit A's value under B's
+  // identity. Storing the previous identity in state is React's sanctioned way
+  // to reset on a prop change without a key (react.dev "you might not need an
+  // effect").
+  const identity = file.conversationId ?? file.path;
+  const [renderedIdentity, setRenderedIdentity] = useState(identity);
+  if (identity !== renderedIdentity) {
+    setRenderedIdentity(identity);
+    setEditing(false);
+    setValue("");
+    setOptimistic(null);
+    setBusy(false);
+    setAnnounce("");
+    setRetryTitle(undefined);
+  }
+  // Latest identity for async guards, kept current in an effect (ref writes are
+  // not allowed during render).
+  const identityRef = useRef(identity);
+  useEffect(() => {
+    identityRef.current = identity;
+  });
+
   // Ignore the optimistic overlay once the server has caught up to (or past)
   // the revision we wrote — derived at render time so no effect writes state
   // (cascading-render safe). Comparing revisions, not titles, means a tombstone
@@ -123,6 +148,11 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
   }, [autoEditToken]);
 
   const attemptSave = async (title: string | null, allowRetry: boolean) => {
+    // Capture the identity this save belongs to; if the component is reused for
+    // another session before the request resolves, drop the stale result rather
+    // than write it (e.g. a failed A-save must not arm B's retry with A's value).
+    const forIdentity = identity;
+    const stale = () => identityRef.current !== forIdentity;
     setBusy(true);
     setRetryTitle(undefined);
     const trimmed = title && title.trim() ? title.trim() : null;
@@ -133,6 +163,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
       baseRevision,
       windowName: trimmed ?? autoTitle,
     });
+    if (stale()) return;
     if (result.ok) {
       // The server reports the effective store revision (active record's or the
       // tombstone's), so the overlay waits for exactly that revision — even a
@@ -153,6 +184,7 @@ export function SessionTitle({ file, displayMax = 90, titleClassName = "", class
         baseRevision: serverRevision,
         windowName: trimmed ?? autoTitle,
       });
+      if (stale()) return;
       if (retried.ok) {
         // Use the server-reported effective revision, so a retry that resolved
         // to a no-op tombstone records N (not a fabricated N+1) and settles.

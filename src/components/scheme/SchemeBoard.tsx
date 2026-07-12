@@ -837,6 +837,10 @@ export function SchemeBoard({
         aria-label={cleanTitle(expandedNode.file.title, 90)}
       >
         <BranchPane
+          /* Key by session identity so switching the expanded node A→B remounts
+             the pane instead of reusing A's SessionTitle (editor/optimistic/
+             retry) under B's identity. */
+          key={expandedNode.file.conversationId ?? expandedNode.file.path}
           file={expandedNode.file}
           tasks={expandedNode.tasks}
           isRoot={expandedNode.isRoot}
