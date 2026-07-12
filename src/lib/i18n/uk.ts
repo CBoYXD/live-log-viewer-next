@@ -1023,6 +1023,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "workerStack.title": "Згорнуті воркери",
   "workerStack.aria": "Згорнуті розмови воркерів",
   "workerStack.flow": "Потік",
+  "workerStack.pipeline": "Пайплайн",
+  "workerStack.origin": "Породжені",
   "workerStack.worktree": "Воркери",
 
   "corner.waitingCount": "· {count} чекають",

@@ -1058,6 +1058,8 @@ export const en = {
   "workerStack.title": "Collapsed workers",
   "workerStack.aria": "Collapsed worker conversations",
   "workerStack.flow": "Flow",
+  "workerStack.pipeline": "Pipeline",
+  "workerStack.origin": "Spawned",
   "workerStack.worktree": "Workers",
 
   // CornerStatus

@@ -38,6 +38,11 @@ export const LOOP_GAP = 170;
 /* Slack between a group halo and the cards it encloses (issue #118): wide
    enough to clear the flow/pipeline strips that hover above each member. */
 export const GROUP_PAD = 46;
+/* Extra headroom added to the halo's TOP only (issue #136): the flow/pipeline
+   strip and its entry buttons hover ~60–92 px above the top member, so the
+   frame is lifted to enclose that control band and read as one clean region.
+   Bottom/left/right stay at GROUP_PAD, so the enclosure geometry is unchanged. */
+export const GROUP_STRIP_HEADROOM = 44;
 /* Quiet-branch mini cards stacked under their parent pane. */
 const MINI_W = 360;
 const MINI_H = 52;
@@ -431,7 +436,10 @@ export function buildSchemeLayout(
     const members = spec.kind === "pipeline" ? expandMembers(spec.members) : spec.members;
     const rect = groupRect(members, (key) => byPath.get(key) ?? null, GROUP_PAD);
     if (!rect) continue;
-    groupHalos.push({ ...spec, ...rect, label: groupLabel(spec) });
+    /* Lift the top edge to enclose the hovering control strip; bottom stays put,
+       so the y shrinks up and h grows by the same amount (issue #136). */
+    const framed = { x: rect.x, y: rect.y - GROUP_STRIP_HEADROOM, w: rect.w, h: rect.h + GROUP_STRIP_HEADROOM };
+    groupHalos.push({ ...spec, ...framed, label: groupLabel(spec) });
   }
 
   return {

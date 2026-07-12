@@ -8,6 +8,7 @@ import {
   collapsibleWorkerFiles,
   computeWorkerStacks,
   DEFAULT_WORKER_COLLAPSE_IDLE_MS,
+  groupWorkerStacks,
   isCollapseExempt,
   pipelineStageAgentPaths,
   protectedReviewerNodes,
@@ -134,6 +135,20 @@ describe("classifyWorker", () => {
 
   test("an owner-started root conversation is not worker-class", () => {
     const root = entry({ path: "/root" });
+    expect(classifyWorker(root, lineage())).toBeNull();
+  });
+
+  test("FAIL TOWARD COLLAPSED: a parented conversation the specific classes miss is still worker-class (#136)", () => {
+    /* A spawned claude *main* session (kind "session", not "subagent"), or any
+       worker whose flow/pipeline attachment can't be resolved by path, must still
+       fold — a classification miss defaults to collapsed, not to a full node. */
+    const spawnedMain = entry({ path: "/spawned", parent: "/root" });
+    expect(spawnedMain.kind).toBe("session");
+    expect(classifyWorker(spawnedMain, lineage())).toBe("spawned-descendant");
+  });
+
+  test("fail-toward-collapsed never overrides the parentless-root exemption (#136)", () => {
+    const root = entry({ path: "/root", parent: null });
     expect(classifyWorker(root, lineage())).toBeNull();
   });
 });
@@ -364,6 +379,44 @@ describe("computeWorkerStacks", () => {
       nowMs: NOW,
     });
     expect(stacks).toHaveLength(0);
+  });
+});
+
+describe("groupWorkerStacks — one stack per origin (#136)", () => {
+  const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
+
+  test("a pipeline's stage workers fold into one pipeline stack", () => {
+    const s1 = stale({ path: "/s1", parent: "/root" });
+    const s2 = stale({ path: "/s2", parent: "/root" });
+    const pipelineIdOf = (p: string) => (p === "/s1" || p === "/s2" ? "pipe1" : null);
+    const stacks = groupWorkerStacks([s1, s2], [], new Set(), { pipelineIdOf });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("pipeline");
+    expect(stacks[0]!.id).toBe("pipe1");
+    expect(stacks[0]!.items.map((f) => f.path).sort()).toEqual(["/s1", "/s2"]);
+  });
+
+  test("workers from one spawner fold into one origin stack, regardless of worktree", () => {
+    const a = stale({ path: "/a", kind: "subagent", parent: "/originX", worktree: "wt1" });
+    const b = stale({ path: "/b", kind: "subagent", parent: "/originX", worktree: "wt2" });
+    const stacks = groupWorkerStacks([a, b], [], new Set(), { originOf: () => "/originX" });
+    expect(stacks).toHaveLength(1);
+    expect(stacks[0]!.kind).toBe("origin");
+    expect(stacks[0]!.id).toBe("/originX");
+    expect(stacks[0]!.items).toHaveLength(2);
+  });
+
+  test("origin precedence: flow → pipeline → spawner → worktree", () => {
+    const flowWorker = stale({ path: "/rev" });
+    const pipeWorker = stale({ path: "/pw", parent: "/root" });
+    const spawnWorker = stale({ path: "/sw", kind: "subagent", parent: "/origin" });
+    const bareWorker = stale({ path: "/bw", kind: "subagent", parent: "/root", worktree: "wt" });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    const stacks = groupWorkerStacks([bareWorker, spawnWorker, pipeWorker, flowWorker], flows, new Set(), {
+      pipelineIdOf: (p) => (p === "/pw" ? "pipe1" : null),
+      originOf: (file) => (file.path === "/sw" ? "/origin" : null),
+    });
+    expect(stacks.map((s) => s.kind)).toEqual(["flow", "pipeline", "origin", "worktree"]);
   });
 });
 
