@@ -247,7 +247,6 @@ export function ProjectDashboard({
     for (const path of prefs.expanded) paths.add(path);
     return paths;
   }, [expandedFlowConversations, prefs.expanded]);
-  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows), [files, flows]);
   /* Worker-class auto-collapse (issue #112): a card is pinned against collapse
      by a GENUINE user placement (`explicitManual`, not the roots reconcile-roots
      auto-seeds into `prefs.manual`) or a manual expansion. */
@@ -255,6 +254,10 @@ export function ProjectDashboard({
     () => new Set([...board.explicitManual, ...prefs.expanded]),
     [board.explicitManual, prefs.expanded],
   );
+  /* Fold reviewer transcripts into their round decks — EXCEPT a pinned reviewer
+     of an inactive flow, which has no deck and must stay on the board as a node
+     so an explicit open from a worker stack has something to render (issue #112). */
+  const groupFiles = useMemo(() => foldClaimedReviewers(files, flows, pinnedPaths), [files, flows, pinnedPaths]);
   /* Collapse-eligible worker conversations, derived BEFORE layout so their
      quiet full columns are removed from the scheme rather than left as
      full-size cards (a spawned worker stays a column under an active parent

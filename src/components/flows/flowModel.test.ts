@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { Flow } from "@/lib/flows/types";
 import type { FileEntry } from "@/lib/types";
 
+import { buildBranchGroups } from "@/components/projectModel";
+
 import { claimedReviewerDescendantPaths, flowPresentation, foldClaimedReviewers, isActiveFlow } from "./flowModel";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
@@ -100,6 +102,35 @@ describe("reviewer folding", () => {
     expect(claimedReviewerDescendantPaths(files, active).size).toBe(0);
     // …but folding still consumes the full list, so the reviewer is re-homed.
     expect(foldClaimedReviewers(files, [closed]).map((file) => file.path)).toEqual(["/implementer", "/subtask"]);
+  });
+
+  test("a pinned reviewer of an inactive flow stays on the board; an active one still folds (issue #112)", () => {
+    const implementer = entry({ path: "/implementer" });
+    const reviewer = entry({ path: "/reviewer", parent: "/implementer" });
+    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    const active = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer" }); // reviewing
+    const pinned = new Set(["/reviewer"]);
+    // Inactive flow + pinned → the reviewer survives folding (it has no deck).
+    expect(foldClaimedReviewers([implementer, reviewer], [closed], pinned).map((file) => file.path)).toEqual(["/implementer", "/reviewer"]);
+    // Not pinned → still folded off the board.
+    expect(foldClaimedReviewers([implementer, reviewer], [closed]).map((file) => file.path)).toEqual(["/implementer"]);
+    // Active flow + pinned → still folded; its round deck is the destination.
+    expect(foldClaimedReviewers([implementer, reviewer], [active], pinned).map((file) => file.path)).toEqual(["/implementer"]);
+  });
+
+  test("an opened closed-flow reviewer has a renderable node destination (issue #112 finding)", () => {
+    /* The dashboard integration the DOM test missed: after a click pins the
+       reviewer, fold-keep leaves it in the file set, and buildBranchGroups
+       promotes the expanded reviewer into a real column instead of dropping it. */
+    const implementer = entry({ path: "/implementer", activity: "idle" });
+    const reviewer = entry({ path: "/reviewer", parent: "/implementer", activity: "idle" });
+    const closed = flow({ implementerPath: "/implementer", reviewerPath: "/reviewer", state: "closed", closedAt: "2026-07-06T00:00:00Z" });
+    const pinned = new Set(["/reviewer"]);
+
+    const kept = foldClaimedReviewers([implementer, reviewer], [closed], pinned);
+    const groups = buildBranchGroups(kept, "demo", { expandedConversationPaths: new Set(["/reviewer"]) });
+    const columns = groups.flatMap((group) => group.columns.map((column) => column.file.path));
+    expect(columns).toContain("/reviewer");
   });
 });
 
