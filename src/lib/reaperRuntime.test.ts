@@ -248,6 +248,59 @@ test("a dashboard-reconciled root remains eligible while an explicit standalone 
   }
 });
 
+test("a running manual root from a legacy persisted board remains protected", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-legacy-board-placement-"));
+  const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1362";
+  const pathname = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const boardFile = path.join(directory, "board.json");
+  const now = Date.parse("2026-07-12T12:00:00.000Z");
+  fs.writeFileSync(pathname, JSON.stringify({
+    type: "event_msg",
+    timestamp: new Date(now - 2 * 60 * 60_000).toISOString(),
+    payload: { type: "user_message", message: "launch prompt" },
+  }) + "\n");
+  fs.writeFileSync(boardFile, JSON.stringify({
+    projects: {
+      repo: {
+        schemaVersion: 1,
+        revision: 7,
+        updatedAt: new Date(now - 3 * 60 * 60_000).toISOString(),
+        pathAliases: {},
+        prefs: { manual: [pathname], hidden: [], expanded: [], viewMode: null, taskPanelOpen: false },
+      },
+    },
+  }));
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  setBoardFileForTests(boardFile);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: "/repo", role: "worker", title: "probe" });
+  const receipt = registry.beginSpawn("codex", "/repo", profile);
+  registry.completeSpawn(receipt.launchId, {
+    key: { engine: "codex", sessionId }, artifactPath: pathname, cwd: "/repo", accountId: "default",
+    launchProfile: profile, status: "idle", host: null, claimEpoch: 0, claimOwner: null, pendingAction: null,
+  });
+  registry.reconcileConversations([{
+    engine: "codex", path: pathname, accountId: "default", launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: new Date(now - 2 * 60 * 60_000).toISOString() },
+    observedAt: new Date(now - 2 * 60 * 60_000).toISOString(),
+  }]);
+
+  try {
+    const report = await runReaperCycle({
+      registry,
+      hosts: [runtimeHost(pathname)],
+      files: [runtimeFile(pathname, now / 1000 - 2 * 60 * 60)],
+      now,
+    });
+
+    expect(report.agents[0]).toMatchObject({ class: "probe", eligible: false });
+    expect(report.agents[0]?.protectedReasons).toContain("manual-board-placement");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a malformed transcript protects an otherwise eligible Viewer probe", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-malformed-authorship-"));
   const sessionId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1346";

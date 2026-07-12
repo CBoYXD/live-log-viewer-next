@@ -51,7 +51,7 @@ function read(filePath: string): BoardFileV1 {
     return { projects: Object.fromEntries(Object.entries(parsed.projects).map(([project, state]) => [project, {
       ...state,
       pathAliases: state.pathAliases ?? {},
-      explicitManual: state.explicitManual ?? [],
+      explicitManual: state.explicitManual ?? state.prefs.manual,
     }])) };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { projects: {} };
