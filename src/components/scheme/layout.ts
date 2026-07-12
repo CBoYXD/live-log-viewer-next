@@ -13,6 +13,7 @@ import {
   deriveGroups,
   derivePipelineLinks,
   groupRect,
+  hueFromId,
   type AgentLink,
   type SchemeGroupSpec,
 } from "./agentLinks";
@@ -184,6 +185,11 @@ export function buildSchemeLayout(
   flows: Flow[] = [],
   draftIds: string[] = [],
   pipelines: Pipeline[] = [],
+  /** Active project pipelines that must have a scheme surface even with no
+      materialized/placed stage node yet (issue #136): each such pipeline that
+      `deriveGroups` did not already frame gets a docked placeholder group
+      carrying its plan, so a provisioning pipeline is never surfaceless. */
+  surfacePipelines: Pipeline[] = [],
 ): SchemeLayout {
   const byAll = new Map(files.map((file) => [file.path, file]));
   const kids = kidsIndex(files);
@@ -442,6 +448,33 @@ export function buildSchemeLayout(
     groupHalos.push({ ...spec, ...framed, label: groupLabel(spec) });
   }
 
+  /* Docked placeholder groups for active pipelines `deriveGroups` did not frame
+     (no materialized/placed stage node): a memberless halo carrying the plan, so
+     a provisioning pipeline keeps a scheme surface after the band's removal
+     (issue #136). It dissolves the moment a real stage node places. */
+  const framedPipelineIds = new Set(groupHalos.filter((halo) => halo.pipeline).map((halo) => halo.id));
+  let dockRight = 0;
+  let dockBottom = 0;
+  let dockY = PAD;
+  for (const pipeline of surfacePipelines) {
+    if (pipeline.state === "closed" || framedPipelineIds.has(pipeline.id)) continue;
+    framedPipelineIds.add(pipeline.id);
+    const rect = { x: cursor, y: dockY, w: NODE_W + GROUP_PAD * 2, h: 150 };
+    groupHalos.push({
+      key: `group::pipeline::${pipeline.id}`,
+      kind: "pipeline",
+      id: pipeline.id,
+      hue: hueFromId(pipeline.id),
+      members: [],
+      pipeline,
+      ...rect,
+      label: cleanTitle(pipeline.task, 60),
+    });
+    dockY += rect.h + GROUP_GAP;
+    dockRight = Math.max(dockRight, rect.x + rect.w);
+    dockBottom = Math.max(dockBottom, rect.y + rect.h);
+  }
+
   return {
     nodes,
     edges,
@@ -455,8 +488,8 @@ export function buildSchemeLayout(
     ],
     drafts,
     byPath,
-    width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W),
+    width: Math.max(cursor - GROUP_GAP + PAD, PAD * 2 + NODE_W, dockRight + PAD),
     /* Extra room under the last generation for decks and expanded panels. */
-    height: bottom + PAD + 140,
+    height: Math.max(bottom + PAD + 140, dockBottom + PAD),
   };
 }

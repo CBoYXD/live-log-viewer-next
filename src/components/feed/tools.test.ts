@@ -31,6 +31,12 @@ describe("family, icon, and summary per table row", () => {
     expect(s.summary).not.toContain("⏎");
   });
 
+  test("write_stdin — a space-only keystroke is shown, never mislabeled a poll (finding 2)", () => {
+    const s = sum("write_stdin", { session_id: 12, chars: " " }, "codex");
+    expect(s.summary).toContain("␠");
+    expect(s.summary).not.toContain("poll");
+  });
+
   test("wait — names the session/cell it is tailing, as a shell card (#141)", () => {
     const s = sum("wait", { cell_id: "46", yield_time_ms: 30000 }, "codex");
     expect(s.family).toBe("shell");

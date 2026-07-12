@@ -195,8 +195,10 @@ export function summarizeTool(
      tailing — both instead of an opaque "session_id" blob. */
   if (tool === "write_stdin") {
     const session = idOf(args.session_id ?? args.cell_id);
-    /* Empty chars is a poll (no bytes sent), not an Enter keystroke (#141). */
-    const detail = formatStdinKeys(str(args.chars)) || tr("tools.stdinPoll");
+    const chars = str(args.chars);
+    /* A poll is exactly an empty payload (no bytes sent); any keystroke — even a
+       lone space — is rendered, never mistaken for a poll (finding 2 / #141). */
+    const detail = chars.length === 0 ? tr("tools.stdinPoll") : formatStdinKeys(chars);
     const summary = session ? `${tr("tools.stdin")} → ${session} · ${detail}` : `${tr("tools.stdin")} · ${detail}`;
     return { family: "shell", icon: FAMILY_ICON.shell, summary: summaryOf(summary), chips: session ? [chip(session, tr("tools.session"))] : [] };
   }

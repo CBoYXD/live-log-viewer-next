@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Flow } from "@/lib/flows/types";
+import type { Pipeline } from "@/lib/pipelines/types";
 import type { FileEntry } from "@/lib/types";
 
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
@@ -208,5 +209,34 @@ describe("buildSchemeLayout byPath", () => {
     expect(childNode.y).toBeGreaterThan(parentNode.y + parentNode.h);
     expect(layout.edges.some((edge) => edge.to === "/session/verify-mvp" && !edge.dashed)).toBe(true);
     expect(layout.stacks).toHaveLength(0);
+  });
+});
+
+describe("surface pipelines — memberless active pipelines keep a scheme surface (#136)", () => {
+  const pipeline = (over: Record<string, unknown>): Pipeline =>
+    ({
+      id: "p1", task: "Ship it", project: "demo", repoDir: "/r", worktreeDir: "/w", branch: "b", baseBranch: "main",
+      baseRef: "a", lastPassedCommit: "a", stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+      runs: [], cursor: null, state: "provisioning", pausedState: null, stateDetail: null, srcPath: null,
+      srcConversationId: null, createdAt: "1970", closedAt: null, ...over,
+    }) as unknown as Pipeline;
+
+  test("a provisioning pipeline with no stage node yet gets a placeholder group carrying its plan", () => {
+    const layout = buildSchemeLayout([], [], [], [], [], [], [pipeline({})]);
+    const halo = layout.groups.find((group) => group.kind === "pipeline" && group.id === "p1");
+    expect(halo).toBeTruthy();
+    expect(halo!.pipeline?.id).toBe("p1");
+    /* The placeholder is inside the world box so the camera/minimap can reach it. */
+    expect(halo!.x + halo!.w).toBeLessThanOrEqual(layout.width);
+    expect(halo!.y + halo!.h).toBeLessThanOrEqual(layout.height);
+  });
+
+  test("a pipeline already framed by a materialized stage node gets no duplicate placeholder", () => {
+    const root = entry({ path: "/stage" });
+    const group: BranchGroup = { key: "/stage", columns: [{ file: root, tasks: [] }], returnable: [], finished: [], smt: root.mtime, orphanTask: false };
+    const withNode = pipeline({ runs: [{ stageId: "build", attempts: [{ n: 1, state: "running", agentPath: "/stage", flowId: null } as unknown as Record<string, unknown>] }] });
+    const layout = buildSchemeLayout([group], [], [root], [], [], [withNode], [withNode]);
+    const halos = layout.groups.filter((g) => g.kind === "pipeline" && g.id === "p1");
+    expect(halos).toHaveLength(1);
   });
 });

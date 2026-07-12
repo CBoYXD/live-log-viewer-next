@@ -81,6 +81,9 @@ interface Props {
   /** Collapsed worker stacks (issue #136): drawn as one minimap dot per origin so
       folded workers read as a handful of dots, not an agent flood. */
   workerStacks?: WorkerStack[];
+  /** Active project pipelines that must keep a scheme surface even with no placed
+      stage node yet (issue #136): each gets a docked placeholder group + plan. */
+  surfacePipelines?: Pipeline[];
   /** Ids of not-yet-spawned conversation drafts drawn as full panes. */
   drafts: string[];
   /** Path to glide the camera to and ring briefly (set by openers). */
@@ -157,6 +160,7 @@ export function SchemeBoard({
   pipelines = [],
   tasks,
   workerStacks = [],
+  surfacePipelines = [],
   drafts,
   focus,
   ring,
@@ -189,7 +193,7 @@ export function SchemeBoard({
   }, [focus]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines), [groups, manual, files, flows, drafts, pipelines]);
+  const layout = useMemo(() => buildSchemeLayout(groups, manual, files, flows, drafts, pipelines, surfacePipelines), [groups, manual, files, flows, drafts, pipelines, surfacePipelines]);
 
   /* Selection keys are transcript paths, so the 10s poll relayout keeps the
      set for free; nodes that left the board are pruned out of the state

@@ -868,7 +868,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "bulk.flowStart": "Запустити {count} флоу",
 
   "minimap.title": "Мінімапа — клікни або тягни, щоб перейти",
-  "minimap.stacks": { one: "{count} згорнутий стек", other: "{count} згорнутих стеків" },
+  "minimap.stacks": { one: "{count} згорнутий стек", few: "{count} згорнуті стеки", many: "{count} згорнутих стеків", other: "{count} згорнутих стеків" },
 
   "plan.agentPlan": "План агента:",
   "plan.stepsAria": "План: {done} з {total} кроків",

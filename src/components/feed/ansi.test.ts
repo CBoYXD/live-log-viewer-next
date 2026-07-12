@@ -37,8 +37,17 @@ describe("decodeTerminalText", () => {
 });
 
 describe("formatStdinKeys", () => {
-  test("empty input is a poll, not a keystroke (returns empty for the caller to label)", () => {
+  test("empty input renders empty — the caller decides poll from chars.length", () => {
     expect(formatStdinKeys("")).toBe("");
+  });
+
+  test("whitespace-only input is preserved visibly, never dropped (finding 2)", () => {
+    expect(formatStdinKeys(" ")).toBe("␠");
+    expect(formatStdinKeys("  ")).toBe("␠␠");
+  });
+
+  test("spaces inside a payload are shown as ␠, none are trimmed away (finding 2)", () => {
+    expect(formatStdinKeys(" git push ")).toBe("␠git␠push␠");
   });
 
   test("an explicit Enter keystroke renders ⏎", () => {

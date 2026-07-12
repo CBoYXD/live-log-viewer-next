@@ -38,21 +38,21 @@ export function decodeTerminalText(text: string): string {
 /**
  * Human-readable rendering of the bytes `write_stdin` sent into a session:
  * control keys as their caret form (`^C`), newlines/returns as `⏎`, tabs as `⇥`,
- * so a card shows WHAT was typed rather than an invisible or raw-escape blob.
+ * spaces as `␠`, so a card shows WHAT was typed — including whitespace — rather
+ * than an invisible or raw-escape blob, and never silently drops sent bytes.
  *
- * Empty `chars` is NOT a keystroke: per the write_stdin contract it is a poll of
- * the session for more output without sending any bytes. It returns `""` so the
- * caller can label it a poll rather than falsely claiming an Enter was sent.
+ * This does NOT decide polling: an empty `chars` (a poll of the session, no bytes
+ * sent) is the caller's concern (`chars.length === 0`), so a space-only keystroke
+ * is rendered as `␠`, never mistaken for a poll (review finding 2).
  */
 export function formatStdinKeys(chars: string): string {
-  if (!chars) return "";
   return chars
     .replace(/\r\n|\r|\n/g, "⏎")
     .replace(/\t/g, "⇥")
+    .replace(/ /g, "␠")
     /* Remaining C0/DEL control bytes → caret notation (^A … ^_, ^?). */
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, (ch) => {
       const code = ch.charCodeAt(0);
       return "^" + String.fromCharCode(code === 127 ? 63 : code + 64);
-    })
-    .trim();
+    });
 }

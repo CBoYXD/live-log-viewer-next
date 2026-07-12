@@ -19,6 +19,7 @@ import { clearDraftStorage, draftParentConversationId, draftSrc, setDraftSrc, se
 import { planBoardConvergence, planClose } from "./projectBoardMutations";
 import { claimedReviewerDescendantPaths, foldClaimedReviewers, isActiveFlow } from "./flows/flowModel";
 import { PipelineDialog } from "./pipelines/PipelineDialog";
+import { pipelinesForProject } from "./pipelines/pipelineModel";
 import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
@@ -703,7 +704,13 @@ export function ProjectDashboard({
      canvas instead of hanging as lone stub nodes in the middle of it. */
   const dockedTasks = visibleGroups.filter((group) => group.orphanTask).map((group) => group.columns[0]!.file);
   const schemeGroups = visibleGroups.filter((group) => !group.orphanTask);
-  const hasNodes = schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0;
+  /* Active pipelines for this project (issue #136): the scheme must be available
+     — and carry each pipeline's plan — even before its first stage transcript
+     lands or after every stage node is hidden, now the persistent band is gone.
+     They dock as placeholder groups in the layout (buildSchemeLayout). */
+  const activePipelines = useMemo(() => pipelinesForProject(pipelines, project, files), [pipelines, project, files]);
+  const hasNodes =
+    schemeGroups.length > 0 || schemeManual.length > 0 || drafts.length > 0 || projectTasks.length > 0 || activePipelines.length > 0;
   /* Everything the project has on disk, freshest first. Powers the
      delete-project button and the fallback list of an empty scheme —
      transcripts whose tree lives elsewhere (scratchpad one-offs) build no
@@ -924,6 +931,7 @@ export function ProjectDashboard({
               files={files}
               flows={flows}
               pipelines={pipelines}
+              surfacePipelines={activePipelines}
               tasks={hasNodes ? projectTasks : []}
               drafts={hasNodes ? drafts : []}
               loaded={loaded}
@@ -960,6 +968,7 @@ export function ProjectDashboard({
                 files={files}
                 flows={flows}
                 pipelines={pipelines}
+                surfacePipelines={activePipelines}
                 tasks={hasNodes ? projectTasks : []}
                 workerStacks={workerStacks}
                 drafts={hasNodes ? drafts : []}
