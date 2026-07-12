@@ -866,6 +866,8 @@ export const en = {
   "plan.time": "time: {n} min",
   "plan.ctxTitle": "Context window: {pct}% used\n{used} of {window} tokens",
   "plan.ctxAria": "Context: {pct} percent of the window used",
+  "plan.ctxUnknownTitle": "Context window: unknown\n{used} tokens used",
+  "plan.ctxUnknownAria": "Context: {used} tokens used; window unknown",
   "plan.goalAria": "Session goal: {status}",
 
   // LimitsFooter
@@ -888,6 +890,7 @@ export const en = {
   "resources.free": "{amount} free",
   "resources.used": "{amount} used",
   "resources.stale": "resource data is stale: {stale}",
+  "resources.captured": "captured {age}",
   "resources.openAria": "Agent sessions and memory",
   "resources.title": "Agent sessions",
   "resources.total": "Σ {amount}",

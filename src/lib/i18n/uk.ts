@@ -834,6 +834,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "plan.time": "часу: {n} хв",
   "plan.ctxTitle": "Контекстне вікно: використано {pct}%\n{used} з {window} токенів",
   "plan.ctxAria": "Контекст: використано {pct} відсотків вікна",
+  "plan.ctxUnknownTitle": "Контекстне вікно: невідоме\nВикористано {used} токенів",
+  "plan.ctxUnknownAria": "Контекст: використано {used} токенів; розмір вікна невідомий",
   "plan.goalAria": "Ціль сесії: {status}",
 
   "limits.now": "зараз",
@@ -855,6 +857,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "resources.free": "{amount} вільно",
   "resources.used": "{amount} зайнято",
   "resources.stale": "дані про ресурси застарілі: {stale}",
+  "resources.captured": "знято {age}",
   "resources.openAria": "Сесії агентів і пам'ять",
   "resources.title": "Сесії агентів",
   "resources.total": "Σ {amount}",

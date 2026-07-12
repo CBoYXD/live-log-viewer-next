@@ -168,9 +168,10 @@ export type PlanStepStatus = "pending" | "in_progress" | "completed";
     assistant usage vs the model's window). */
 export interface CtxUsage {
   usedTokens: number;
-  windowTokens: number;
-  /** Rounded 0–100. */
-  pct: number;
+  /** Null when the transcript and known-model table cannot establish it. */
+  windowTokens: number | null;
+  /** Rounded 0–100, or null along with an unknown window. */
+  pct: number | null;
 }
 
 /** Codex thread goal (update_goal tool / thread_goal_updated events): the
