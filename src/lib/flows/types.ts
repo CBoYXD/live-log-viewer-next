@@ -43,16 +43,22 @@ export type Round = {
   n: number; // 1-based
   reviewerPath: string | null; // reviewer run's transcript path once known
   reviewerConversationId?: string | null;
-  /** Reviewer role frozen when this round is created/retried (issue #118). The
-      engine launches, recovers and polls the reviewer through this snapshot, so a
-      mid-flight `set-roles` (which mutates flow.roles.reviewer) can never change
-      the engine/model of a round already spawning or reviewing. Absent on rounds
+  /** Reviewer role frozen when this round is created/retried and re-frozen at
+      launch (issue #118 + #117). The engine launches, recovers and polls the
+      reviewer through this snapshot, so a mid-flight `set-roles` (which mutates
+      flow.roles.reviewer) can never change the engine/model of a round already
+      spawning or reviewing. A Codex-configured flow may persist its configured
+      Claude fallback here when every Codex account is exhausted. Absent on rounds
       persisted before this field existed — the engine falls back to
       flow.roles.reviewer for those. */
   reviewerRole?: RoleConfig | null;
   /** Engine account frozen when this round starts; subsequent polling and retry
       must never silently adopt a newly selected active account. */
   accountId?: string | null;
+  /** Engine-qualified accounts already tried for this logical round. */
+  attemptedAccounts?: string[];
+  /** Automatic no-verdict retries already consumed by this logical round. */
+  autoRetryCount?: number;
   /** Reviewer session/thread id, persisted as soon as it is known: claude
       pre-chooses it at spawn, codex reports it in the first `--json` event.
       Survives viewer restarts so the transcript claim stays deterministic. */
@@ -87,6 +93,8 @@ export type Flow = {
   implementerPath: string; // transcript path of the attached session
   implementerConversationId?: string | null;
   roles: Record<FlowRoleKey, RoleConfig>;
+  /** Configured cross-engine fallback for unattended reviewer launches. */
+  reviewerFallback?: RoleConfig | null;
   baseRef: string; // resolved git SHA captured at creation
   /** Pinned task specification and acceptance criteria shown to every reviewer. */
   spec?: string;

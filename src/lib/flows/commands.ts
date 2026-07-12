@@ -10,10 +10,10 @@ import { killPane, paneInfo } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
 import { isoNow, lastRound, newRound, sendToImplementer } from "./engine";
-import { forgetHeadlessReview } from "./exec";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview } from "./exec";
 import { resolveBaseRef } from "./git";
 import { kickoffPrompt } from "./prompts";
-import { loadFlows, loadPresets, saveFlows } from "./store";
+import { configuredReviewerFallback, loadFlows, loadPresets, saveFlows } from "./store";
 import type { CreateFlowRequest, Flow, PatchFlowRequest, RoleConfig, Round } from "./types";
 
 /**
@@ -118,6 +118,7 @@ export async function createFlowFromRequest(req: CreateFlowRequest, entries: Fil
     implementerPath: entry.path,
     implementerConversationId: entry.conversationId ?? null,
     roles,
+    reviewerFallback: roles.reviewer.engine === "codex" ? configuredReviewerFallback() : null,
     baseRef: base.sha,
     ...(normalizedSpec.spec ? { spec: normalizedSpec.spec } : {}),
     baseMode,
@@ -274,11 +275,16 @@ export function patchFlow(id: string, req: PatchFlowRequest): { flow?: Flow; err
   } else if (req.action === "retry-round") {
     if (flow.state !== "needs_decision" || !round) return { error: "flow cannot retry from its current state", status: 409 };
     forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+    clearHeadlessReviewArtifacts(flow.id, round.n);
     /* The note travels to the fresh reviewer. An omitted field keeps the round's
        existing note; a string replaces it; an explicit empty clears it. */
     const noteField = noteFieldFromRequest(req);
     Object.assign(round, {
       reviewerPath: null,
+      reviewerConversationId: null,
+      accountId: null,
+      attemptedAccounts: [],
+      autoRetryCount: 0,
       sessionId: null,
       reviewerPid: null,
       reviewerPane: null,

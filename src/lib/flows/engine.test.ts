@@ -9,7 +9,7 @@ import type { Flow } from "./types";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-flow-engine-test-"));
 const { tickFlows, persistTickFlows, flowTickBase, reviewerLaunchPersisted, abandonLaunch, relayFixOrPark } = await import("./engine");
-const { loadFlows, saveFlows } = await import("./store");
+const { loadFlows, outputPathFor, saveFlows, stderrPathFor, stdoutPathFor } = await import("./store");
 
 afterAll(() => {
   fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true });
@@ -112,6 +112,158 @@ test("review-flow heuristic claim skips a newer native Codex subagent", async ()
   expect(after.rounds[0]!.reviewerPath).toBe(root.path);
 });
 
+
+/* ── issue #117 reviewer-spawn hardening tests ── */
+
+test("headless review retries once after an exit without a verdict, then parks on a repeated failure", async () => {
+  const startedAt = new Date().toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("retry-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f117", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-retry",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: null, effort: "xhigh" },
+    },
+    reviewerFallback: { engine: "claude", model: "fable", effort: "high" },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "reviewing",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "codex", model: null, effort: "xhigh" },
+      accountId: "default",
+      attemptedAccounts: ["codex:default"],
+      autoRetryCount: 0,
+      sessionId: null,
+      reviewerPid: 999_999_999,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), "reviewer exited before producing a verdict\n");
+  fs.writeFileSync(stderrPathFor(flow.id, 1), "stale stderr\n");
+  fs.writeFileSync(outputPathFor(flow.id, 1), "stale last message without verdict\n");
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  const retrying = loadFlows()[0]!;
+  expect(retrying.state).toBe("spawning");
+  expect(retrying.stateDetail).toContain("retrying automatically");
+  expect(retrying.rounds[0]).toMatchObject({ autoRetryCount: 1, accountId: null, reviewerRole: null, attemptedAccounts: ["codex:default"], error: null });
+  expect(fs.existsSync(stdoutPathFor(flow.id, 1))).toBeFalse();
+  expect(fs.existsSync(stderrPathFor(flow.id, 1))).toBeFalse();
+  expect(fs.existsSync(outputPathFor(flow.id, 1))).toBeFalse();
+
+  retrying.rounds[0]!.spawnStartedAt = startedAt;
+  saveFlows([retrying]);
+  await tickFlows([implementer]);
+  const interrupted = loadFlows()[0]!;
+  expect(interrupted.state).toBe("needs_decision");
+  expect(interrupted.stateDetail).toBe("reviewer spawn was interrupted by a restart");
+
+  interrupted.state = "reviewing";
+  interrupted.rounds[0]!.reviewerPid = 999_999_999;
+  interrupted.rounds[0]!.spawnStartedAt = startedAt;
+  saveFlows([interrupted]);
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), "reviewer exited again\n");
+
+  await tickFlows([implementer]);
+  const parked = loadFlows()[0]!;
+  expect(parked.state).toBe("needs_decision");
+  expect(parked.stateDetail).toContain("reviewer verdict was unparseable");
+});
+
+test("restart recovery keeps a launched Claude fallback bound to its persisted effective role", async () => {
+  const startedAt = new Date().toISOString();
+  const cwd = "/repo";
+  const implementer = writeCodexEntry("fallback-restart-implementer.jsonl", { id: "019f421e-02e1-73e0-9b77-bebde063f118", cwd }, Date.now() / 1_000);
+  const flow: Flow = {
+    id: "flow-fallback-restart",
+    template: "implement-review-loop",
+    project: "repo",
+    cwd,
+    implementerPath: implementer.path,
+    roles: {
+      implementer: { engine: "codex", model: null, effort: "high" },
+      reviewer: { engine: "codex", model: "gpt-5.6-sol", effort: "xhigh" },
+    },
+    reviewerFallback: { engine: "claude", model: "fable", effort: "high" },
+    baseRef: "base",
+    baseMode: "head",
+    mode: "auto",
+    reviewerMode: "headless",
+    roundLimit: 5,
+    state: "spawning",
+    pausedState: null,
+    stateDetail: null,
+    rounds: [{
+      n: 1,
+      reviewerPath: null,
+      reviewerRole: { engine: "claude", model: "fable", effort: "high" },
+      accountId: "fable-main",
+      attemptedAccounts: ["codex:default", "claude:fable-main"],
+      autoRetryCount: 1,
+      sessionId: null,
+      reviewerPid: 999_999_999,
+      reviewerPane: null,
+      findingsPath: null,
+      triggeredBy: "marker",
+      readyNote: null,
+      verdict: null,
+      findingsCount: null,
+      startedAt,
+      spawnStartedAt: startedAt,
+      relayStartedAt: null,
+      reviewedAt: null,
+      relayedAt: null,
+      error: null,
+    }],
+    createdAt: startedAt,
+    closedAt: null,
+  };
+  fs.mkdirSync(path.dirname(stdoutPathFor(flow.id, 1)), { recursive: true });
+  fs.writeFileSync(stdoutPathFor(flow.id, 1), "VERDICT: APPROVE\n\nFallback review completed.\n");
+  saveFlows([flow]);
+
+  await tickFlows([implementer]);
+  expect(loadFlows()[0]).toMatchObject({
+    state: "reviewing",
+    rounds: [{ reviewerRole: { engine: "claude", model: "fable", effort: "high" }, accountId: "fable-main" }],
+  });
+
+  await tickFlows([implementer]);
+  expect(loadFlows()[0]).toMatchObject({
+    state: "relaying",
+    rounds: [{ verdict: "APPROVE", reviewerRole: { engine: "claude" } }],
+  });
+});
+
+/* ── issue #118 group/override concurrency tests ── */
+
 test("a mid-flight round is polled with its frozen reviewer role, not a raced set-roles (issue #118 Finding 1)", async () => {
   const startedAt = "2026-02-02T00:00:00.000Z";
   const started = Date.parse(startedAt) / 1000;
@@ -176,39 +328,6 @@ test("a mid-flight round is polled with its frozen reviewer role, not a raced se
      and the reviewer path would still be null. */
   expect(after.rounds[0]!.reviewerPath).toBe(reviewerCandidate.path);
   expect(after.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: null, effort: "xhigh" });
-});
-
-test("loadFlows migrates a legacy round without a reviewer snapshot (issue #118 Finding 1)", () => {
-  /* A round persisted before per-round snapshots existed: no reviewerRole. */
-  const legacy = {
-    id: "flow-legacy",
-    template: "implement-review-loop",
-    project: "repo",
-    cwd: "/repo",
-    implementerPath: "/impl",
-    roles: {
-      implementer: { engine: "codex", model: null, effort: "high" },
-      reviewer: { engine: "codex", model: null, effort: "xhigh" },
-    },
-    baseRef: "base",
-    baseMode: "head",
-    mode: "auto",
-    reviewerMode: "headless",
-    roundLimit: 5,
-    state: "reviewing",
-    pausedState: null,
-    stateDetail: null,
-    rounds: [{
-      n: 1, reviewerPath: "/rev", findingsPath: null, triggeredBy: "marker", readyNote: null,
-      verdict: null, findingsCount: null, startedAt: "2026-03-03T00:00:00Z", reviewedAt: null, relayedAt: null, error: null,
-    }],
-    createdAt: "2026-03-03T00:00:00Z",
-    closedAt: null,
-  } as unknown as Flow;
-  saveFlows([legacy]);
-  /* On load, the round is frozen to the flow's current reviewer role. */
-  const loaded = loadFlows()[0]!;
-  expect(loaded.rounds[0]!.reviewerRole).toEqual({ engine: "codex", model: null, effort: "xhigh" });
 });
 
 test("persistTickFlows never reverts a concurrent operator config change (issue #118 Finding 2)", () => {

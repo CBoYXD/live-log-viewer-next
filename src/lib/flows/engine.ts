@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { freshSpecFor, resumeSpecFor } from "@/lib/agent/cli";
 import { accountManager } from "@/lib/accounts/manager";
+import type { AccountContext } from "@/lib/accounts/contracts";
 import { deliverToTranscriptHost } from "@/lib/agent/transcriptHost";
 import { agentRegistry } from "@/lib/agent/registry";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
@@ -12,7 +13,7 @@ import { isShellCommand } from "@/lib/status";
 import { killPane, paneInfo, spawnAgentWithPrompt } from "@/lib/tmux";
 import type { FileEntry } from "@/lib/types";
 
-import { forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
+import { clearHeadlessReviewArtifacts, forgetHeadlessReview, headlessReviewStatus, startHeadlessReview } from "./exec";
 import {
   fallbackReviewFromTranscript,
   lastAssistantMessage,
@@ -23,12 +24,21 @@ import {
 import { relayPrompt, reviewerPrompt } from "./prompts";
 import { atomicWriteText, findingsPathFor, loadFlows, loadPresets, saveFlows } from "./store";
 import type { Flow, FlowPreset, FlowState, RoleConfig, Round } from "./types";
+import { chooseHeadlessReviewer, rateLimitStateDetail } from "./reviewerPolicy";
 
 const TERMINAL_STATES = new Set<FlowState>(["approved", "done_comment", "needs_decision", "closed"]);
 const READY_RE = /^REVIEW_READY:\s*(.*)$/m;
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 const store = globalThis as unknown as { __llvFlowTick?: boolean };
 const relayStartedThisProcess = new Set<string>();
+const MAX_HEADLESS_NO_VERDICT_RETRIES = 1;
+
+class ReviewerAccountsExhaustedError extends Error {
+  constructor(readonly resetsAt: number | null) {
+    super("reviewer rate limited; all accounts exhausted");
+    this.name = "ReviewerAccountsExhaustedError";
+  }
+}
 
 interface TickResult {
   flows: Flow[];
@@ -52,9 +62,11 @@ function cloneFlows(flows: Flow[]): Flow[] {
       implementer: { ...flow.roles.implementer },
       reviewer: { ...flow.roles.reviewer },
     },
+    reviewerFallback: flow.reviewerFallback ? { ...flow.reviewerFallback } : null,
     rounds: flow.rounds.map((round) => ({
       ...round,
-      reviewerRole: round.reviewerRole ? { ...round.reviewerRole } : round.reviewerRole,
+      reviewerRole: round.reviewerRole ? { ...round.reviewerRole } : null,
+      attemptedAccounts: [...(round.attemptedAccounts ?? [])],
     })),
   }));
 }
@@ -90,9 +102,12 @@ export function newRound(flow: Flow, triggeredBy: Round["triggeredBy"], readyNot
     n: flow.rounds.length + 1,
     reviewerPath: null,
     accountId: null,
+    attemptedAccounts: [],
+    autoRetryCount: 0,
     sessionId: null,
     /* Freeze the reviewer role now, so a later set-roles only affects the round
-       after this one. */
+       after this one (#118); prepareReviewerLaunch re-freezes it at launch to pick
+       up an override applied before the spawn. */
     reviewerRole: { ...flow.roles.reviewer },
     reviewerPane: null,
     findingsPath: null,
@@ -238,13 +253,43 @@ async function stopOrphanPane(round: Round): Promise<void> {
   }
 }
 
-async function launchReviewer(flow: Flow, round: Round, persistCheckpoint: () => void): Promise<void> {
+interface PreparedReviewerLaunch {
+  role: Flow["roles"]["reviewer"];
+  account: AccountContext;
+}
+
+/* Rate-limit-aware account + role selection (issue #117): pane reviewers use the
+   flow's reviewer role, headless reviewers pick an account excluding ones already
+   attempted this round, parking the flow when every account is exhausted. Freezes
+   round.reviewerRole here at launch, re-picking up an override applied before the
+   spawn (over the newRound snapshot). */
+function prepareReviewerLaunch(flow: Flow, round: Round): PreparedReviewerLaunch {
+  if (flow.reviewerMode === "pane") {
+    const role = flow.roles.reviewer;
+    const account = accountManager.resolveSpawn(role.engine, round.accountId);
+    round.accountId = account.accountId;
+    round.reviewerRole = { ...role };
+    return { role, account };
+  }
+  const decision = chooseHeadlessReviewer(
+    flow.roles.reviewer,
+    flow.reviewerFallback,
+    round.attemptedAccounts ?? [],
+    (engine, requestedId, excludedIds) => accountManager.resolveHeadlessSpawn(engine, requestedId, excludedIds),
+  );
+  if (decision.kind === "exhausted") throw new ReviewerAccountsExhaustedError(decision.resetsAt);
+  if (decision.kind === "unavailable") throw new Error("no authenticated reviewer account is available");
+  const { role, account } = decision;
+  round.reviewerRole = { ...role };
+  round.accountId = account.accountId;
+  const accountKey = `${account.engine}:${account.accountId}`;
+  round.attemptedAccounts = [...new Set([...(round.attemptedAccounts ?? []), accountKey])];
+  return { role, account };
+}
+
+async function launchReviewer(flow: Flow, round: Round, prepared: PreparedReviewerLaunch, persistCheckpoint: () => void): Promise<void> {
   const prompt = reviewerPrompt(flow, round);
-  /* The frozen per-round role, so a set-roles between spawn and launch cannot
-     retarget this reviewer's engine/model/effort. */
-  const role = reviewerRoleFor(flow, round);
-  const account = accountManager.resolveSpawn(role.engine, round.accountId);
-  round.accountId ??= account.accountId;
+  const { role, account } = prepared;
   flow.state = "reviewing";
   flow.stateDetail = null;
   if (flow.reviewerMode === "pane") {
@@ -305,6 +350,32 @@ async function launchReviewer(flow: Flow, round: Round, persistCheckpoint: () =>
     forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
     if (headlessDisk && headlessDisk.state !== "closed") abandonLaunch(flow.id, round.n);
   }
+}
+
+function retryHeadlessRound(flow: Flow, round: Round): void {
+  forgetHeadlessReview(flow.id, round.n, round.reviewerPid ?? null);
+  clearHeadlessReviewArtifacts(flow.id, round.n);
+  Object.assign(round, {
+    reviewerPath: null,
+    reviewerConversationId: null,
+    reviewerRole: null,
+    accountId: null,
+    sessionId: null,
+    reviewerPid: null,
+    reviewerPane: null,
+    findingsPath: null,
+    verdict: null,
+    findingsCount: null,
+    autoRetryCount: (round.autoRetryCount ?? 0) + 1,
+    startedAt: isoNow(),
+    spawnStartedAt: null,
+    relayStartedAt: null,
+    reviewedAt: null,
+    relayedAt: null,
+    error: null,
+  });
+  flow.state = "spawning";
+  flow.stateDetail = `reviewer produced no verdict; retrying automatically (${round.autoRetryCount}/${MAX_HEADLESS_NO_VERDICT_RETRIES})`;
 }
 
 async function relayFindings(flow: Flow, entriesByPath: Map<string, FileEntry>, round: Round): Promise<void> {
@@ -391,12 +462,20 @@ async function tickFlow(
       return JSON.stringify(flow) !== before;
     }
     try {
+      const prepared = prepareReviewerLaunch(flow, round);
       round.spawnStartedAt = isoNow();
       persistCheckpoint();
-      await launchReviewer(flow, round, persistCheckpoint);
+      /* launchReviewer persists again after spawning (for the ownership/orphan
+         check), so no extra checkpoint is needed here. */
+      await launchReviewer(flow, round, prepared, persistCheckpoint);
     } catch (error) {
-      round.error = error instanceof Error ? error.message : String(error);
-      markNeedsDecision(flow, round.error);
+      if (error instanceof ReviewerAccountsExhaustedError) {
+        round.error = null;
+        markNeedsDecision(flow, rateLimitStateDetail(error.resetsAt));
+      } else {
+        round.error = error instanceof Error ? error.message : String(error);
+        markNeedsDecision(flow, round.error);
+      }
     }
     return JSON.stringify(flow) !== before;
   }
@@ -425,6 +504,8 @@ async function tickFlow(
         const parsed = parseFindings(status.finalOutput);
         if (parsed) {
           applyVerdict(flow, round, parsed);
+        } else if ((round.autoRetryCount ?? 0) < MAX_HEADLESS_NO_VERDICT_RETRIES) {
+          retryHeadlessRound(flow, round);
         } else {
           const rawPath = round.findingsPath ?? findingsPathFor(flow.id, round.n);
           atomicWriteText(rawPath, status.finalOutput || status.stdout || status.stderr);
@@ -526,12 +607,17 @@ export function persistTickFlows(flows: Flow[], base: Map<string, FlowTickBase>)
       diskFlow.rounds.length !== start.roundsLen ||
       diskFlow.closedAt !== start.closedAt;
     if (takenOver) return diskFlow;
-    /* Fence each unstarted round's reviewer snapshot to the disk value: the tick
-       never writes an unspawned round's reviewerRole, so any difference is a
-       concurrent set-roles that must survive the merge. */
+    /* Fence an unstarted round's reviewer snapshot to the disk value ONLY when the
+       tick did not itself change it (comparing to the pre-tick base): then a
+       difference on disk is a concurrent set-roles that must survive. When the tick
+       DID change it (e.g. issue #117 retry nulls it to re-pick an account), the
+       tick's value wins. */
+    const baseFlow = JSON.parse(start.snapshot) as Flow;
     const rounds = tick.rounds.map((round, index) => {
       const diskRound = diskFlow.rounds[index];
-      return diskRound && round.spawnStartedAt == null && diskRound.reviewerRole !== undefined
+      const baseRound = baseFlow.rounds[index];
+      const tickKeptRole = JSON.stringify(round.reviewerRole ?? null) === JSON.stringify(baseRound?.reviewerRole ?? null);
+      return diskRound && round.spawnStartedAt == null && tickKeptRole && diskRound.reviewerRole !== undefined
         ? { ...round, reviewerRole: diskRound.reviewerRole }
         : round;
     });
