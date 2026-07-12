@@ -43,6 +43,17 @@ export interface TmuxHostEvidence {
   argv: string[];
 }
 
+export interface StructuredHostColumns {
+  kind: "codex-app-server" | "claude-broker";
+  endpoint: string;
+  process: ProcessIdentity | null;
+  eventCursor: number;
+  protocolVersion: string | null;
+  writerClaimEpoch: number;
+  activeTurnRef: string | null;
+  pendingAttention: string[];
+}
+
 /** Immutable tmux facts captured before readiness polling can expose a new
     pane to the observer. They are the only durable correlation between a
     launch receipt and an externally observed host. */
@@ -65,6 +76,8 @@ export interface AgentRegistryEntry {
   launchProfile?: LaunchProfile;
   status: AgentHostStatus;
   host: TmuxHostEvidence | null;
+  /** Structured hosting metadata lives beside legacy tmux evidence during migration. */
+  structuredHost?: StructuredHostColumns | null;
   claimEpoch: number;
   claimOwner: string | null;
   pendingAction: "spawn" | "resume" | "handoff" | null;
@@ -548,6 +561,36 @@ function normalizeGeneration(value: NativeGeneration): NativeGeneration {
   };
 }
 
+function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
+  if (!value || typeof value !== "object") return null;
+  const host = value as Partial<StructuredHostColumns>;
+  if (host.kind !== "codex-app-server" && host.kind !== "claude-broker") return null;
+  const processIdentity = host.process && typeof host.process === "object"
+    && typeof host.process.pid === "number"
+    ? { pid: host.process.pid, startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null }
+    : null;
+  return {
+    kind: host.kind,
+    endpoint: typeof host.endpoint === "string" ? host.endpoint : "",
+    process: processIdentity,
+    eventCursor: Number.isSafeInteger(host.eventCursor) && (host.eventCursor ?? -1) >= 0 ? host.eventCursor! : 0,
+    protocolVersion: typeof host.protocolVersion === "string" ? host.protocolVersion : null,
+    writerClaimEpoch: Number.isSafeInteger(host.writerClaimEpoch) && (host.writerClaimEpoch ?? -1) >= 0 ? host.writerClaimEpoch! : 0,
+    activeTurnRef: typeof host.activeTurnRef === "string" ? host.activeTurnRef : null,
+    pendingAttention: Array.isArray(host.pendingAttention)
+      ? host.pendingAttention.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
+function normalizeEntry(value: AgentRegistryEntry): AgentRegistryEntry {
+  return {
+    ...value,
+    host: value.host && typeof value.host === "object" && value.host.kind === "tmux" ? value.host : null,
+    structuredHost: normalizeStructuredHost(value.structuredHost),
+  };
+}
+
 function normalizeProviderReceipt(value: ProviderReceipt | null | undefined): ProviderReceipt | null {
   if (!value || typeof value !== "object") return null;
   return {
@@ -908,7 +951,7 @@ function readFile(filename: string): RegistryFile {
     const legacy = parsed.legacyResumePanes;
     return {
       version: 2,
-      entries: parsed.entries,
+      entries: Object.fromEntries(Object.entries(parsed.entries).map(([id, entry]) => [id, normalizeEntry(entry)])),
       receipts: Object.fromEntries(Object.entries(parsed.receipts).map(([id, receipt]) => [id, normalizeReceipt(receipt)])),
       lineageEdges: parsed.lineageEdges && typeof parsed.lineageEdges === "object" ? parsed.lineageEdges : {},
       importedResumePanes: parsed.importedResumePanes === true,
@@ -1401,6 +1444,21 @@ export class AgentRegistry {
       file.entries[keyId] = full;
       advanceMigrationScopeRevision(file, entry.key.engine, readinessBefore, changedHostPaths);
       return clone(full);
+    });
+  }
+
+  setStructuredHost(
+    key: SessionKey,
+    structuredHost: StructuredHostColumns | null,
+    status?: AgentHostStatus,
+  ): AgentRegistryEntry {
+    return this.mutate((file) => {
+      const entry = file.entries[sessionKeyId(key)];
+      if (!entry) throw new Error("agent registry entry is missing");
+      entry.structuredHost = structuredHost ? normalizeStructuredHost(structuredHost) : null;
+      if (status) entry.status = status;
+      entry.updatedAt = now();
+      return clone(entry);
     });
   }
 
