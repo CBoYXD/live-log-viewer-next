@@ -52,3 +52,24 @@ test("runtime event store rejects a non-contiguous append", () => {
     .toThrow("sequence gap after 1");
   expect(store.load("append-thread")).toEqual([{ kind: "session-status", status: "idle", seq: 1 }]);
 });
+
+test("runtime event store rejects every structurally invalid event variant", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-event-shapes-"));
+  const filename = path.join(directory, "shape-thread.jsonl");
+  const store = new FileRuntimeEventStore(directory);
+  const invalid = [
+    { kind: "unknown", seq: 1 },
+    { kind: "turn-started", seq: 1 },
+    { kind: "delta", turnId: "turn-1", seq: 1 },
+    { kind: "item", turnId: "turn-1", phase: "completed", seq: 1 },
+    { kind: "turn-ended", turnId: "turn-1", status: "success", seq: 1 },
+    { kind: "attention", id: "approval-1", attention: {}, seq: 1 },
+    { kind: "attention-resolved", id: "approval-1", resolution: "unknown", seq: 1 },
+    { kind: "limits", seq: 1 },
+    { kind: "session-status", status: "active", activeFlags: [42], seq: 1 },
+  ];
+  for (const event of invalid) {
+    fs.writeFileSync(filename, `${JSON.stringify(event)}\n`);
+    expect(() => store.load("shape-thread")).toThrow("invalid event");
+  }
+});

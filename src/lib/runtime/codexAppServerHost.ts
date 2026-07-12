@@ -156,6 +156,12 @@ function resumedActiveTurnId(value: unknown): string | null {
   return activeTurn ? stringField(activeTurn, "id") : null;
 }
 
+function itemReplayKey(value: unknown): string {
+  const id = stringField(value, "id");
+  if (id) return `id:${id}`;
+  return `json:${JSON.stringify(value)}`;
+}
+
 function threadStatus(value: unknown): ThreadStatus | null {
   const outer = record(value);
   const thread = record(outer?.thread);
@@ -273,8 +279,8 @@ export class CodexAppServerHost implements EngineHost {
       }
       provisional.identity.threadId = identity.threadId;
       provisional.identity.path = identity.path;
-      const restored = provisional.restoreEvents();
-      if (threadId && restored === 0) provisional.restoreThreadHistory(result);
+      provisional.restoreEvents();
+      if (threadId) provisional.reconcileThreadHistory(result);
       provisional.flushPreIdentityEvents();
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
       return provisional;
@@ -519,19 +525,41 @@ export class CodexAppServerHost implements EngineHost {
     this.emitThreadStatus(resumedStatus);
   }
 
-  private restoreThreadHistory(result: unknown): void {
+  private reconcileThreadHistory(result: unknown): void {
     for (const turn of resumedTurns(result)) {
       const turnId = stringField(turn, "id");
       if (!turnId) continue;
-      this.activeTurnId = turnId;
-      this.emit({ kind: "turn-started", turnId });
-      if (Array.isArray(turn.items)) {
-        for (const item of turn.items) this.emit({ kind: "item", turnId, item, phase: "completed" });
-      }
+      const turnEvents = this.events.filter((event) => "turnId" in event && event.turnId === turnId);
       const status = stringField(turn, "status");
+      const hasStarted = turnEvents.some((event) => event.kind === "turn-started");
+      if (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId)) {
+        this.activeTurnId = turnId;
+        this.emit({ kind: "turn-started", turnId });
+      }
+      const completedItems = new Map<string, number>();
+      for (const event of turnEvents) {
+        if (event.kind !== "item" || event.phase !== "completed") continue;
+        const key = itemReplayKey(event.item);
+        completedItems.set(key, (completedItems.get(key) ?? 0) + 1);
+      }
+      if (Array.isArray(turn.items)) {
+        for (const item of turn.items) {
+          const key = itemReplayKey(item);
+          const recorded = completedItems.get(key) ?? 0;
+          if (recorded > 0) {
+            completedItems.set(key, recorded - 1);
+            continue;
+          }
+          this.emit({ kind: "item", turnId, item, phase: "completed" });
+        }
+      }
       if (status === "completed" || status === "interrupted" || status === "failed" || status === "error") {
-        this.activeTurnId = null;
-        this.emit({ kind: "turn-ended", turnId, status: terminalStatus(status) });
+        const authoritativeStatus = terminalStatus(status);
+        const recordedTerminal = turnEvents.findLast((event) => event.kind === "turn-ended");
+        if (recordedTerminal?.kind !== "turn-ended" || recordedTerminal.status !== authoritativeStatus) {
+          this.emit({ kind: "turn-ended", turnId, status: authoritativeStatus });
+        }
+        if (this.activeTurnId === turnId) this.activeTurnId = null;
       }
     }
   }

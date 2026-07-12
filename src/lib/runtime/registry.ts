@@ -124,7 +124,9 @@ export async function adoptCodexRegistryHosts(
 ): Promise<AdoptedCodexHost[]> {
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.snapshot().entries).filter((entry) =>
-    entry.key.engine === "codex" && entry.structuredHost?.kind === "codex-app-server");
+    entry.key.engine === "codex"
+    && entry.status !== "unhosted"
+    && entry.structuredHost?.kind === "codex-app-server");
   const adopted: AdoptedCodexHost[] = [];
   for (const entry of rows) {
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };

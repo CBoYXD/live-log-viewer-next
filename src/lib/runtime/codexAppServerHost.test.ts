@@ -304,6 +304,40 @@ describe("CodexAppServerHost", () => {
     await host.release();
   });
 
+  test("completes partially recorded ledger history from the resume response", async () => {
+    const eventStore = new MemoryEventStore();
+    eventStore.append("completed-after-crash", { kind: "turn-started", turnId: "crashed-turn", seq: 1 });
+    const persistedItem = { type: "agentMessage", id: "response-item", text: "persisted response" };
+    const server = new FakeAppServer("completed-after-crash", "completed-after-crash", false, [{
+      id: "crashed-turn",
+      status: "completed",
+      items: [persistedItem],
+    }], { type: "idle" });
+    const host = await CodexAppServerHost.adopt("completed-after-crash", {
+      cwd: "/repo",
+      eventStore,
+      initialEventCursor: 1,
+      spawnProcess: fakeSpawn(server),
+    });
+    const replay = host.attach(1)[Symbol.asyncIterator]();
+    expect((await replay.next()).value).toEqual({
+      kind: "item",
+      turnId: "crashed-turn",
+      item: persistedItem,
+      phase: "completed",
+      seq: 2,
+    });
+    expect((await replay.next()).value).toEqual({
+      kind: "turn-ended",
+      turnId: "crashed-turn",
+      status: "completed",
+      seq: 3,
+    });
+    expect((await replay.next()).value).toEqual({ kind: "session-status", status: "idle", seq: 4 });
+    expect(await host.health()).toMatchObject({ status: "idle", activeTurnRef: null });
+    await host.release();
+  });
+
   test("restores the resumed active turn after a dead ledger", async () => {
     const eventStore = new MemoryEventStore();
     eventStore.append("active-after-crash", { kind: "turn-started", turnId: "stale-turn", seq: 1 });
@@ -515,6 +549,17 @@ describe("CodexAppServerHost", () => {
       claimOwner: null,
       structuredHost: { eventCursor: 17, process: null, activeTurnRef: null, pendingAttention: [] },
     });
+    let restarted = false;
+    const releasedRows = await adoptCodexRegistryHosts(
+      registry,
+      () => {
+        restarted = true;
+        return { cwd: "/repo", eventStore: new MemoryEventStore(), spawnProcess: fakeSpawn(new FakeAppServer("adopted-thread")) };
+      },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+    );
+    expect(releasedRows).toEqual([]);
+    expect(restarted).toBeFalse();
     const reclaimed = registry.claimStructuredHost(key, { pid: process.pid, startIdentity: "replacement-viewer" });
     expect(reclaimed?.claimEpoch).toBe(5);
   });

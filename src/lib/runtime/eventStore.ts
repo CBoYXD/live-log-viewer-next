@@ -11,9 +11,35 @@ export interface RuntimeEventStore {
 }
 
 function validEvent(value: unknown): value is RuntimeEvent {
-  if (!value || typeof value !== "object") return false;
-  const event = value as Partial<RuntimeEvent>;
-  return Number.isSafeInteger(event.seq) && event.seq! > 0 && typeof event.kind === "string";
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const event = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(event.seq) || (event.seq as number) <= 0) return false;
+  switch (event.kind) {
+    case "turn-started":
+      return typeof event.turnId === "string";
+    case "delta":
+      return typeof event.turnId === "string" && typeof event.text === "string";
+    case "item":
+      return (typeof event.turnId === "string" || event.turnId === null)
+        && (event.phase === "started" || event.phase === "completed")
+        && Object.hasOwn(event, "item");
+    case "turn-ended":
+      return typeof event.turnId === "string"
+        && (event.status === "completed" || event.status === "interrupted" || event.status === "error");
+    case "attention":
+      return typeof event.id === "string" && typeof event.method === "string" && Object.hasOwn(event, "attention");
+    case "attention-resolved":
+      return typeof event.id === "string"
+        && (event.resolution === "answered" || event.resolution === "host-restarted" || event.resolution === "server-resolved");
+    case "limits":
+      return Object.hasOwn(event, "snapshot");
+    case "session-status":
+      return (event.status === "active" || event.status === "idle" || event.status === "unhosted" || event.status === "dead")
+        && (event.activeFlags === undefined
+          || (Array.isArray(event.activeFlags) && event.activeFlags.every((flag) => typeof flag === "string")));
+    default:
+      return false;
+  }
 }
 
 export class FileRuntimeEventStore implements RuntimeEventStore {
