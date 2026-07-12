@@ -67,6 +67,7 @@ export interface TranscriptHostConflict {
   conversationId: string | null;
   paths: string[];
   paneIds: string[];
+  quarantinedPaneIds?: string[];
 }
 
 /** Display target exposed by resource observation and route lookup for one
@@ -214,26 +215,34 @@ function canonicalFrom(hosts: ObservedHost[], pathname: string): TranscriptHost 
   return candidates[0]?.host ?? null;
 }
 
-function hostConflicts(hosts: ObservedHost[], conversationIdForPath: (pathname: string) => string | null): TranscriptHostConflict[] {
-  const groups = new Map<string, { conversationId: string | null; paths: Set<string>; paneIds: Set<string> }>();
+function hostConflicts(
+  hosts: ObservedHost[],
+  conversationIdForPath: (pathname: string) => string | null,
+  quarantinedPaneIds = new Set<string>(),
+): TranscriptHostConflict[] {
+  const groups = new Map<string, { conversationId: string | null; paths: Set<string>; paneIds: Set<string>; quarantinedPaneIds: Set<string> }>();
   for (const host of hosts) {
     const paths = new Set(host.claims.map((claim) => claim.pathname));
     const conversationIds = [...new Set([...paths].map(conversationIdForPath).filter((value): value is string => value !== null))];
     const keys = conversationIds.length > 0 ? conversationIds.map((id) => `conversation:${id}`) : [...paths].map((pathname) => `path:${pathname}`);
     for (const key of keys) {
       const conversationId = key.startsWith("conversation:") ? key.slice("conversation:".length) : null;
-      const group = groups.get(key) ?? { conversationId, paths: new Set<string>(), paneIds: new Set<string>() };
+      const group = groups.get(key) ?? { conversationId, paths: new Set<string>(), paneIds: new Set<string>(), quarantinedPaneIds: new Set<string>() };
       for (const pathname of paths) group.paths.add(pathname);
       group.paneIds.add(host.paneId);
+      if (quarantinedPaneIds.has(host.paneId)) group.quarantinedPaneIds.add(host.paneId);
       groups.set(key, group);
     }
   }
   return [...groups.values()]
-    .filter((group) => group.paneIds.size > 1)
+    .filter((group) => group.paneIds.size > 1 || group.quarantinedPaneIds.size > 0)
     .map((group) => ({
       conversationId: group.conversationId,
       paths: [...group.paths].sort(),
       paneIds: [...group.paneIds].sort((left, right) => paneNumber(left) - paneNumber(right)),
+      ...(group.quarantinedPaneIds.size > 0
+        ? { quarantinedPaneIds: [...group.quarantinedPaneIds].sort((left, right) => paneNumber(left) - paneNumber(right)) }
+        : {}),
     }))
     .sort((left, right) => (left.conversationId ?? left.paths[0] ?? "").localeCompare(right.conversationId ?? right.paths[0] ?? ""));
 }
@@ -245,8 +254,8 @@ function conflictForPath(snapshot: TranscriptHostSnapshot, pathname: string, con
 }
 
 class TranscriptHostConflictError extends Error {
-  constructor() {
-    super("conversation has multiple live panes");
+  constructor(conflict: TranscriptHostConflict) {
+    super(conflict.quarantinedPaneIds?.length ? "conversation has a quarantined live pane" : "conversation has multiple live panes");
     this.name = "TranscriptHostConflictError";
   }
 }
@@ -330,9 +339,9 @@ export function createTranscriptHostResolver(
     const quarantinedPaneIds = new Set(reconciliation?.quarantinedPaneIds ?? []);
     const eligibleHosts = hosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
 
-    const conflicts = hostConflicts(eligibleHosts, conversationIdForPath);
+    const conflicts = hostConflicts(hosts, conversationIdForPath, quarantinedPaneIds);
     const snapshot: TranscriptHostSnapshot = {
-      hosts: eligibleHosts,
+      hosts,
       observation: "available",
       conflicts,
       canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),
@@ -358,7 +367,8 @@ export function createTranscriptHostResolver(
     const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
     let snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
-    if (conflictForPath(snapshot, input.entry.path, conversationIdForPath)) throw new TranscriptHostConflictError();
+    const initialConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
+    if (initialConflict) throw new TranscriptHostConflictError(initialConflict);
     let host = snapshot.canonicalFor(input.entry.path);
     if (host && (await revalidate(host, input.entry))) return { host, resumed: false };
 
@@ -368,7 +378,8 @@ export function createTranscriptHostResolver(
        closes that race before a controlled resume is allowed. */
     snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
-    if (conflictForPath(snapshot, input.entry.path, conversationIdForPath)) throw new TranscriptHostConflictError();
+    const refreshedConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
+    if (refreshedConflict) throw new TranscriptHostConflictError(refreshedConflict);
     host = snapshot.canonicalFor(input.entry.path);
     /* A PID that changed process identity in the same pane slot can be a
        recycled scanner claim for another conversation. The fresh observation
@@ -389,7 +400,8 @@ export function createTranscriptHostResolver(
     await dependencies.remember(input.entry.path, input.spec, spawned);
     snapshot = await observe(true);
     if (snapshot.observation === "failure") throw new Error(`tmux pane observation failed: ${snapshot.observationError}`);
-    if (conflictForPath(snapshot, input.entry.path, conversationIdForPath)) throw new TranscriptHostConflictError();
+    const resumedConflict = conflictForPath(snapshot, input.entry.path, conversationIdForPath);
+    if (resumedConflict) throw new TranscriptHostConflictError(resumedConflict);
     host = snapshot.canonicalFor(input.entry.path);
     if (!host || !(await revalidate(host, input.entry))) {
       throw new Error("resumed agent host could not be identified safely");

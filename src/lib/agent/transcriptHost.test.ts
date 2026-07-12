@@ -213,13 +213,32 @@ describe("transcript host resolver", () => {
     expect(outcome).toEqual({
       ok: false,
       outcome: "failed",
-      error: "resumed agent host could not be identified safely",
-      status: 500,
+      error: "conversation has a quarantined live pane",
+      status: 409,
     });
     expect(state.resumeBegan).toBe(true);
     expect(state.spawnCalls).toBe(1);
     expect(state.deliverAttempts).toBe(0);
     expect(state.delivered).toEqual([]);
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+    expect(snapshot.hosts.map((host) => host.paneId)).toEqual(["%9"]);
+    expect(snapshot.canonicalFor(PATHNAME)).toBeNull();
+    expect(snapshot.conflicts).toEqual([{
+      conversationId: "conversation_test",
+      paths: [PATHNAME],
+      paneIds: ["%9"],
+      quarantinedPaneIds: ["%9"],
+    }]);
+
+    expect(await resolver.deliverToTranscriptHost({ entry: state.entry, spec, payload: "retry stays fenced" })).toEqual({
+      ok: false,
+      outcome: "failed",
+      error: "conversation has a quarantined live pane",
+      status: 409,
+    });
+    expect(state.spawnCalls).toBe(1);
+    expect(state.deliverAttempts).toBe(0);
   });
 
   test("surfaces duplicate live panes for one conversation and refuses a third resume", async () => {
