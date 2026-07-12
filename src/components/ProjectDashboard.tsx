@@ -24,7 +24,7 @@ import { buildSchemeLayout } from "./scheme/layout";
 import { collapsibleWorkerFiles, groupWorkerStacks, pipelineOriginOf, pipelineStagePipelineIds, protectedReviewerNodes } from "./scheme/workerCollapse";
 import { WorkerStacks } from "./WorkerStacks";
 import { clearWorkflowDraftStorage } from "./workflows/WorkflowDraftPane";
-import { isWorkflowDraftId } from "./workflows/workflowModel";
+import { dropLegacyWorkflowDrafts, isWorkflowDraftId } from "./workflows/workflowModel";
 import { TaskPanel } from "./tasks/TaskPanel";
 import { TaskToastHost } from "./tasks/taskToast";
 import { MobileFocusView } from "./mobile/MobileFocusView";
@@ -104,7 +104,16 @@ const draftsKey = (project: string) => `llvDrafts:${project}`;
 function loadDrafts(project: string): string[] {
   try {
     const raw = JSON.parse(sessionStorage.getItem(draftsKey(project)) ?? "[]") as unknown;
-    return Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+    const ids = Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string") : [];
+    /* Legacy workflow drafts (wf-*) are fenced (#136): a persisted one must not
+       relaunch the removed WorkflowDraftPane through saved tab state. Drop them on
+       restore and purge their pane storage + the rewritten list, for good. */
+    const kept = dropLegacyWorkflowDrafts(ids);
+    if (kept.length !== ids.length) {
+      for (const id of ids) if (isWorkflowDraftId(id)) clearWorkflowDraftStorage(id);
+      sessionStorage.setItem(draftsKey(project), JSON.stringify(kept));
+    }
+    return kept;
   } catch {
     return [];
   }
