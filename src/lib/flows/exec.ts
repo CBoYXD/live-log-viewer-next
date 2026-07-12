@@ -326,6 +326,14 @@ export function headlessReviewStatus(
   if (!run && pid === null && !stdout && !stderr && !artifactOutput && !persisted.spawnStartedAt) return null;
   const startedAt = run?.startedAt ?? Date.parse(persisted.spawnStartedAt ?? "");
   const elapsed = Number.isFinite(startedAt) ? Date.now() - startedAt : 0;
+  const finalOutput = artifactOutput || scanned.lastAgentMessage || (engine === "claude" ? stdout.trim() : "");
+  /* A restart loses the ChildProcess handle. When the pid is still live and its
+     start identity was never checkpointed, ownership cannot be reconstructed
+     safely: the pid may belong to the reviewer or may have been reused. Park
+     this round before interim stdout can make it look completed and retryable. */
+  if (!run && pid !== null && !identity && pidAlive(pid)) {
+    return { status: "lost", stdout, stderr, finalOutput, sessionId: scanned.sessionId, processIdentity: null, code: null, signal: null };
+  }
   /* The in-memory ChildProcess handle is authoritative until its close/error
      event. A null identity here is a transient /proc race, so it cannot turn a
      running reviewer into a completed no-verdict attempt. */
@@ -336,7 +344,6 @@ export function headlessReviewStatus(
     if (!run && elapsed >= timeoutMs && pid) killTree(pid, identity);
     return { status: "running", stdout, stderr, finalOutput: "", sessionId: scanned.sessionId, processIdentity: identity, code: null, signal: null };
   }
-  const finalOutput = artifactOutput || scanned.lastAgentMessage || (engine === "claude" ? stdout.trim() : "");
   /* A persisted launch with no owned process handle can still belong to a live
      reviewer whose pid checkpoint was lost. Only a completed last-message
      artifact proves Codex exited; interim stdout must never authorize retry. */

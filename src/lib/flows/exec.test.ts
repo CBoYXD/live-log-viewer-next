@@ -242,6 +242,27 @@ test("restart reconstruction: alive pid reports running, dead pid yields the art
   expect(done?.finalOutput).toBe("VERDICT: APPROVE\n\nShip it.");
 });
 
+test("restart reconstruction parks a live persisted pid whose identity was never checkpointed", () => {
+  const pid = spawnSleeper();
+  try {
+    writeArtifacts("flow-restart-missing-identity", 1, JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "Reviewer is still investigating." },
+    }));
+    const status = headlessReviewStatus("flow-restart-missing-identity", 1, {
+      reviewerPid: pid,
+      reviewerIdentity: null,
+      spawnStartedAt: new Date().toISOString(),
+    }, "codex");
+
+    expect(status?.status).toBe("lost");
+    expect(status?.finalOutput).toBe("Reviewer is still investigating.");
+    expect(() => process.kill(pid, 0)).not.toThrow();
+  } finally {
+    process.kill(pid, "SIGKILL");
+  }
+});
+
 test("restart reconstruction rejects a live pid whose process identity changed", () => {
   const pid = spawnSleeper();
   try {
