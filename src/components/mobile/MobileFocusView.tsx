@@ -541,7 +541,7 @@ function StripChip({
       <button
         ref={chipRef}
         type="button"
-        className={`flex h-7 shrink-0 items-center gap-1 rounded-full border px-2.5 text-[11px] font-semibold ${
+        className={`flex h-11 shrink-0 items-center gap-1 rounded-full border px-3 text-[11px] font-semibold ${
           active ? "border-accent/60 bg-accent/10 text-ink" : "border-dashed border-line bg-bg text-dim"
         }`}
         onClick={onClick}
@@ -559,7 +559,7 @@ function StripChip({
     <button
       ref={chipRef}
       type="button"
-      className={`flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11px] font-semibold ${
+      className={`flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[11px] font-semibold ${
         active
           ? "border-accent/60 bg-accent/10 text-ink"
           : waiting
