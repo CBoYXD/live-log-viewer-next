@@ -360,10 +360,23 @@ function viewerFlowMessageAllowance(flows: Flow[], pathname: string): number {
    completed worker receipt already grants the launch allowance via
    `hasViewerWorkerLaunchPrompt`. Adding a second allowance would let a pane
    reviewer carrying one automated prompt AND one genuine owner follow-up scan
-   clean, collapsing an owner-touched card — a hard-constraint violation. */
+   clean, collapsing an owner-touched card — a hard-constraint violation.
+
+   The allowance is granted only with DETERMINISTIC launch provenance: the
+   round's reviewer transcript basename must contain the round's own sessionId
+   (claude pre-chooses it at spawn, codex reports it in the first event). A
+   reviewerPath claimed by the same-CWD/latest-mtime heuristic
+   (`maybeClaimReviewerPathByHeuristic`) can misattribute an owner-created
+   transcript; discounting there would eat that owner's first genuine message.
+   Absent/mismatched sessionId → no allowance → the automated prompt counts and
+   the path stays protected (the safe side). */
 function viewerReviewerLaunchAllowance(flows: Flow[], pathname: string): number {
   for (const flow of flows) {
-    if (flow.reviewerMode === "headless" && flow.rounds.some((round) => round.reviewerPath === pathname)) return 1;
+    if (flow.reviewerMode !== "headless") continue;
+    for (const round of flow.rounds) {
+      if (round.reviewerPath !== pathname || !round.sessionId) continue;
+      if (path.basename(pathname).includes(round.sessionId)) return 1;
+    }
   }
   return 0;
 }

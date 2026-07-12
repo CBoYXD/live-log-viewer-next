@@ -90,18 +90,23 @@ const ctx = (over: Partial<Parameters<typeof shouldCollapseWorker>[1]> = {}) => 
 });
 
 describe("classifyWorker", () => {
-  test("flow reviewer and agent-spawned implementer annotations win", () => {
-    const reviewer = entry({ path: "/rev", flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
-    const impl = entry({ path: "/impl", parent: "/orchestrator", flow: { flowId: "f1", flowRole: "implementer", round: null } });
-    expect(classifyWorker(reviewer, lineage())).toBe("flow-reviewer");
-    expect(classifyWorker(impl, lineage())).toBe("flow-implementer");
+  test("roles are derived from the flows list by path, NOT from file.flow (integration seam)", () => {
+    /* /api/files ships raw scanner entries with no `file.flow` annotation, so
+       classification must match flow.implementerPath / round.reviewerPath. */
+    const reviewer = entry({ path: "/rev" });
+    const impl = entry({ path: "/impl", parent: "/orchestrator" });
+    const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev" })] })];
+    expect(reviewer.flow).toBeUndefined();
+    expect(classifyWorker(reviewer, lineage(flows))).toBe("flow-reviewer");
+    expect(classifyWorker(impl, lineage(flows))).toBe("flow-implementer");
   });
 
   test("a parentless flow implementer is an owner root, never worker-class", () => {
     /* The owner started a top-level conversation and then a flow on it; keep it
        out of scope (and off the fragile authorship discount). */
-    const impl = entry({ path: "/impl", parent: null, flow: { flowId: "f1", flowRole: "implementer", round: null } });
-    expect(classifyWorker(impl, lineage())).toBeNull();
+    const impl = entry({ path: "/impl", parent: null });
+    const flows = [flow({ id: "f1", implementerPath: "/impl" })];
+    expect(classifyWorker(impl, lineage(flows))).toBeNull();
   });
 
   test("pipeline stage ownership is worker-class", () => {
@@ -222,9 +227,10 @@ describe("shouldCollapseWorker", () => {
       parent: "/orchestrator",
       mtime: NOW_SEC - 24 * 3600, // a day idle
       userAuthored: true,
-      flow: { flowId: "f1", flowRole: "implementer", round: null },
     });
-    expect(shouldCollapseWorker(impl, ctx())).toBe(false);
+    // A closed flow would otherwise make its implementer a collapse candidate.
+    const flows = [flow({ id: "f1", implementerPath: "/impl", state: "closed", closedAt: "2026-07-05T02:00:00Z" })];
+    expect(shouldCollapseWorker(impl, ctx({ flows }))).toBe(false);
   });
 
   test("a reviewer still reviewing is not collapsed, fresh or idle", () => {
@@ -302,10 +308,13 @@ describe("collapsibleWorkerFiles — subtree guard", () => {
 describe("computeWorkerStacks", () => {
   const stale = (over: Partial<FileEntry> & { path: string }) => entry({ mtime: NOW_SEC - 30 * 60, ...over });
 
-  test("groups collapse-eligible workers per flow, then per worktree", () => {
-    const flowWorker = stale({ path: "/rev", flow: { flowId: "f1", flowRole: "reviewer", round: 1 } });
+  test("groups collapse-eligible workers per flow, then per worktree (from flows, no file.flow)", () => {
+    // Files carry NO flow annotation (as /api/files serves them); classification
+    // and grouping both derive from the flows list by path.
+    const flowWorker = stale({ path: "/rev" });
     const worktreeWorker = stale({ path: "/w", kind: "subagent", parent: "/root", worktree: "feat" });
     const flows = [flow({ id: "f1", implementerPath: "/impl", rounds: [round({ reviewerPath: "/rev", verdict: "APPROVE" })] })];
+    expect(flowWorker.flow).toBeUndefined();
     const stacks = computeWorkerStacks({
       files: [flowWorker, worktreeWorker],
       project: "demo",

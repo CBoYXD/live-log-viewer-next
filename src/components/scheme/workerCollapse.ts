@@ -59,34 +59,51 @@ export interface WorkerLineage {
   pipelineStagePaths: ReadonlySet<string>;
 }
 
+interface FlowMembership {
+  role: "reviewer" | "implementer";
+  flow: Flow;
+  round: Round | null;
+}
+
 /**
- * Worker lineage of a conversation, or null for an owner-started root. Order
- * matters: a reviewer annotation is unambiguous automation (the flow engine
- * spawns it), then a flow implementer — but ONLY when it was itself spawned by
- * an agent (`file.parent` set). A parentless flow implementer is a top-level
- * conversation the OWNER created and then started a flow on; the issue keeps
- * "root conversations the owner started" out of scope, and this is also the safe
- * side of the authorship discount — an owner's first composer prompt can be
- * discounted as an automated launch, so topology, not message-counting, decides
- * ownership here. Then pipeline stage ownership, then generic spawned lineage.
+ * Flow role of a transcript, derived from the FLOWS list by matching paths —
+ * never from a `file.flow` annotation. `/api/files` serializes raw scanner
+ * entries and does NOT run `annotateFlowEntries` (only the flow-engine tick
+ * does), so `file.flow` is absent on the board's files and cannot be trusted;
+ * matching `flow.implementerPath` / `round.reviewerPath` is the same resolution
+ * the rest of the board already uses (flowByImplementer, claimedReviewerPaths).
+ * A reviewer match wins over an implementer match.
  */
-export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
-  if (file.flow?.flowRole === "reviewer") return "flow-reviewer";
-  if (file.flow?.flowRole === "implementer") return file.parent ? "flow-implementer" : null;
-  if (lineage.pipelineStagePaths.has(file.path)) return "pipeline-stage";
-  if (isChildConversation(file)) return "spawned-worker";
+function flowMembership(file: FileEntry, flows: readonly Flow[]): FlowMembership | null {
+  for (const flow of flows) {
+    for (const round of flow.rounds) {
+      if (round.reviewerPath === file.path) return { role: "reviewer", flow, round };
+    }
+  }
+  for (const flow of flows) {
+    if (flow.implementerPath === file.path) return { role: "implementer", flow, round: null };
+  }
   return null;
 }
 
-function roundForReviewer(file: FileEntry, flows: readonly Flow[]): Round | null {
-  const annotation = file.flow;
-  if (!annotation) return null;
-  const flow = flows.find((candidate) => candidate.id === annotation.flowId);
-  if (!flow) return null;
-  return (
-    flow.rounds.find((round) => round.reviewerPath === file.path)
-    ?? (annotation.round !== null ? flow.rounds.find((round) => round.n === annotation.round) ?? null : null)
-  );
+/**
+ * Worker lineage of a conversation, or null for an owner-started root. Order
+ * matters: a reviewer is unambiguous automation (the flow engine spawns it),
+ * then a flow implementer — but ONLY when it was itself spawned by an agent
+ * (`file.parent` set). A parentless flow implementer is a top-level conversation
+ * the OWNER created and then started a flow on; the issue keeps "root
+ * conversations the owner started" out of scope, and this is also the safe side
+ * of the authorship discount — an owner's first composer prompt can be discounted
+ * as an automated launch, so topology, not message-counting, decides ownership
+ * here. Then pipeline stage ownership, then generic spawned lineage.
+ */
+export function classifyWorker(file: FileEntry, lineage: WorkerLineage): WorkerClass | null {
+  const membership = flowMembership(file, lineage.flows);
+  if (membership?.role === "reviewer") return "flow-reviewer";
+  if (membership?.role === "implementer") return file.parent ? "flow-implementer" : null;
+  if (lineage.pipelineStagePaths.has(file.path)) return "pipeline-stage";
+  if (isChildConversation(file)) return "spawned-worker";
+  return null;
 }
 
 /** A reviewer round is finished the moment it reaches a verdict or a terminal
@@ -132,20 +149,19 @@ export function shouldCollapseWorker(file: FileEntry, context: CollapseContext):
   const klass = classifyWorker(file, context);
   if (!klass) return false;
   if (isCollapseExempt(file, context)) return false;
+  const membership = flowMembership(file, context.flows);
   if (klass === "flow-reviewer") {
     /* Reviewers collapse exactly on verdict, never on the idle window: a
        still-reviewing round stays put (it is the live loop), and a finished
        round folds immediately. */
-    const round = roundForReviewer(file, context.flows);
-    return Boolean(round && reviewerRoundFinished(round));
+    return Boolean(membership?.round && reviewerRoundFinished(membership.round));
   }
   if (klass === "flow-implementer") {
     /* The implementer anchors its flow on the board. While the flow is open —
        spawning, reviewing, or awaiting the owner's decision — it must stay
        expanded even if its own transcript is momentarily idle. Only a closed
        flow's implementer is a candidate, and then only past the idle window. */
-    const flow = context.flows.find((candidate) => candidate.id === file.flow!.flowId);
-    if (!flow || flow.state !== "closed") return false;
+    if (!membership || membership.flow.state !== "closed") return false;
   }
   return context.nowMs - file.mtime * 1000 >= context.idleMs;
 }
@@ -160,8 +176,16 @@ export interface WorkerStack {
   items: FileEntry[];
 }
 
-function stackKeyFor(file: FileEntry): { key: string; kind: "flow" | "worktree"; id: string } {
-  if (file.flow) return { key: "wstack::flow::" + file.flow.flowId, kind: "flow", id: file.flow.flowId };
+/** Flow id owning a transcript, derived from the flows list by path (a flow
+    member groups per flow, everything else per worktree). Uses the same
+    path-matching as classification — never the absent `file.flow`. */
+export function flowIdForPath(file: FileEntry, flows: readonly Flow[]): string | null {
+  return flowMembership(file, flows)?.flow.id ?? null;
+}
+
+function stackKeyFor(file: FileEntry, flows: readonly Flow[]): { key: string; kind: "flow" | "worktree"; id: string } {
+  const flowId = flowIdForPath(file, flows);
+  if (flowId) return { key: "wstack::flow::" + flowId, kind: "flow", id: flowId };
   const worktree = file.worktree ?? "";
   return { key: "wstack::worktree::" + worktree, kind: "worktree", id: worktree };
 }
@@ -219,11 +243,11 @@ const freshness = (file: FileEntry) => activityBand(file) * 1e13 - file.mtime;
  * retained form (an active flow's reviewer round deck) so a card never appears
  * twice.
  */
-export function groupWorkerStacks(files: readonly FileEntry[], exclude: ReadonlySet<string> = new Set()): WorkerStack[] {
+export function groupWorkerStacks(files: readonly FileEntry[], flows: readonly Flow[], exclude: ReadonlySet<string> = new Set()): WorkerStack[] {
   const byKey = new Map<string, WorkerStack>();
   for (const file of files) {
     if (exclude.has(file.path)) continue;
-    const { key, kind, id } = stackKeyFor(file);
+    const { key, kind, id } = stackKeyFor(file, flows);
     const stack = byKey.get(key) ?? { key, kind, id, items: [] };
     stack.items.push(file);
     byKey.set(key, stack);
@@ -248,5 +272,5 @@ export interface WorkerStacksInput extends CollapsibleInput {
  * grouping {@link collapsibleWorkerFiles} minus `renderedPaths`.
  */
 export function computeWorkerStacks(input: WorkerStacksInput): WorkerStack[] {
-  return groupWorkerStacks(collapsibleWorkerFiles(input), input.renderedPaths);
+  return groupWorkerStacks(collapsibleWorkerFiles(input), input.flows, input.renderedPaths);
 }

@@ -13,13 +13,14 @@ import { VERDICT_GLYPHS } from "./flows/flowModel";
 import type { WorkerStack } from "./scheme/workerCollapse";
 import { activityDot, engineBadge, fmtAge } from "./utils";
 
-/** Verdict glyph for a folded reviewer round, resolved through its flow. */
+/** Verdict glyph for a folded reviewer round, resolved through the flows list by
+    path (never `file.flow`, which /api/files does not populate). */
 function reviewerVerdict(file: FileEntry, flows: readonly Flow[]): string | null {
-  if (file.flow?.flowRole !== "reviewer") return null;
-  const flow = flows.find((candidate) => candidate.id === file.flow!.flowId);
-  const round = flow?.rounds.find((item) => item.reviewerPath === file.path)
-    ?? (file.flow.round !== null ? flow?.rounds.find((item) => item.n === file.flow!.round) : undefined);
-  return round?.verdict ? VERDICT_GLYPHS[round.verdict] : null;
+  for (const flow of flows) {
+    const round = flow.rounds.find((item) => item.reviewerPath === file.path);
+    if (round) return round.verdict ? VERDICT_GLYPHS[round.verdict] : null;
+  }
+  return null;
 }
 
 function StackRow({
