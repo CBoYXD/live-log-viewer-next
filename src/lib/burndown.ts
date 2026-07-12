@@ -46,12 +46,20 @@ export interface PaceSummary {
   zeroCrossing: number | null;
 }
 
+/** A consecutive rise beyond this (percentage points) counts as a refill rather
+    than sampling jitter on an otherwise draining series. */
+const REFILL_EPSILON = 0.5;
+
 /** Projects when the quota hits 0% from the slope of the *observed* samples
     (first → latest of the window), not an assumed full start. Returns null when
-    the series is flat or the quota is climbing (a refill), so a steady 50%→50%
-    or a mid-window reset never produces a bogus "empty by …" forecast. */
+    the series is flat, ends higher than it started, or contains any mid-series
+    rise (a refill / window reset), so neither a steady 50%→50% nor an
+    80→20→60 replenishment ever produces a bogus "empty by …" forecast. */
 function projectZeroCrossing(samples: LimitSample[], actual: number): number | null {
   if (samples.length < 2) return null;
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i].remaining > samples[i - 1].remaining + REFILL_EPSILON) return null;
+  }
   const first = samples[0];
   const last = samples[samples.length - 1];
   const dt = last.t - first.t;

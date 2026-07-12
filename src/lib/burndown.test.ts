@@ -80,6 +80,34 @@ test("computePace suppresses the projection when the quota is climbing (a refill
   expect(pace!.zeroCrossing).toBeNull();
 });
 
+test("computePace suppresses the projection for a mid-window refill even when it ends below the start", () => {
+  const third = week / 3;
+  // 80 → 20 → 60: net drop is positive, but the 20 → 60 rise is a refill.
+  const pace = computePace(
+    series([
+      { t: start, remaining: 80 },
+      { t: start + third, remaining: 20 },
+      { t: start + 2 * third, remaining: 60 },
+    ]),
+    start + 2 * third,
+  );
+  expect(pace!.zeroCrossing).toBeNull();
+});
+
+test("computePace tolerates sub-epsilon sampling jitter on a draining series", () => {
+  const day = 86_400;
+  const pace = computePace(
+    series([
+      { t: start, remaining: 60 },
+      { t: start + day, remaining: 39.8 },
+      { t: start + 2 * day, remaining: 40.1 }, // +0.3 rise, within jitter tolerance
+      { t: start + 3 * day, remaining: 39.5 },
+    ]),
+    start + 3 * day,
+  );
+  expect(pace!.zeroCrossing).not.toBeNull();
+});
+
 test("computePace projects from the observed slope, not an assumed full start", () => {
   // Never hit 100%: 60% → 40% over a day → 2%/half-day, so ~20 half-days to 0.
   const day = 86_400;
