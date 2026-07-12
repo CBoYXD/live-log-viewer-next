@@ -80,6 +80,9 @@ export interface SpawnReceipt {
   /** Reserved at receipt birth so path discovery cannot choose the identity. */
   conversationId: ViewerConversationId;
   purpose: "launch" | "migration-successor" | "resume-successor";
+  /** Generation current when a resume receipt was created. A completed
+      source observation may advance from this path exactly once. */
+  resumeSourcePath: string | null;
   engine: AgentEngine;
   cwd: string;
   accountId: string | null;
@@ -731,6 +734,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
       ? value.conversationId as ViewerConversationId
       : `conversation_${crypto.randomUUID()}`,
     purpose: value.purpose === "migration-successor" || value.purpose === "resume-successor" ? value.purpose : "launch",
+    resumeSourcePath: typeof value.resumeSourcePath === "string" ? value.resumeSourcePath : null,
     accountId: typeof value.accountId === "string" ? value.accountId : null,
     parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
       ? value.parentConversationId as ViewerConversationId
@@ -907,6 +911,7 @@ export class AgentRegistry {
         requestDigest: input.requestDigest ?? null,
         conversationId: conversationId ?? `conversation_${crypto.randomUUID()}`,
         purpose: input.purpose ?? "launch",
+        resumeSourcePath: input.purpose === "resume-successor" ? existingConversation?.generations.at(-1)?.path ?? null : null,
         engine: input.engine,
         cwd: input.cwd,
         accountId: input.accountId ?? null,
@@ -1042,18 +1047,30 @@ export class AgentRegistry {
       (receipt.pane.panePid.pid > 0 && receipt.pane.panePid.pid !== entry.host.panePid.pid) ||
       (receipt.pane.panePid.startIdentity !== null && entry.host.panePid.startIdentity !== receipt.pane.panePid.startIdentity)
     )) return conflict("spawn_pane_conflict");
-    if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath) return conflict("spawn_artifact_conflict");
-    if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
     const existingConversation = file.conversations[receipt.conversationId];
+    const ownedGeneration = existingConversation?.generations.find((generation) => generation.id === entry.key.sessionId);
+    const successorNativeId = existingConversation
+      ? sessionKeyFromTranscript(existingConversation.engine, entry.artifactPath)?.sessionId ?? nativeGenerationId(entry.artifactPath)
+      : null;
+    const advancesCompletedResume = receipt.state === "completed"
+      && receipt.purpose === "resume-successor"
+      && receipt.resumeSourcePath !== null
+      && receipt.artifactPath === receipt.resumeSourcePath
+      && receipt.artifactPath !== null
+      && receipt.key !== null
+      && existingConversation !== undefined
+      && conversationOwnsPath(existingConversation, receipt.artifactPath)
+      && conversationOwnsPath(existingConversation, entry.artifactPath)
+      && sessionKeyId(receipt.key) === sessionKeyId(entry.key)
+      && ownedGeneration?.id === entry.key.sessionId
+      && successorNativeId === entry.key.sessionId;
+    if (receipt.artifactPath && receipt.artifactPath !== entry.artifactPath && !advancesCompletedResume) return conflict("spawn_artifact_conflict");
+    if (receipt.key && sessionKeyId(receipt.key) !== sessionKeyId(entry.key)) return conflict("spawn_identity_conflict");
     const occupied = file.entries[sessionKeyId(entry.key)];
     const occupiedPathOwned = occupied && existingConversation
       ? existingConversation.generations.some((generation) => generation.path === occupied.artifactPath)
         || existingConversation.continuityPaths.includes(occupied.artifactPath)
       : false;
-    const ownedGeneration = existingConversation?.generations.find((generation) => generation.id === entry.key.sessionId);
-    const successorNativeId = existingConversation
-      ? sessionKeyFromTranscript(existingConversation.engine, entry.artifactPath)?.sessionId ?? nativeGenerationId(entry.artifactPath)
-      : null;
     const replacesOwnedGeneration = receipt.purpose === "resume-successor"
       && occupiedPathOwned
       && ownedGeneration?.id === entry.key.sessionId
@@ -1368,6 +1385,7 @@ export class AgentRegistry {
   reconcileConversations(observations: ConversationObservation[]): RegistryFile {
     return this.mutate((file) => {
       const scopeChanged = new Set<Extract<AgentEngine, "claude" | "codex">>();
+      const firstPathByNativeSession = new Map<string, string>();
       for (const observation of observations) {
         const exactOwners = Object.values(file.conversations).filter((candidate) =>
           candidate.engine === observation.engine && conversationOwnsPath(candidate, observation.path));
@@ -1380,6 +1398,9 @@ export class AgentRegistry {
           }
         }
         const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
+        const nativeSessionId = nativeId ? `${observation.engine}:${nativeId}` : null;
+        const firstObservedPath = nativeSessionId ? firstPathByNativeSession.get(nativeSessionId) : undefined;
+        if (nativeSessionId && firstObservedPath === undefined) firstPathByNativeSession.set(nativeSessionId, observation.path);
         const nativeOwner = nativeId ? preferredConversationOwner(file, Object.values(file.conversations).filter((candidate) =>
           candidate.engine === observation.engine && candidate.generations.some((generation) => generation.id === nativeId))) : null;
         let conversation = exactOwner ?? nativeOwner ?? null;
@@ -1393,8 +1414,12 @@ export class AgentRegistry {
         if ((!exactOwner || adoptedSuccessorPath) && nativeOwner && nativeId) {
           const generation = nativeOwner.generations.find((candidate) => candidate.id === nativeId);
           if (generation && generation.path !== observation.path) {
-            if (!nativeOwner.continuityPaths.includes(generation.path)) nativeOwner.continuityPaths.push(generation.path);
-            generation.path = observation.path;
+            if (firstObservedPath === undefined || firstObservedPath === observation.path) {
+              if (!nativeOwner.continuityPaths.includes(generation.path)) nativeOwner.continuityPaths.push(generation.path);
+              generation.path = observation.path;
+            } else if (!nativeOwner.continuityPaths.includes(observation.path)) {
+              nativeOwner.continuityPaths.push(observation.path);
+            }
             nativeOwner.updatedAt = observation.observedAt;
             scopeChanged.add(observation.engine);
           }

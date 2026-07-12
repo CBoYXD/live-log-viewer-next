@@ -491,6 +491,86 @@ describe("agent registry", () => {
     expect(store.snapshot().entries[`codex:${nativeId}`]?.artifactPath).toBe(secondPath);
   });
 
+  test("fresh newest-first inventory keeps the newest same-session rollout current", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const newestPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
+    const olderPath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
+    const observation = (pathname: string, observedAt: string) => ({
+      engine: "codex" as const,
+      path: pathname,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle" as const, source: "empty" as const, terminalAt: null },
+      observedAt,
+    });
+
+    store.reconcileConversations([
+      observation(newestPath, "2026-07-12T12:00:00.000Z"),
+      observation(olderPath, "2026-07-12T12:01:00.000Z"),
+    ]);
+
+    const conversation = store.conversationForPath(newestPath)!;
+    expect(conversation).toMatchObject({
+      continuityPaths: [olderPath],
+      generations: [{ id: nativeId, path: newestPath }],
+    });
+    expect(store.conversationForPath(olderPath)?.id).toBe(conversation.id);
+  });
+
+  test("completed resume receipt advances after observing its source path first", () => {
+    const store = registry();
+    const nativeId = "019f4906-3f67-7b72-9fbc-9ec3b5ad1326";
+    const sourcePath = `/sessions/2026/07/11/rollout-2026-07-11T10-00-00-${nativeId}.jsonl`;
+    const successorPath = `/sessions/2026/07/12/rollout-2026-07-12T10-00-00-${nativeId}.jsonl`;
+    const unrelatedPath = `/sessions/2026/07/13/rollout-2026-07-13T10-00-00-${nativeId}.jsonl`;
+    const conversation = store.ensureConversation("codex", sourcePath, "terra");
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      conversationId: conversation.id,
+      purpose: "resume-successor",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    expect(store.completeObservedSpawn(begun.receipt.launchId, spawnEntry(sourcePath))).toMatchObject({
+      kind: "settled",
+      receipt: { state: "completed", artifactPath: sourcePath },
+    });
+    store.reconcileConversations([{
+      engine: "codex",
+      path: successorPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-12T12:00:00.000Z",
+    }]);
+
+    expect(store.completeObservedSpawn(begun.receipt.launchId, spawnEntry(successorPath))).toMatchObject({
+      kind: "settled",
+      conversation: { id: conversation.id },
+      receipt: { state: "completed", artifactPath: successorPath },
+    });
+    expect(store.snapshot().entries[`codex:${nativeId}`]?.artifactPath).toBe(successorPath);
+    expect(store.conversation(conversation.id)).toMatchObject({
+      continuityPaths: [sourcePath],
+      generations: [{ id: nativeId, path: successorPath }],
+    });
+    store.reconcileConversations([{
+      engine: "codex",
+      path: unrelatedPath,
+      accountId: "terra",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      turn: { state: "idle", source: "empty", terminalAt: null },
+      observedAt: "2026-07-13T12:00:00.000Z",
+    }]);
+    expect(store.completeObservedSpawn(begun.receipt.launchId, spawnEntry(unrelatedPath))).toMatchObject({
+      kind: "conflict",
+      code: "spawn_artifact_conflict",
+      receipt: { state: "completed", artifactPath: successorPath, resumeSourcePath: sourcePath },
+    });
+  });
+
   test("resume succession rebases a migration before provider work", () => {
     const store = registry();
     const firstPath = "/sessions/rollout-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
