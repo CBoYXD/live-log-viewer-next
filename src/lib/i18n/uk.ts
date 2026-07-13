@@ -293,6 +293,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "draft.dismiss": "Прибрати чернетку розмови",
   "draft.directory": "директорія",
   "draft.dirAria": "Робоча директорія агента",
+  "draft.confirmRecoveredDir": "Підтвердьте робочу директорію. Відредагуйте це поле перед запуском агента.",
   "draft.reasoning": "reasoning",
   "draft.role": "роль",
   "draft.roleAria": "Рольовий пресет агента",

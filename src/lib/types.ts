@@ -30,6 +30,10 @@ export interface FileEntry {
   /** Path relative to its root. */
   name: string;
   project: string;
+  /** Working directory recorded by the conversation transcript. */
+  cwd?: string | null;
+  /** Canonical parent-repository root when cwd belongs to a linked worktree. */
+  projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
   worktree?: string;
   title: string;
@@ -160,6 +164,8 @@ export interface ConversationMigration {
 
 export interface ProjectCatalogEntry {
   project: string;
+  /** Canonical repository root derived from every conversation in the full scan. */
+  projectRoot?: string;
   /** Unix seconds of the newest valid transcript candidate in the project. */
   smt: number;
   /** Lightweight count from the full candidate scan. */
@@ -168,7 +174,11 @@ export interface ProjectCatalogEntry {
 
 export interface FilesResponse {
   files: FileEntry[];
+  /** Rows added only to resolve the current deep-link pin, including closure. */
+  pinOverlayPaths?: string[];
   projectCatalog?: ProjectCatalogEntry[];
+  /** Existing local repository fallback for projects whose conversations lack cwd metadata. */
+  projectCwds?: Record<string, string>;
   flows: Flow[];
   pipelines: Pipeline[];
   /** Present when the pipelines store failed closed; the rest of the payload stays valid. */

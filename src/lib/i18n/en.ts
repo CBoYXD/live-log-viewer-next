@@ -302,6 +302,7 @@ export const en = {
   "draft.dismiss": "Dismiss the draft conversation",
   "draft.directory": "directory",
   "draft.dirAria": "Agent working directory",
+  "draft.confirmRecoveredDir": "Confirm the working directory. Edit this field before launching the agent.",
   "draft.reasoning": "reasoning",
   "draft.role": "role",
   "draft.roleAria": "Agent role preset",
