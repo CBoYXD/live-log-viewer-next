@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 
@@ -171,7 +171,7 @@ describe("ClaudeStreamBrokerHost", () => {
     expect(ledger.order.slice(0, 2)).toEqual(["ledger:delivery-one", "stdin:begin"]);
 
     child.emitJson({ type: "system", subtype: "init", session_id: host.identity.sessionId, apiKeySource: "none", model: "claude-test" });
-    child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "begin" }] } });
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "begin" }] } });
     child.emitJson({ type: "assistant", session_id: host.identity.sessionId, message: { role: "assistant", content: [{ type: "text", text: "done" }] } });
     child.emitJson({ type: "result", subtype: "success", session_id: host.identity.sessionId, result: "done" });
 
@@ -191,6 +191,30 @@ describe("ClaudeStreamBrokerHost", () => {
     await host.release();
   });
 
+  test("confirms delivery only from replayed user-role frames", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    let settled = false;
+    const sent = host.send({ id: "replay-only", text: "match me" }).finally(() => { settled = true; });
+
+    child.emitJson({ type: "user", isReplay: false, session_id: host.identity.sessionId, uuid: "ordinary", message: { role: "user", content: [{ type: "text", text: "match me" }] } });
+    await Bun.sleep(0);
+    expect(settled).toBeFalse();
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "wrong-role", message: { role: "tool", content: [{ type: "text", text: "match me" }] } });
+    await Bun.sleep(0);
+    expect(settled).toBeFalse();
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "replay", message: { role: "user", content: [{ type: "text", text: "match me" }] } });
+    expect(await sent).toEqual({ outcome: "turn-started", turnId: "replay-only" });
+    await host.release();
+  });
+
   test("queues ordinary active-turn sends and resumes the same durable session", async () => {
     const ledger = new RecordingDeliveryLedger();
     const eventStore = new MemoryEventStore();
@@ -205,14 +229,14 @@ describe("ClaudeStreamBrokerHost", () => {
     });
     const sessionId = first.identity.sessionId;
     const firstSend = first.send({ id: "first", text: "one" });
-    firstChild.emitJson({ type: "user", session_id: sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "one" }] } });
+    firstChild.emitJson({ type: "user", isReplay: true, session_id: sessionId, uuid: "user-one", message: { role: "user", content: [{ type: "text", text: "one" }] } });
     expect(await firstSend).toEqual({ outcome: "turn-started", turnId: "first" });
     const secondSend = first.send({ id: "second", text: "two" });
     const duplicateSecond = first.send({ id: "second", text: "two" });
     expect(firstChild.inputs.filter((input) => input.type === "user")).toHaveLength(2);
     firstChild.emitJson({ type: "result", subtype: "success", session_id: sessionId });
     expect((await first.health()).activeTurnRef).toBe("second");
-    firstChild.emitJson({ type: "user", session_id: sessionId, uuid: "user-two", message: { role: "user", content: [{ type: "text", text: "two" }] } });
+    firstChild.emitJson({ type: "user", isReplay: true, session_id: sessionId, uuid: "user-two", message: { role: "user", content: [{ type: "text", text: "two" }] } });
     expect(await secondSend).toEqual({ outcome: "queued-next-turn", turnId: "second" });
     expect(await duplicateSecond).toEqual({ outcome: "queued-next-turn", turnId: "second" });
     firstChild.emitJson({ type: "result", subtype: "success", session_id: sessionId });
@@ -254,7 +278,7 @@ describe("ClaudeStreamBrokerHost", () => {
     });
     expect((await pending.health()).activeTurnRef).toBeNull();
     const retried = pending.send(pendingEntry);
-    pendingChild.emitJson({ type: "user", session_id: "pending-session", uuid: "retried-user", message: { role: "user", content: [{ type: "text", text: "retry me" }] } });
+    pendingChild.emitJson({ type: "user", isReplay: true, session_id: "pending-session", uuid: "retried-user", message: { role: "user", content: [{ type: "text", text: "retry me" }] } });
     expect(await retried).toEqual({ outcome: "queued-next-turn", turnId: "pending" });
     expect(pendingChild.inputs.filter((input) => input.type === "user")).toHaveLength(1);
     await pending.release();
@@ -345,7 +369,7 @@ describe("ClaudeStreamBrokerHost", () => {
     });
     const retried = replacement.send({ id: "retry-entry", text: "retry after crash" });
     expect(replacementChild.inputs.filter((input) => input.type === "user")).toHaveLength(1);
-    replacementChild.emitJson({ type: "user", session_id: "retry-session", uuid: "retry-user", message: { role: "user", content: [{ type: "text", text: "retry after crash" }] } });
+    replacementChild.emitJson({ type: "user", isReplay: true, session_id: "retry-session", uuid: "retry-user", message: { role: "user", content: [{ type: "text", text: "retry after crash" }] } });
     expect(await retried).toEqual({ outcome: "turn-started", turnId: "retry-entry" });
     await replacement.release();
   });
@@ -404,7 +428,7 @@ describe("ClaudeStreamBrokerHost", () => {
       spawnProcess: fakeSpawn(child, {}),
     });
     const sent = host.send({ id: "active", text: "work" });
-    child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "active-user", message: { role: "user", content: [{ type: "text", text: "work" }] } });
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "active-user", message: { role: "user", content: [{ type: "text", text: "work" }] } });
     await sent;
     const interrupted = host.interrupt("active");
     const request = child.inputs.find((input) => input.type === "control_request")!;
@@ -418,10 +442,56 @@ describe("ClaudeStreamBrokerHost", () => {
     child.emitJson({ type: "control_request", request_id: "permission-one", request: { subtype: "can_use_tool", tool_name: "Bash" } });
     await Bun.sleep(0);
     expect((await host.health()).pendingAttention).toEqual(["permission-one"]);
-    await host.answer("permission-one", { behavior: "deny" });
+    const answer = host.answer("permission-one", { behavior: "deny" });
     expect(child.inputs.at(-1)).toEqual({
       type: "control_response",
       response: { subtype: "success", request_id: "permission-one", response: { behavior: "deny" } },
+    });
+    expect((await host.health()).pendingAttention).toEqual(["permission-one"]);
+    child.emitJson({ type: "control_response", response: { subtype: "success", request_id: "permission-one", response: { behavior: "deny" } } });
+    await answer;
+    expect((await host.health()).pendingAttention).toEqual([]);
+    await host.release();
+  });
+
+  test("retires control attention from response acknowledgements and cancellations", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      requestTimeoutMs: 1_000,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+
+    child.emitJson({ type: "control_request", request_id: "answered-request", request: { subtype: "can_use_tool" } });
+    await Bun.sleep(0);
+    const answeredCursor = (await host.health()).eventCursor;
+    const answeredEvents = host.attach(answeredCursor)[Symbol.asyncIterator]();
+    const answered = host.answer("answered-request", { behavior: "deny" });
+    await Bun.sleep(0);
+    expect((await host.health()).pendingAttention).toEqual(["answered-request"]);
+    expect((await host.health()).eventCursor).toBe(answeredCursor);
+    child.emitJson({ type: "control_response", response: { subtype: "success", request_id: "answered-request", response: { behavior: "deny" } } });
+    await answered;
+    expect(await nextEvent(answeredEvents)).toMatchObject({
+      kind: "attention-resolved",
+      id: "answered-request",
+      resolution: "answered",
+    });
+
+    child.emitJson({ type: "control_request", request_id: "cancelled-request", request: { subtype: "can_use_tool" } });
+    await Bun.sleep(0);
+    const cancelledEvents = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
+    const cancelledAnswer = host.answer("cancelled-request", { behavior: "deny" });
+    child.emitJson({ type: "control_cancel_request", request_id: "cancelled-request" });
+    await expect(cancelledAnswer).rejects.toThrow("cancelled before answer confirmation");
+    expect(await nextEvent(cancelledEvents)).toMatchObject({
+      kind: "attention-resolved",
+      id: "cancelled-request",
+      resolution: "server-resolved",
     });
     expect((await host.health()).pendingAttention).toEqual([]);
     await host.release();
@@ -439,7 +509,7 @@ describe("ClaudeStreamBrokerHost", () => {
       spawnProcess: fakeSpawn(child, {}),
     });
     const sent = host.send({ id: "partial", text: "reply" });
-    child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "partial-user", message: { role: "user", content: [{ type: "text", text: "reply" }] } });
+    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "partial-user", message: { role: "user", content: [{ type: "text", text: "reply" }] } });
     await sent;
     const events = host.attach((await host.health()).eventCursor)[Symbol.asyncIterator]();
     for (const text of ["ACK", "-", "150"]) {
@@ -662,5 +732,40 @@ describe("ClaudeStreamBrokerHost", () => {
     ledger.recordQueued("durable", { id: "second", text: "world" }, "queued-next-turn");
     expect(ledger.load("durable").map((state) => state.entry.id)).toEqual(["entry", "second"]);
     expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
+  });
+
+  test("file delivery ledger completes short writes before returning", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-short-ledger-"));
+    const originalWriteSync = fs.writeSync as unknown as (
+      fd: number,
+      buffer: Uint8Array,
+      offset: number,
+      length: number,
+      position: number | null,
+    ) => number;
+    const shortWrite = spyOn(fs, "writeSync").mockImplementation(((
+      fd: number,
+      value: string | Uint8Array,
+      offset = 0,
+      length?: number,
+      position: number | null = null,
+    ) => {
+      const buffer = typeof value === "string" ? Buffer.from(value) : value;
+      const start = typeof value === "string" || typeof offset !== "number" ? 0 : offset;
+      const requested = typeof value === "string" ? buffer.byteLength : (length ?? buffer.byteLength - start);
+      const shortLength = Math.max(1, Math.floor(requested / 2));
+      return originalWriteSync(fd, buffer, start, shortLength, position);
+    }) as typeof fs.writeSync);
+    try {
+      const ledger = new FileClaudeDeliveryLedger(directory);
+      ledger.recordQueued("short-write", { id: "entry", text: "fully durable" }, "turn-started");
+      expect(ledger.load("short-write")).toMatchObject([{
+        entry: { id: "entry", text: "fully durable" },
+        disposition: "turn-started",
+        delivered: false,
+      }]);
+    } finally {
+      shortWrite.mockRestore();
+    }
   });
 });

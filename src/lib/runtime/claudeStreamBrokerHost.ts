@@ -28,6 +28,11 @@ type PendingDelivery = {
   resolve(receipt: DeliveryReceipt): void;
   reject(error: Error): void;
 };
+type PendingAnswer = {
+  resolve(): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+};
 
 export interface ClaudeDeliveryState {
   entry: QueueEntry;
@@ -126,7 +131,7 @@ export class FileClaudeDeliveryLedger implements ClaudeDeliveryLedger {
     try {
       fs.fchmodSync(fd, 0o600);
       repairJsonlTail(fd, filename, deliveryRecord);
-      fs.writeSync(fd, `${JSON.stringify(record)}\n`);
+      writeAllSync(fd, Buffer.from(`${JSON.stringify(record)}\n`));
       fs.fsyncSync(fd);
     } finally {
       fs.closeSync(fd);
@@ -228,6 +233,17 @@ function repairJsonlTail<T>(fd: number, filename: string, validate: (value: unkn
   else fs.ftruncateSync(fd, Buffer.byteLength(contents.slice(0, boundary)));
 }
 
+function writeAllSync(fd: number, buffer: Uint8Array): void {
+  let offset = 0;
+  while (offset < buffer.byteLength) {
+    const written = fs.writeSync(fd, buffer, offset, buffer.byteLength - offset);
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      throw new Error("Claude delivery ledger write made no progress");
+    }
+    offset += written;
+  }
+}
+
 export function redactClaudeHostDiagnostic(value: unknown): string {
   return hardenedRedact(value instanceof Error ? value.message : String(value))
     .replace(/(["']?(?:cookie|set-cookie)["']?\s*[:=]\s*["']?)[^\s,"'}]+/gi, "$1[redacted]")
@@ -307,6 +323,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly turnQueue: string[] = [];
   private readonly attentions = new Map<string, JsonObject>();
   private readonly pendingControls = new Map<string, PendingControl>();
+  private readonly pendingAnswers = new Map<string, PendingAnswer>();
   private readonly interruptedTurns = new Set<string>();
   private readonly partialTurns = new Set<string>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
@@ -515,12 +532,20 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   async answer(attentionRef: string, value: unknown): Promise<void> {
     if (this.unavailable()) throw new Error("Claude stream host is unavailable");
     if (!this.attentions.has(attentionRef)) throw new Error("attention request is missing or already answered");
-    this.write({
-      type: "control_response",
-      response: { subtype: "success", request_id: attentionRef, response: value ?? {} },
+    if (this.pendingAnswers.has(attentionRef)) throw new Error("attention answer is already awaiting confirmation");
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingAnswers.delete(attentionRef);
+        const error = new Error("Claude attention answer timed out; outcome is uncertain");
+        reject(error);
+        this.fail(error);
+      }, this.requestTimeoutMs);
+      this.pendingAnswers.set(attentionRef, { resolve, reject, timer });
+      this.write({
+        type: "control_response",
+        response: { subtype: "success", request_id: attentionRef, response: value ?? {} },
+      });
     });
-    this.attentions.delete(attentionRef);
-    this.emit({ kind: "attention-resolved", id: attentionRef, resolution: "answered" });
   }
 
   async health(): Promise<HostState> { return this.currentState(); }
@@ -651,7 +676,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     }
     if (type === "user") {
       const text = userText(message);
-      const delivery = this.deliveries.find((candidate) => !candidate.delivered && candidate.entry.text === text);
+      const userRoleReplay = message.isReplay === true && stringField(message.message, "role") === "user";
+      const delivery = userRoleReplay
+        ? this.deliveries.find((candidate) => !candidate.delivered && candidate.entry.text === text)
+        : undefined;
       if (delivery) {
         try {
           this.deliveryLedger.confirmDelivered(this.identity.sessionId, delivery.entry.id, stringField(message, "uuid"));
@@ -695,10 +723,38 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       this.emit({ kind: "attention", id: requestId, method: stringField(request, "subtype") ?? "control_request", attention: request });
       return;
     }
+    if (type === "control_cancel_request") {
+      const requestId = stringField(message, "request_id");
+      if (!requestId) return this.fail(new Error("Claude control cancellation had no request id"));
+      if (!this.attentions.has(requestId)) return;
+      const pending = this.pendingAnswers.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingAnswers.delete(requestId);
+        pending.reject(new Error("Claude attention was cancelled before answer confirmation"));
+      }
+      this.attentions.delete(requestId);
+      this.emit({ kind: "attention-resolved", id: requestId, resolution: "server-resolved" });
+      return;
+    }
     if (type === "control_response") {
       const response = record(message.response) ?? message;
       const requestId = stringField(response, "request_id");
       if (!requestId) return;
+      const answer = this.pendingAnswers.get(requestId);
+      if (answer) {
+        clearTimeout(answer.timer);
+        this.pendingAnswers.delete(requestId);
+        this.attentions.delete(requestId);
+        if (response.subtype === "error") {
+          answer.reject(new Error("Claude attention answer failed"));
+          this.emit({ kind: "attention-resolved", id: requestId, resolution: "server-resolved" });
+        } else {
+          answer.resolve();
+          this.emit({ kind: "attention-resolved", id: requestId, resolution: "answered" });
+        }
+        return;
+      }
       const pending = this.pendingControls.get(requestId);
       if (!pending) return;
       clearTimeout(pending.timer);
@@ -816,6 +872,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       pending.reject(new Error(safeError(error)));
     }
     this.pendingControls.clear();
+    for (const pending of this.pendingAnswers.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(safeError(error)));
+    }
+    this.pendingAnswers.clear();
   }
 
   private closeSubscribers(): void {
