@@ -4,8 +4,6 @@ import { Pause, Play, RefreshCw, X } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 
-import { Hint } from "@/components/Hint";
-import { Badge } from "@/components/ui/Badge";
 import { currentRound } from "@/components/scheme/agentLinks";
 import type { Flow } from "@/lib/flows/types";
 import { useLocale } from "@/lib/i18n";
@@ -257,37 +255,59 @@ export function PipelineStrip({
     setBusy(false);
   };
   const attention = PIPELINE_ATTENTION_STATES.has(pipeline.state);
+  const busyState = PIPELINE_BUSY_STATES.has(pipeline.state);
   const draft = pipeline.state === "draft";
   const finished = pipeline.state === "completed" || pipeline.state === "closed";
   const detail = parkedDetail(pipeline);
+  /* 1-based cursor position for the readable "stage k/n" counter; a finished
+     chain reads n/n. */
+  const total = pipeline.stages.length;
+  const cursorIndex = pipeline.cursor ? pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId) : -1;
+  const position = cursorIndex >= 0 ? cursorIndex + 1 : total;
+  /* Redesigned container header (issue #196): the status is a readable tinted
+     badge and the controls are labeled design-system buttons — no icon soup.
+     Tone matrix (§3) matches the hub + rail: busy → accent, needs_decision +
+     paused → warning, completed → success, draft → warning, else muted. */
+  const statusBadge = busyState
+    ? "bg-accent-soft text-accent"
+    : attention || draft
+      ? "bg-warning-soft text-warning"
+      : pipeline.state === "completed"
+        ? "bg-success-soft text-success"
+        : "bg-sunken text-muted";
+  const actionBtn =
+    "inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-control border px-2.5 text-ui font-semibold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-40";
+  const neutralBtn = `${actionBtn} border-border bg-card text-secondary hover:text-primary`;
+  const quietDangerBtn = `${actionBtn} border-border bg-card text-secondary hover:border-danger/40 hover:text-danger`;
   return (
     <div
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-11 w-full flex-wrap items-center gap-3 rounded-[14px] border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-4"} ${draft ? "border-2 border-dashed border-warning bg-warning-soft" : attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
     >
-      <span className="flex min-w-0 max-w-[42%] shrink-0 items-center gap-2">
-        {/* Tone matrix (§3), matching the hub + rail: busy → accent (pulse),
-            needs_decision + paused → amber, completed → ok, else neutral. Red is
-            reserved for chip/verdict failures, so the strip never conflicts. */}
+      <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
         <span
           className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-            PIPELINE_BUSY_STATES.has(pipeline.state)
-              ? "animate-pulse bg-accent"
-              : PIPELINE_ATTENTION_STATES.has(pipeline.state)
-                ? "bg-warning"
-                : pipeline.state === "completed"
-                  ? "bg-success"
-                  : "bg-muted"
+            busyState ? "animate-pulse bg-accent" : attention ? "bg-warning" : pipeline.state === "completed" ? "bg-success" : draft ? "bg-warning" : "bg-strong"
           }`}
           aria-hidden
         />
-        {compact ? null : <span className="shrink-0 text-label font-semibold text-secondary">{t("pipelineStrip.pipeline")}</span>}
-        {draft ? <Badge tone="warning">{t("pipelineStrip.draftBadge")}</Badge> : null}
-        <span className="min-w-0 truncate text-[12px] font-bold" title={pipeline.task}>{pipeline.task}</span>
-        <span className="shrink-0 text-[11.5px] font-semibold text-muted">{pipelineStateLabel(t, pipeline.state)}</span>
-        {detail ? <span className={`min-w-0 truncate text-[11.5px] font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
+        {draft ? (
+          <span className="shrink-0 rounded-full border border-dashed border-warning bg-warning-soft px-2 py-0.5 text-caption font-semibold tracking-[0.06em] text-warning">
+            {t("pipelineStrip.draftBadge")}
+          </span>
+        ) : null}
+        <span className="min-w-0 truncate text-ui font-semibold text-primary" title={pipeline.task}>{pipeline.task}</span>
+        <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-caption font-semibold ${statusBadge}`}>
+          {pipelineStateLabel(t, pipeline.state)}
+        </span>
+        {!draft && total ? (
+          <span className="shrink-0 text-label font-semibold tabular-nums text-muted">
+            {t("pipelineStrip.stageOf", { k: position, n: total })}
+          </span>
+        ) : null}
+        {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
       </span>
       <span className="no-scrollbar flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto" aria-label={t("pipelineStrip.stagesAria")}>
         {pipeline.stages.map((stage, index) => (
@@ -307,28 +327,41 @@ export function PipelineStrip({
           />
         ))}
       </span>
-      <span className="flex shrink-0 items-center gap-1.5">
-        {error ? <span className="max-w-[220px] truncate text-[10.5px] font-semibold text-danger" title={error}>{error}</span> : null}
+      <span className="flex shrink-0 flex-wrap items-center gap-1.5">
+        {error ? <span className="max-w-[220px] truncate text-caption font-semibold text-danger" title={error}>{error}</span> : null}
         {busy ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-muted" aria-hidden /> : null}
         {draft ? (
           /* A draft may be empty (assembled on the canvas, #136) — Start is gated on
              the 2-stage floor here too, matching the builder panel and mobile dock,
              so the halo strip never fires a rejected PATCH. */
-          <button className="inline-flex min-h-8 items-center gap-1 rounded-full border border-accent bg-accent px-3 text-[11px] font-bold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40" disabled={busy || pipeline.stages.length < 2} title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined} onClick={() => void mutate("start")}>
+          <button
+            className={`${actionBtn} border-warning bg-warning text-white hover:opacity-90`}
+            disabled={busy || pipeline.stages.length < 2}
+            title={pipeline.stages.length < 2 ? t("groupOverride.startNeedsStages") : undefined}
+            onClick={() => void mutate("start")}
+          >
             <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.start")}
           </button>
         ) : pipeline.state === "needs_decision" ? (
           <>
-            <button className="rounded-full border border-accent bg-accent px-3 py-1 text-[11px] font-bold text-white disabled:opacity-40" disabled={busy} onClick={() => void mutate("retry-stage")}>{t("pipelineStrip.retryStage")}</button>
-            <button className="rounded-full border border-border bg-canvas px-2.5 py-1 text-[10.5px] font-bold text-muted disabled:opacity-40" disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
+            <button className={`${actionBtn} border-accent bg-accent text-white hover:opacity-90`} disabled={busy} onClick={() => void mutate("retry-stage")}>
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.retryStage")}
+            </button>
+            <button className={neutralBtn} disabled={busy} onClick={() => void mutate("skip-stage")}>{t("pipelineStrip.skipStage")}</button>
           </>
         ) : null}
         {draft || finished ? null : pipeline.state === "paused" ? (
-          <Hint label={t("pipelineStrip.resume")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-success" disabled={busy} aria-label={t("pipelineStrip.resume")} onClick={() => void mutate("resume")}><Play className="h-3.5 w-3.5" aria-hidden /></button></Hint>
+          <button className={`${actionBtn} border-success/40 bg-success-soft text-success hover:opacity-90`} disabled={busy} onClick={() => void mutate("resume")}>
+            <Play className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.resume")}
+          </button>
         ) : (
-          <Hint label={t("pipelineStrip.pause")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted" disabled={busy} aria-label={t("pipelineStrip.pause")} onClick={() => void mutate("pause")}><Pause className="h-3.5 w-3.5" aria-hidden /></button></Hint>
+          <button className={neutralBtn} disabled={busy} onClick={() => void mutate("pause")}>
+            <Pause className="h-3.5 w-3.5" aria-hidden /> {t("pipelineStrip.pause")}
+          </button>
         )}
-        <Hint label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}><button className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted hover:text-danger" disabled={busy} aria-label={t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")} onClick={() => void mutate(draft ? "delete" : "close")}><X className="h-3.5 w-3.5" aria-hidden /></button></Hint>
+        <button className={quietDangerBtn} disabled={busy} onClick={() => void mutate(draft ? "delete" : "close")}>
+          <X className="h-3.5 w-3.5" aria-hidden /> {t(draft ? "pipelineStrip.discard" : "pipelineStrip.close")}
+        </button>
       </span>
     </div>
   );

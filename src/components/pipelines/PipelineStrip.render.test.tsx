@@ -69,7 +69,7 @@ test("the status dot follows the tone matrix (accent busy, amber attention, ok d
     const html = render(pipeline({ state, ...over }));
     return html.slice(0, html.indexOf("aria-hidden"));
   };
-  /* Running → accent, never green; needs_decision + paused → amber, never red. */
+  /* Running → accent, never green; needs_decision + paused → warning, never red. */
   expect(dotClass("running")).toContain("bg-accent");
   expect(dotClass("needs_decision")).toContain("bg-warning");
   expect(dotClass("paused")).toContain("bg-warning");
