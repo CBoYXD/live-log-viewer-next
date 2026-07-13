@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { statePath } from "@/lib/configDir";
+import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
 import { hardenedRedact } from "@/lib/view/compactText";
 
@@ -20,6 +21,12 @@ type PendingControl = {
   resolve(): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
+  interruptTurnId: string | null;
+};
+type PendingDelivery = {
+  promise: Promise<DeliveryReceipt>;
+  resolve(receipt: DeliveryReceipt): void;
+  reject(error: Error): void;
 };
 
 export interface ClaudeDeliveryState {
@@ -136,6 +143,8 @@ export interface ClaudeSessionIdentity { sessionId: string }
 
 export interface ClaudeStreamBrokerHostOptions {
   cwd: string;
+  claudeConfigDir?: string;
+  claudeProjectsDir?: string;
   binary?: string;
   model?: string;
   effort?: string;
@@ -215,9 +224,10 @@ export function redactClaudeHostDiagnostic(value: unknown): string {
 
 const safeError = redactClaudeHostDiagnostic;
 
-function subscriptionEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function subscriptionEnv(source: NodeJS.ProcessEnv, claudeConfigDir?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { NODE_ENV: source.NODE_ENV };
   for (const name of CHILD_ENV_ALLOWLIST) if (source[name] !== undefined) env[name] = source[name];
+  if (claudeConfigDir) env.CLAUDE_CONFIG_DIR = claudeConfigDir;
   return env;
 }
 
@@ -247,9 +257,8 @@ function userText(message: JsonObject): string {
   return textContent(record(message.message)?.content);
 }
 
-function defaultTranscriptUsers(cwd: string, sessionId: string): ClaudeTranscriptUser[] {
-  const project = cwd.replace(/[^A-Za-z0-9]/g, "-");
-  const filename = path.join(process.env.HOME ?? "", ".claude", "projects", project, `${sessionId}.jsonl`);
+function defaultTranscriptUsers(cwd: string, sessionId: string, projectsRoot?: string): ClaudeTranscriptUser[] {
+  const filename = claudeTranscriptPath(cwd, sessionId, projectsRoot);
   let contents: string;
   try { contents = fs.readFileSync(filename, "utf8"); }
   catch (error) {
@@ -286,7 +295,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly turnQueue: string[] = [];
   private readonly attentions = new Map<string, JsonObject>();
   private readonly pendingControls = new Map<string, PendingControl>();
-  private readonly actuatedIds = new Set<string>();
+  private readonly interruptedTurns = new Set<string>();
+  private readonly partialTurns = new Set<string>();
+  private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
   private stdoutBuffer = "";
   private cursor: number;
@@ -301,6 +312,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private writerFence: (() => boolean) | null = null;
   private releasePromise: Promise<void> | null = null;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
+  private terminationStarted = false;
   private readonly reapedPromise: Promise<void>;
   private resolveReaped!: () => void;
 
@@ -328,9 +340,13 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     child.on("error", (error) => this.fail(new Error(`Claude child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
-      if (this.terminationTimer) clearTimeout(this.terminationTimer);
+      if (this.terminationTimer) {
+        clearTimeout(this.terminationTimer);
+        this.terminationTimer = null;
+      }
       this.resolveReaped();
-      if (!this.releasing && !this.released && !this.dead) this.fail(new Error("Claude child exited"));
+      if (this.dead) this.notifyStateListeners();
+      else if (!this.releasing && !this.released) this.fail(new Error("Claude child exited"));
     });
   }
 
@@ -349,7 +365,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     options: ClaudeStreamBrokerHostOptions,
   ): Promise<ClaudeStreamBrokerHost> {
     const binary = options.binary ?? process.env.LLV_CLAUDE_BINARY ?? "claude";
-    const env = subscriptionEnv(options.env ?? process.env);
+    const env = subscriptionEnv(options.env ?? process.env, options.claudeConfigDir);
     const auth = await (options.readAuthStatus?.() ?? defaultAuthStatus(binary, env, options.cwd));
     if (!auth.loggedIn || auth.authMethod !== "claude.ai" || !auth.subscriptionType) {
       throw new Error("Claude stream hosting requires a claude.ai subscription login");
@@ -357,6 +373,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     const args = [
       "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--safe-mode", "--include-partial-messages", "--replay-user-messages",
+      "--permission-prompt-tool", "stdio",
       "--permission-mode", options.permissionMode ?? "default",
     ];
     if (resume) args.push("--resume", sessionId);
@@ -371,7 +388,9 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     const host = new ClaudeStreamBrokerHost(child, { sessionId }, auth, options);
     try {
       host.restore();
-      host.reconcileTranscript((options.readTranscript ?? defaultTranscriptUsers)(options.cwd, sessionId));
+      host.reconcileTranscript(options.readTranscript
+        ? options.readTranscript(options.cwd, sessionId)
+        : defaultTranscriptUsers(options.cwd, sessionId, options.claudeProjectsDir));
       host.emit({ kind: "session-status", status: "idle" });
       return host;
     } catch (error) {
@@ -420,9 +439,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       return { outcome: "rejected", reason: "stale-turn" };
     }
     const duplicate = this.deliveries.find((state) => state.entry.id === entry.id);
-    if (duplicate?.delivered || (duplicate && this.actuatedIds.has(entry.id))) {
+    if (duplicate?.delivered) {
       return { outcome: duplicate.disposition, turnId: duplicate.entry.id };
     }
+    const existingPending = this.pendingDeliveries.get(entry.id);
+    if (existingPending) return existingPending.promise;
     const disposition: ClaudeDeliveryState["disposition"] = duplicate?.disposition
       ?? (this.activeTurnId ? "queued-next-turn" : "turn-started");
     try {
@@ -434,12 +455,22 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     const delivery: ClaudeDeliveryState = duplicate
       ?? { entry: structuredClone(entry), disposition, delivered: false };
     if (!duplicate) this.deliveries.push(delivery);
+    let resolveDelivery!: PendingDelivery["resolve"];
+    let rejectDelivery!: PendingDelivery["reject"];
+    const pending: PendingDelivery = {
+      promise: new Promise<DeliveryReceipt>((resolve, reject) => {
+        resolveDelivery = resolve;
+        rejectDelivery = reject;
+      }),
+      resolve: (receipt) => resolveDelivery(receipt),
+      reject: (error) => rejectDelivery(error),
+    };
+    this.pendingDeliveries.set(entry.id, pending);
     this.write({
       type: "user",
       session_id: this.identity.sessionId,
       message: { role: "user", content: [{ type: "text", text: entry.text }] },
     });
-    this.actuatedIds.add(entry.id);
     this.turnQueue.push(entry.id);
     if (!this.activeTurnId) {
       this.activeTurnId = entry.id;
@@ -447,7 +478,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     } else {
       this.notifyStateListeners();
     }
-    return { outcome: disposition, turnId: entry.id };
+    return pending.promise;
   }
 
   async interrupt(turnRef: string): Promise<void> {
@@ -461,7 +492,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
         reject(error);
         this.fail(error);
       }, this.requestTimeoutMs);
-      this.pendingControls.set(requestId, { resolve, reject, timer });
+      this.pendingControls.set(requestId, { resolve, reject, timer, interruptTurnId: turnRef });
       this.write({ type: "control_request", request_id: requestId, request: { subtype: "interrupt" } });
     });
   }
@@ -611,6 +642,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
           this.deliveryLedger.confirmDelivered(this.identity.sessionId, delivery.entry.id, stringField(message, "uuid"));
           delivery.delivered = true;
           delivery.engineMessageId = stringField(message, "uuid");
+          const pending = this.pendingDeliveries.get(delivery.entry.id);
+          if (pending) {
+            this.pendingDeliveries.delete(delivery.entry.id);
+            pending.resolve({ outcome: delivery.disposition, turnId: delivery.entry.id });
+          }
         } catch (error) {
           return this.failWithoutLedger(new Error(`Claude delivery ledger failed: ${safeError(error)}`));
         }
@@ -623,13 +659,16 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       const delta = record(event?.delta);
       const text = stringField(delta, "text");
       if (event?.type === "content_block_delta" && text !== null) {
+        if (this.activeTurnId) this.partialTurns.add(this.activeTurnId);
         this.emit({ kind: "delta", turnId: this.activeTurnId ?? "unknown", text });
       }
       return;
     }
     if (type === "assistant") {
       const text = textContent(record(message.message)?.content);
-      if (text) this.emit({ kind: "delta", turnId: this.activeTurnId ?? "unknown", text });
+      if (text && (!this.activeTurnId || !this.partialTurns.has(this.activeTurnId))) {
+        this.emit({ kind: "delta", turnId: this.activeTurnId ?? "unknown", text });
+      }
       this.emit({ kind: "item", turnId: this.activeTurnId, item: message, phase: "completed" });
       return;
     }
@@ -650,7 +689,10 @@ export class ClaudeStreamBrokerHost implements EngineHost {
       clearTimeout(pending.timer);
       this.pendingControls.delete(requestId);
       if (response.subtype === "error") pending.reject(new Error("Claude control request failed"));
-      else pending.resolve();
+      else {
+        if (pending.interruptTurnId) this.interruptedTurns.add(pending.interruptTurnId);
+        pending.resolve();
+      }
       return;
     }
     if (type === "result") this.acceptResult(message);
@@ -659,7 +701,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private acceptResult(message: JsonObject): void {
     const turnId = this.turnQueue.shift() ?? this.activeTurnId;
     if (!turnId) return;
-    const status = message.subtype === "success" ? "completed" : message.subtype === "interrupted" ? "interrupted" : "error";
+    this.partialTurns.delete(turnId);
+    const interrupted = this.interruptedTurns.delete(turnId);
+    const status = interrupted || message.subtype === "interrupted"
+      ? "interrupted"
+      : message.subtype === "success" ? "completed" : "error";
     this.emit({ kind: "turn-ended", turnId, status });
     this.activeTurnId = this.turnQueue[0] ?? null;
     if (this.activeTurnId) this.emit({ kind: "turn-started", turnId: this.activeTurnId });
@@ -678,9 +724,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private async releaseAndReap(): Promise<void> {
     this.releasing = true;
     this.rejectPending(new Error("Claude stream host released"));
-    try { this.child.stdin.end(); } catch { /* already closed */ }
-    try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
-    if (!await this.waitForReap(this.shutdownGraceMs)) {
+    this.startTermination();
+    if (!await this.waitForReap(this.shutdownGraceMs * 2)) {
       try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
       if (!await this.waitForReap(this.shutdownGraceMs)) throw new Error("Claude child could not be reaped");
     }
@@ -713,11 +758,19 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.rejectPending(error);
     this.emit({ kind: "session-status", status: "dead" });
     this.closeSubscribers();
-    try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
+    this.startTermination();
   }
 
   private failWithoutLedger(error: Error): void {
-    if (this.dead || this.released) return;
+    if (this.released) {
+      this.notifyStateListeners();
+      this.closeSubscribers();
+      return;
+    }
+    if (this.dead) {
+      this.notifyStateListeners();
+      return;
+    }
     this.ledgerFailed = true;
     this.dead = true;
     this.activeTurnId = null;
@@ -725,10 +778,24 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.rejectPending(error);
     this.notifyStateListeners();
     this.closeSubscribers();
+    this.startTermination();
+  }
+
+  private startTermination(): void {
+    if (this.terminationStarted || this.reaped) return;
+    this.terminationStarted = true;
+    try { this.child.stdin.end(); } catch { /* already closed */ }
     try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
+    this.terminationTimer = setTimeout(() => {
+      this.terminationTimer = null;
+      if (this.reaped) return;
+      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+    }, this.shutdownGraceMs);
   }
 
   private rejectPending(error: Error): void {
+    for (const pending of this.pendingDeliveries.values()) pending.reject(new Error(safeError(error)));
+    this.pendingDeliveries.clear();
     for (const pending of this.pendingControls.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error(safeError(error)));

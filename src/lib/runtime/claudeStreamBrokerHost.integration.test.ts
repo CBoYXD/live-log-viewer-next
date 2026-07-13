@@ -116,3 +116,34 @@ test.skipIf(!localSubscriptionAvailable())("real Claude subscription supports la
     await recovered?.release();
   }
 }, 180_000);
+
+test.skipIf(!localSubscriptionAvailable())("real Claude permission requests reach EngineHost.answer", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-claude-permission-integration-"));
+  const eventStore = new FileRuntimeEventStore(path.join(directory, "events"));
+  const deliveryLedger = new FileClaudeDeliveryLedger(path.join(directory, "deliveries"));
+  let host: ClaudeStreamBrokerHost | null = null;
+  try {
+    host = await ClaudeStreamBrokerHost.start({
+      cwd: process.cwd(),
+      model: "haiku",
+      permissionMode: "default",
+      tools: ["Bash"],
+      systemPrompt: "Follow the user request exactly and use the requested tool.",
+      eventStore,
+      deliveryLedger,
+    });
+    const events = host.attach(0)[Symbol.asyncIterator]();
+    const probePath = path.join(directory, "permission-probe");
+    const sent = await host.send({
+      id: `issue-150-permission-${crypto.randomUUID()}`,
+      text: `Use the Bash tool once to run \`touch ${probePath}\`. Do not answer before attempting the tool.`,
+    });
+    expect(sent.outcome).toBe("turn-started");
+    const attention = await waitFor(events, (event) => event.kind === "attention" && event.method === "can_use_tool");
+    if (attention.kind !== "attention") throw new Error("expected Claude permission attention");
+    await host.answer(attention.id, { behavior: "deny", message: "Denied by the runtime integration test." });
+    await waitFor(events, (event) => event.kind === "turn-ended");
+  } finally {
+    await host?.release();
+  }
+}, 180_000);

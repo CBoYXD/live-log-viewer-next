@@ -40,6 +40,12 @@ test("server startup delegates managed rows with file credentials and their laun
   await adoptStructuredHostsAtStartup({
     registry,
     resolveCodexOwner: () => ({ home: "/managed", kind: "managed" }),
+    resolveClaudeOwner: () => ({
+      home: "/managed-claude",
+      kind: "managed",
+      transcriptRoot: "/managed-claude/projects",
+      env: { NODE_ENV: "test", CLAUDE_CONFIG_DIR: "/managed-claude" },
+    }),
     adopt: async (received, optionsFor) => {
       expect(received).toBe(registry);
       codexOptions = optionsFor(registry.snapshot().entries["codex:startup-thread"]!);
@@ -60,6 +66,9 @@ test("server startup delegates managed rows with file credentials and their laun
   });
   expect(claudeOptions).toMatchObject({
     cwd: "/repo",
+    claudeConfigDir: "/managed-claude",
+    claudeProjectsDir: "/managed-claude/projects",
+    env: { CLAUDE_CONFIG_DIR: "/managed-claude" },
     model: "gpt-5.4-mini",
     effort: "high",
   });

@@ -16,6 +16,12 @@ export interface StructuredStartupDependencies {
   adopt?: typeof adoptCodexRegistryHosts;
   adoptClaude?: typeof adoptClaudeRegistryHosts;
   resolveCodexOwner?: (entry: AgentRegistryEntry) => { home: string; kind: "legacy" | "managed" } | null;
+  resolveClaudeOwner?: (entry: AgentRegistryEntry) => {
+    home: string;
+    kind: "legacy" | "managed";
+    transcriptRoot: string;
+    env: NodeJS.ProcessEnv;
+  } | null;
 }
 
 /** Called once by Next instrumentation before the Node server accepts requests. */
@@ -24,6 +30,8 @@ export async function adoptStructuredHostsAtStartup(
 ): Promise<AdoptedStructuredHost[]> {
   const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
     accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
+  const resolveClaudeOwner = dependencies.resolveClaudeOwner ?? ((entry: AgentRegistryEntry) =>
+    accountManager.resolveTranscriptOwner("claude", entry.artifactPath));
   const codex = await (dependencies.adopt ?? adoptCodexRegistryHosts)(
     dependencies.registry ?? agentRegistry(),
     (entry) => {
@@ -39,12 +47,18 @@ export async function adoptStructuredHostsAtStartup(
   );
   const claude = await (dependencies.adoptClaude ?? adoptClaudeRegistryHosts)(
     dependencies.registry ?? agentRegistry(),
-    (entry) => ({
-      cwd: entry.cwd,
-      model: entry.launchProfile?.model ?? undefined,
-      effort: entry.launchProfile?.effort ?? undefined,
-      permissionMode: entry.launchProfile?.permissionMode ?? undefined,
-    }),
+    (entry) => {
+      const owner = resolveClaudeOwner(entry);
+      return {
+        cwd: entry.cwd,
+        claudeConfigDir: owner?.kind === "managed" ? owner.home : undefined,
+        claudeProjectsDir: owner?.transcriptRoot,
+        env: owner?.env,
+        model: entry.launchProfile?.model ?? undefined,
+        effort: entry.launchProfile?.effort ?? undefined,
+        permissionMode: entry.launchProfile?.permissionMode ?? undefined,
+      };
+    },
   );
   adoptedHosts = [...codex, ...claude];
   return adoptedHosts;
