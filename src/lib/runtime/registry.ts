@@ -8,6 +8,7 @@ import type { SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
+import { ClaudeStreamBrokerHost, type ClaudeStreamBrokerHostOptions } from "./claudeStreamBrokerHost";
 import type { HostState } from "./engineHost";
 
 export function structuredHostsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -22,6 +23,14 @@ export async function startCodexStructuredHost(
   return CodexAppServerHost.start(options);
 }
 
+export async function startClaudeStructuredHost(
+  options: ClaudeStreamBrokerHostOptions,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ClaudeStreamBrokerHost> {
+  if (!structuredHostsEnabled(env)) throw new Error("structured hosts are disabled");
+  return ClaudeStreamBrokerHost.start(options);
+}
+
 function registryStatus(state: HostState): AgentHostStatus {
   if (state.status === "active" || state.status === "attention") return "live";
   if (state.status === "idle") return "idle";
@@ -32,6 +41,20 @@ function registryStatus(state: HostState): AgentHostStatus {
 export function codexHostColumns(state: HostState, writerClaimEpoch: number): StructuredHostColumns {
   return {
     kind: "codex-app-server",
+    endpoint: state.endpoint,
+    process: state.pid === null ? null : { pid: state.pid, startIdentity: state.processStartIdentity },
+    eventCursor: state.eventCursor,
+    protocolVersion: state.protocolVersion,
+    writerClaimEpoch,
+    activeTurnRef: state.activeTurnRef,
+    pendingAttention: state.pendingAttention,
+    activeFlags: state.activeFlags,
+  };
+}
+
+export function claudeHostColumns(state: HostState, writerClaimEpoch: number): StructuredHostColumns {
+  return {
+    kind: "claude-broker",
     endpoint: state.endpoint,
     process: state.pid === null ? null : { pid: state.pid, startIdentity: state.processStartIdentity },
     eventCursor: state.eventCursor,
@@ -112,9 +135,64 @@ export async function bindCodexHostPersistence(
   return stop;
 }
 
+export async function bindClaudeHostPersistence(
+  registry: AgentRegistry,
+  key: SessionKey,
+  host: ClaudeStreamBrokerHost,
+  claimOwner: string,
+  writerClaimEpoch: number,
+): Promise<() => void> {
+  host.setWriterFence(() => registry.ownsStructuredHostClaim(key, claimOwner, writerClaimEpoch));
+  const persist = (state: HostState, terminal = false) => registry.setStructuredHostClaimed(
+    key,
+    claudeHostColumns(state, writerClaimEpoch),
+    registryStatus(state),
+    claimOwner,
+    writerClaimEpoch,
+    terminal,
+  );
+  try {
+    if (!persist(await host.health())) throw new Error("structured host writer claim is stale");
+  } catch (error) {
+    await host.release();
+    throw error;
+  }
+  let failed = false;
+  let stopped = false;
+  let unsubscribe = () => {};
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    unsubscribe();
+    registry.releaseStructuredHostClaim(key, claimOwner, writerClaimEpoch);
+  };
+  unsubscribe = host.onStateChange((state) => {
+    if (failed || stopped) return;
+    try {
+      const terminal = state.status === "unhosted" || (state.status === "dead" && state.pid === null);
+      if (!persist(state, terminal)) throw new Error("structured host writer claim is stale");
+      if (terminal) {
+        stopped = true;
+        unsubscribe();
+      }
+    } catch {
+      failed = true;
+      stop();
+      void host.release();
+    }
+  });
+  if (stopped) unsubscribe();
+  return stop;
+}
+
 export interface AdoptedCodexHost {
   key: SessionKey;
   host: CodexAppServerHost;
+}
+
+export interface AdoptedClaudeHost {
+  key: SessionKey;
+  host: ClaudeStreamBrokerHost;
 }
 
 /** Boot seam: resume every durable Codex row when structured hosting is enabled. */
@@ -141,6 +219,50 @@ export async function adoptCodexRegistryHosts(
             initialEventCursor: claimed.structuredHost.eventCursor,
           });
           await bindCodexHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
+          adopted.push({ key: entry.key, host });
+        } catch {
+          registry.setStructuredHostClaimed(entry.key, {
+            ...claimed.structuredHost,
+            endpoint: "stdio:released",
+            process: null,
+            activeTurnRef: null,
+            pendingAttention: [],
+            activeFlags: [],
+          }, "dead", claimed.claimOwner!, claimed.claimEpoch, true);
+        }
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "agent registry is busy") throw error;
+    }
+  }
+  return adopted;
+}
+
+
+/** Boot seam: resume every durable Claude broker row when structured hosting is enabled. */
+export async function adoptClaudeRegistryHosts(
+  registry: AgentRegistry,
+  optionsFor: (entry: AgentRegistryEntry) => ClaudeStreamBrokerHostOptions,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<AdoptedClaudeHost[]> {
+  if (!structuredHostsEnabled(env)) return [];
+  const rows = Object.values(registry.snapshot().entries).filter((entry) =>
+    entry.key.engine === "claude"
+    && entry.status !== "unhosted"
+    && entry.structuredHost?.kind === "claude-broker");
+  const adopted: AdoptedClaudeHost[] = [];
+  for (const entry of rows) {
+    const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    try {
+      await registry.withOperationLock(entry.key, owner, async () => {
+        const claimed = registry.claimStructuredHost(entry.key, owner);
+        if (!claimed?.structuredHost) return;
+        try {
+          const host = await ClaudeStreamBrokerHost.adopt(entry.key.sessionId, {
+            ...optionsFor(claimed),
+            initialEventCursor: claimed.structuredHost.eventCursor,
+          });
+          await bindClaudeHostPersistence(registry, entry.key, host, claimed.claimOwner!, claimed.claimEpoch);
           adopted.push({ key: entry.key, host });
         } catch {
           registry.setStructuredHostClaimed(entry.key, {

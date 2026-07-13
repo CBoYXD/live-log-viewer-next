@@ -1,23 +1,30 @@
 import { accountManager } from "@/lib/accounts/manager";
 import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/lib/agent/registry";
 
-import { adoptCodexRegistryHosts, type AdoptedCodexHost } from "./registry";
+import {
+  adoptClaudeRegistryHosts,
+  adoptCodexRegistryHosts,
+  type AdoptedClaudeHost,
+  type AdoptedCodexHost,
+} from "./registry";
 
-let adoptedHosts: AdoptedCodexHost[] = [];
+type AdoptedStructuredHost = AdoptedCodexHost | AdoptedClaudeHost;
+let adoptedHosts: AdoptedStructuredHost[] = [];
 
 export interface StructuredStartupDependencies {
   registry?: AgentRegistry;
   adopt?: typeof adoptCodexRegistryHosts;
+  adoptClaude?: typeof adoptClaudeRegistryHosts;
   resolveCodexOwner?: (entry: AgentRegistryEntry) => { home: string; kind: "legacy" | "managed" } | null;
 }
 
 /** Called once by Next instrumentation before the Node server accepts requests. */
 export async function adoptStructuredHostsAtStartup(
   dependencies: StructuredStartupDependencies = {},
-): Promise<AdoptedCodexHost[]> {
+): Promise<AdoptedStructuredHost[]> {
   const resolveCodexOwner = dependencies.resolveCodexOwner ?? ((entry: AgentRegistryEntry) =>
     accountManager.resolveTranscriptOwner("codex", entry.artifactPath));
-  adoptedHosts = await (dependencies.adopt ?? adoptCodexRegistryHosts)(
+  const codex = await (dependencies.adopt ?? adoptCodexRegistryHosts)(
     dependencies.registry ?? agentRegistry(),
     (entry) => {
       const owner = resolveCodexOwner(entry);
@@ -30,9 +37,19 @@ export async function adoptStructuredHostsAtStartup(
       };
     },
   );
+  const claude = await (dependencies.adoptClaude ?? adoptClaudeRegistryHosts)(
+    dependencies.registry ?? agentRegistry(),
+    (entry) => ({
+      cwd: entry.cwd,
+      model: entry.launchProfile?.model ?? undefined,
+      effort: entry.launchProfile?.effort ?? undefined,
+      permissionMode: entry.launchProfile?.permissionMode ?? undefined,
+    }),
+  );
+  adoptedHosts = [...codex, ...claude];
   return adoptedHosts;
 }
 
-export function structuredStartupHosts(): readonly AdoptedCodexHost[] {
+export function structuredStartupHosts(): readonly AdoptedStructuredHost[] {
   return adoptedHosts;
 }
