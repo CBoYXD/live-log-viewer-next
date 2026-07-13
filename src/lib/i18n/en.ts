@@ -101,11 +101,20 @@ export const en = {
   "trash.deleting": "deleting…",
   "trash.confirmYes": "Yes, delete",
   "trash.deleteProject": "Delete project from disk",
+  "trash.projectLoadFailed": "Could not load every project conversation",
+
+  "list.title": "All conversations",
+  "list.hint": "Loaded in recent-first pages from every conversation stored for this project.",
+  "list.searchHint": "Searching every conversation stored across all projects.",
+  "list.loadMore": "Load more conversations",
+  "list.failed": "Could not load conversations",
+  "list.retry": "Retry",
 
   // Switchboard
   "switch.aria": "Agent switchboard",
   "switch.title": "Switchboard",
-  "switch.search": "Search by name or project",
+  "switch.search": "Search title, first prompt, or project",
+  "switch.results": "All conversation results",
   "switch.updating": "updating…",
   "switch.close": "Close switchboard",
   "switch.waiting": "Waiting for you",
