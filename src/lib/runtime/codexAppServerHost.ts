@@ -26,7 +26,17 @@ type Subscriber = {
   wake: (() => void) | null;
   closed: boolean;
 };
-type PendingAttention = { rpcId: string | number; method: string; origin: "current" | "restored" };
+type PendingAnswer = {
+  resolve(): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+};
+type PendingAttention = {
+  rpcId: string | number;
+  method: string;
+  origin: "current" | "restored";
+  answer?: PendingAnswer;
+};
 type ThreadStatus = {
   type: "active" | "idle" | "notLoaded" | "systemError";
   activeFlags: string[];
@@ -383,9 +393,17 @@ export class CodexAppServerHost implements EngineHost {
     }
     const attention = this.attentions.get(attentionRef);
     if (!attention) throw new Error("attention request is missing or already answered");
-    this.write({ jsonrpc: "2.0", id: attention.rpcId, result: value ?? {} });
-    this.attentions.delete(attentionRef);
-    this.emit({ kind: "attention-resolved", id: attentionRef, resolution: "answered" });
+    if (attention.answer) throw new Error("attention answer is already awaiting confirmation");
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        attention.answer = undefined;
+        const error = new Error("attention answer timed out; outcome is uncertain");
+        reject(error);
+        this.fail(error);
+      }, this.requestTimeoutMs);
+      attention.answer = { resolve, reject, timer };
+      this.write({ jsonrpc: "2.0", id: attention.rpcId, result: value ?? {} });
+    });
   }
 
   async health(): Promise<HostState> {
@@ -437,6 +455,7 @@ export class CodexAppServerHost implements EngineHost {
 
   private async releaseAndReap(): Promise<void> {
     this.releasing = true;
+    this.rejectPendingAnswers(new Error("Codex app-server host released"));
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error("Codex app-server host released"));
@@ -710,8 +729,13 @@ export class CodexAppServerHost implements EngineHost {
       const resolved = [...this.attentions.entries()].find(([, attention]) =>
         String(attention.rpcId) === String(requestId));
       if (!resolved) return;
+      const answer = resolved[1].answer;
+      if (answer) {
+        clearTimeout(answer.timer);
+        answer.resolve();
+      }
       this.attentions.delete(resolved[0]);
-      this.emit({ kind: "attention-resolved", id: resolved[0], resolution: "server-resolved" });
+      this.emit({ kind: "attention-resolved", id: resolved[0], resolution: answer ? "answered" : "server-resolved" });
       return;
     }
     if (method === "turn/started" && turnId) {
@@ -747,6 +771,7 @@ export class CodexAppServerHost implements EngineHost {
     if (this.dead || this.released) return;
     this.dead = true;
     this.activeTurnId = null;
+    this.rejectPendingAnswers(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -764,6 +789,7 @@ export class CodexAppServerHost implements EngineHost {
     this.engineStatus = "dead";
     this.activeFlags = [];
     this.activeTurnId = null;
+    this.rejectPendingAnswers(error);
     this.attentions.clear();
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
@@ -773,5 +799,15 @@ export class CodexAppServerHost implements EngineHost {
     this.notifyStateListeners();
     this.closeSubscribers();
     this.startTermination();
+  }
+
+  private rejectPendingAnswers(error: Error): void {
+    const rejection = new Error(safeError(error));
+    for (const attention of this.attentions.values()) {
+      if (!attention.answer) continue;
+      clearTimeout(attention.answer.timer);
+      attention.answer.reject(rejection);
+      attention.answer = undefined;
+    }
   }
 }

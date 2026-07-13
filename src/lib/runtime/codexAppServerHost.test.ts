@@ -50,6 +50,8 @@ class FakeAppServer extends EventEmitter {
   readonly pid = 4242;
   readonly requests: Array<Record<string, unknown>> = [];
   readonly signals: NodeJS.Signals[] = [];
+  autoResolveServerRequests = true;
+  private readonly serverRequestIds = new Set<string | number>();
   private turn = 0;
 
   constructor(
@@ -87,11 +89,19 @@ class FakeAppServer extends EventEmitter {
   }
 
   request(id: string, method: string, params: Record<string, unknown>): void {
+    this.serverRequestIds.add(id);
     this.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
   }
 
   private accept(message: Record<string, unknown>): void {
     this.requests.push(message);
+    if ((typeof message.id === "string" || typeof message.id === "number")
+      && this.serverRequestIds.delete(message.id)) {
+      if (this.autoResolveServerRequests) {
+        this.notify("serverRequest/resolved", { threadId: this.threadId, requestId: message.id });
+      }
+      return;
+    }
     if (typeof message.id !== "number") return;
     const method = message.method;
     if (typeof method === "string" && this.ignoredMethods.includes(method)) return;
@@ -545,6 +555,75 @@ describe("CodexAppServerHost", () => {
     await expect(pendingSend).rejects.toThrow("stdin failed: broken pipe");
     expect(await host.health()).toMatchObject({ status: "dead", activeTurnRef: null, pendingAttention: [] });
     expect(server.signals).toContain("SIGTERM");
+    await host.release();
+  });
+
+  test("keeps an answer pending until the app-server confirms resolution", async () => {
+    const server = new FakeAppServer("confirmed-answer-thread");
+    server.autoResolveServerRequests = false;
+    const store = new MemoryEventStore();
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+    });
+    server.request("confirmed-answer", "item/commandExecution/requestApproval", { command: "date" });
+    await Bun.sleep(0);
+    const attentionId = "item/commandExecution/requestApproval:confirmed-answer";
+    let settled = false;
+    const answer = host.answer(attentionId, { decision: "accept" }).finally(() => { settled = true; });
+    await Bun.sleep(0);
+    expect(settled).toBeFalse();
+    expect((await host.health()).pendingAttention).toEqual([attentionId]);
+    expect(store.load("confirmed-answer-thread").some((event) => event.kind === "attention-resolved")).toBeFalse();
+    server.notify("serverRequest/resolved", { threadId: "confirmed-answer-thread", requestId: "confirmed-answer" });
+    await answer;
+    expect((await host.health()).pendingAttention).toEqual([]);
+    expect(store.load("confirmed-answer-thread").at(-1)).toMatchObject({
+      kind: "attention-resolved",
+      id: attentionId,
+      resolution: "answered",
+    });
+    await host.release();
+  });
+
+  test("a synchronous answer write failure preserves no false resolution", async () => {
+    const server = new FakeAppServer("sync-answer-failure");
+    server.autoResolveServerRequests = false;
+    const store = new MemoryEventStore();
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+    });
+    server.request("sync-answer", "item/commandExecution/requestApproval", { command: "date" });
+    await Bun.sleep(0);
+    server.stdin.write = (() => {
+      throw Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+    }) as typeof server.stdin.write;
+    await expect(host.answer("item/commandExecution/requestApproval:sync-answer", { decision: "accept" }))
+      .rejects.toThrow("stdin failed: broken pipe");
+    expect(store.load("sync-answer-failure").some((event) => event.kind === "attention-resolved")).toBeFalse();
+    expect(await host.health()).toMatchObject({ status: "dead", pendingAttention: [] });
+    await host.release();
+  });
+
+  test("an asynchronous answer write failure preserves no false resolution", async () => {
+    const server = new FakeAppServer("async-answer-failure");
+    server.autoResolveServerRequests = false;
+    const store = new MemoryEventStore();
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      eventStore: store,
+      spawnProcess: fakeSpawn(server),
+    });
+    server.request("async-answer", "item/commandExecution/requestApproval", { command: "date" });
+    await Bun.sleep(0);
+    const answer = host.answer("item/commandExecution/requestApproval:async-answer", { decision: "accept" });
+    server.stdin.emit("error", Object.assign(new Error("broken pipe"), { code: "EPIPE" }));
+    await expect(answer).rejects.toThrow("stdin failed: broken pipe");
+    expect(store.load("async-answer-failure").some((event) => event.kind === "attention-resolved")).toBeFalse();
+    expect(await host.health()).toMatchObject({ status: "dead", pendingAttention: [] });
     await host.release();
   });
 
