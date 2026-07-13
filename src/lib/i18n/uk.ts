@@ -683,6 +683,23 @@ export const uk: Record<keyof typeof en, Message> = {
   "groupOverride.savedRetry": "Повторюємо раунд",
   "groupOverride.savedCancel": "Рев'юера зупинено",
   "groupOverride.savedStage": "Етап оновлено для наступного запуску",
+  "groupOverride.stagesHeading": "Етапи · порядок виконання",
+  "groupOverride.stagesHint": "Перетягуй картки, щоб змінити порядок. Порядок — це ланцюг виконання.",
+  "groupOverride.stagesEmpty": "Ще немає етапів — додай етап нижче, щоб почати збірку.",
+  "groupOverride.startNeedsStages": "Додай щонайменше 2 етапи перед запуском.",
+  "groupOverride.addRunStage": "Додати етап",
+  "groupOverride.addReviewStage": "Додати цикл ревʼю",
+  "groupOverride.dragHandle": "Перетягни, щоб змінити порядок етапу",
+  "groupOverride.runKind": "запуск",
+  "groupOverride.reviewKind": "цикл ревʼю",
+  "groupOverride.reordered": "Порядок етапів змінено",
+  "groupOverride.stageAdded": "Етап додано",
+  "groupOverride.stageRemoved": "Етап видалено",
+
+  // canvas pipeline builder (#136)
+  "pipelineBuilder.untitledTask": "Новий пайплайн",
+  "pipelineBuilder.createDraft": "Пайплайн",
+  "pipelineBuilder.createDraftAria": "Додати чернетку пайплайна на полотно",
 
   "roundDeck.roundAborted": "Раунд {n} · перервано",
   "roundDeck.roundVerdict": "Раунд {n} · {verdict}",
