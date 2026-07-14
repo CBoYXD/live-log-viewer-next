@@ -301,6 +301,43 @@ export const en = {
   "composer.quickAckAria": "Send a quick “Yes, continue” to the agent",
   "composer.quickAckTitle": "Quick reply — yes, continue",
 
+  // Agent control strip (issue #241)
+  "strip.live": "live",
+  "strip.resume": "resume",
+  "strip.deadMode": "dead host",
+  "strip.moreActions": "More actions",
+  "strip.stopSubagent": "interrupts the root agent",
+  "strip.compactSubagent": "not available for subagents",
+  "strip.awaits240": "arrives with #240",
+  "strip.imagesStructured": "images aren't delivered to structured agents yet",
+
+  // Dead-host banner (issue #247)
+  "deadHost.title": "Agent host died · {since} ago",
+  "deadHost.body": "Messages can't be delivered. Pending approvals expired.",
+  "deadHost.respawn": "Respawn conversation",
+  "deadHost.attach": "Open in terminal",
+  "deadHost.recheck": "Re-check",
+  "deadHost.sendBlocked": "host is dead — respawn to continue",
+  "deadHost.expiredCard": "expired — the host died before this was answered",
+
+  // Attach-to-terminal dialog (issue #247)
+  "attach.dialogTitle": "Attach in your terminal",
+  "attach.dialogIntro": "Runs this conversation in your own terminal with the same account ({account}) and working directory.",
+  "attach.copyCwd": "Copy working directory",
+  "attach.copyCommand": "Copy command",
+  "attach.copyFull": "Copy full command",
+  "attach.takeoverWarning": "Resuming here takes over the conversation from the viewer.",
+  "attach.subagentNote": "Subagents resume through their root session.",
+  "attach.secondaryViewer": "Open a read-only viewer pane in tmux",
+
+  // Human receipt reasons (issue #247 §7)
+  "receipt.human.deadHost": "the agent's host has died",
+  "receipt.human.staleKey": "the delivery key was stale",
+  "receipt.human.duplicate": "already delivered",
+  "receipt.human.turnActive": "the agent is mid-turn",
+  "receipt.human.noTurn": "there is no active turn",
+  "receipt.human.verbatim": "not delivered: {reason}",
+
   // DraftAgentPane
   "draft.readPrompt": "Read the agent conversation in file {src} and continue from there: ",
   "draft.needDir": "specify a working directory",
@@ -1386,6 +1423,8 @@ export const en = {
   "runtime.receipt.rejected": "rejected: {reason}",
   "runtime.receipt.failed": "failed: {reason}",
   "runtime.receipt.uncertain": "uncertain — recovering",
+  "runtime.receipt.history": "history ({count})",
+  "runtime.receipt.repeatCount": "repeated {count} times",
   "runtime.receipt.retry": "Retry",
   "runtime.receipt.edit": "Edit & resend",
   "runtime.attention.title": "needs your decision",

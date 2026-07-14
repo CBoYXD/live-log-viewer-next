@@ -293,6 +293,43 @@ export const uk: Record<keyof typeof en, Message> = {
   "composer.quickAckAria": "Надіслати агенту швидке «Так, продовжуй»",
   "composer.quickAckTitle": "Швидка відповідь — так, продовжуй",
 
+  // Agent control strip (issue #241)
+  "strip.live": "наживо",
+  "strip.resume": "відновити",
+  "strip.deadMode": "мертвий хост",
+  "strip.moreActions": "Більше дій",
+  "strip.stopSubagent": "перериває кореневого агента",
+  "strip.compactSubagent": "недоступно для субагентів",
+  "strip.awaits240": "з'явиться разом із #240",
+  "strip.imagesStructured": "картинки поки не доставляються структурованим агентам",
+
+  // Dead-host banner (issue #247)
+  "deadHost.title": "Хост агента помер · {since} тому",
+  "deadHost.body": "Повідомлення не доставляються. Очікувані підтвердження застаріли.",
+  "deadHost.respawn": "Відновити розмову",
+  "deadHost.attach": "Відкрити в терміналі",
+  "deadHost.recheck": "Перевірити знову",
+  "deadHost.sendBlocked": "хост мертвий — відновіть, щоб продовжити",
+  "deadHost.expiredCard": "застаріло — хост помер, перш ніж на це відповіли",
+
+  // Attach-to-terminal dialog (issue #247)
+  "attach.dialogTitle": "Підключитися у своєму терміналі",
+  "attach.dialogIntro": "Запускає цю розмову у вашому власному терміналі з тим самим акаунтом ({account}) і робочою директорією.",
+  "attach.copyCwd": "Скопіювати робочу директорію",
+  "attach.copyCommand": "Скопіювати команду",
+  "attach.copyFull": "Скопіювати повну команду",
+  "attach.takeoverWarning": "Відновлення тут перебирає розмову у переглядача.",
+  "attach.subagentNote": "Субагенти відновлюються через свою кореневу сесію.",
+  "attach.secondaryViewer": "Відкрити панель перегляду лише для читання в tmux",
+
+  // Human receipt reasons (issue #247 §7)
+  "receipt.human.deadHost": "хост агента помер",
+  "receipt.human.staleKey": "ключ доставки застарів",
+  "receipt.human.duplicate": "вже доставлено",
+  "receipt.human.turnActive": "агент посеред ходу",
+  "receipt.human.noTurn": "немає активного ходу",
+  "receipt.human.verbatim": "не доставлено: {reason}",
+
   "draft.readPrompt": "Прочитай розмову агента у файлі {src} і продовж роботу звідти: ",
   "draft.needDir": "вкажи робочу директорію",
   "draft.launchFailed": "не вдалося запустити",
@@ -1344,6 +1381,8 @@ export const uk: Record<keyof typeof en, Message> = {
   "runtime.receipt.rejected": "відхилено: {reason}",
   "runtime.receipt.failed": "збій: {reason}",
   "runtime.receipt.uncertain": "невизначено — відновлення",
+  "runtime.receipt.history": "історія ({count})",
+  "runtime.receipt.repeatCount": "повторено {count} раз(и)",
   "runtime.receipt.retry": "Повторити",
   "runtime.receipt.edit": "Змінити й надіслати",
   "runtime.attention.title": "потрібне твоє рішення",

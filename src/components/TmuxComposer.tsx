@@ -2,16 +2,15 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { ArrowRight, ArrowUpToLine, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
-import { Check, Plus, RotateCcw } from "lucide-react";
+import { ArrowRight, ArrowUpToLine, Play, X } from "@/components/icons";
+import { RotateCcw } from "lucide-react";
 
 import type { TFunction } from "@/lib/i18n";
 
-import { Hint } from "@/components/Hint";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { interruptRuntime, sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession } from "@/hooks/useRuntime";
+import { sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession } from "@/hooks/useRuntime";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -20,9 +19,20 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
-import { ImagePickerButton } from "./imageAttachments";
+import { readResumeDraft } from "./AgentRuntimeControls";
 import { ReceiptChip } from "./runtime/ReceiptChip";
-import { mintIdempotencyKey } from "./runtime/runtimeModel";
+import { collapseReceipts, mintIdempotencyKey } from "./runtime/runtimeModel";
+
+/** The persisted "on resume" runtime profile as a POST body fragment (issue
+    #241 §4). `fast` is a codex-only service-tier override. */
+function resumeProfileBody(file: FileEntry): { model?: string; effort?: string; fast?: boolean } {
+  const draft = readResumeDraft(file);
+  return {
+    ...(draft.model ? { model: draft.model } : {}),
+    ...(draft.effort ? { effort: draft.effort } : {}),
+    ...(file.engine === "codex" ? { fast: draft.fast } : {}),
+  };
+}
 
 /**
  * A delivery receipt shown above the composer. `state` tracks whether the
@@ -68,6 +78,23 @@ export function mergeRuntimeReceipts(
   return [...merged.values()];
 }
 
+/** Whether a receipt's message text is short enough to safely edit-and-resend
+    (durable retry reads the full journaled request; editing needs the summary). */
+function receiptEditable(receipt: RuntimeReceipt): boolean {
+  const messageOperation = receipt.kind === "send" || receipt.kind === "steer";
+  return messageOperation
+    && (receipt.status === "failed" || receipt.status === "rejected")
+    && typeof receipt.text === "string"
+    && receipt.text.length > 0
+    && receipt.text.length < 240;
+}
+
+/**
+ * The single-slot receipt row (issue #247 §7): terminal successes are silent
+ * (the transcript is the proof), identical consecutive failures collapse into
+ * one row with a ×N counter, and older receipts hide behind a `history (n)`
+ * disclosure. In-flight rows keep their quiet pulse.
+ */
 export function RuntimeComposerReceipts({
   receipts,
   actionsDisabled = false,
@@ -79,26 +106,40 @@ export function RuntimeComposerReceipts({
   onRetry: (receipt: RuntimeReceipt) => void;
   onEdit: (receipt: RuntimeReceipt) => void;
 }) {
-  return receipts.map((receipt) => {
-    const messageOperation = receipt.kind === "send" || receipt.kind === "steer";
-    const failed = receipt.status === "failed";
-    // Operation receipts cap text at 240 characters. Durable retry reads the
-    // complete journaled request; editing is safe only for an uncapped summary.
-    const editable = messageOperation
-      && (failed || receipt.status === "rejected")
-      && typeof receipt.text === "string"
-      && receipt.text.length > 0
-      && receipt.text.length < 240;
-    return (
-      <ReceiptChip
-        key={receipt.operationId}
-        receipt={receipt}
-        actionsDisabled={actionsDisabled}
-        onRetry={messageOperation && failed ? () => onRetry(receipt) : undefined}
-        onEdit={editable ? () => onEdit(receipt) : undefined}
-      />
-    );
-  });
+  const { t } = useLocale();
+  const { inFlight, failure, history } = collapseReceipts(receipts);
+  return (
+    <div className="flex w-full flex-col gap-1">
+      {inFlight.map((receipt) => (
+        <ReceiptChip key={receipt.operationId} receipt={receipt} />
+      ))}
+      {failure ? (
+        <span className="inline-flex flex-wrap items-center gap-1.5">
+          <ReceiptChip
+            receipt={failure.receipt}
+            actionsDisabled={actionsDisabled}
+            onRetry={failure.receipt.status === "failed" && (failure.receipt.kind === "send" || failure.receipt.kind === "steer") ? () => onRetry(failure.receipt) : undefined}
+            onEdit={receiptEditable(failure.receipt) ? () => onEdit(failure.receipt) : undefined}
+          />
+          {failure.count > 1 ? (
+            <span className="text-caption font-semibold tabular-nums text-muted" aria-label={t("runtime.receipt.repeatCount", { count: failure.count })}>
+              ×{failure.count}
+            </span>
+          ) : null}
+        </span>
+      ) : null}
+      {history.length ? (
+        <details className="text-caption text-muted">
+          <summary className="cursor-pointer select-none font-semibold">{t("runtime.receipt.history", { count: history.length })}</summary>
+          <div className="mt-1 flex flex-col gap-1">
+            {history.map((receipt) => (
+              <ReceiptChip key={receipt.operationId} receipt={receipt} />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 /** A receipt still awaiting durable delivery (a migration hold) must never be
@@ -176,7 +217,7 @@ function nowMs(): number {
  * agent window in the current tmux session with the text as the first prompt.
  * Sent messages stay visible as a queue above the input until dismissed.
  */
-export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; pollPaused?: boolean }) {
+export function TmuxComposer({ file, pollPaused = false, deadHost = false }: { file: FileEntry; pollPaused?: boolean; deadHost?: boolean }) {
   const { t } = useLocale();
   /* Draft text and delivery receipts key on the stable conversation identity,
      not the transcript path: a committed account migration gives the card a new
@@ -207,15 +248,9 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   });
   const { text, textRef, setText, setTextState, inputRef, setStatus, busy, setBusy, voiceSending, attachments } = composer;
   const isMobile = useIsMobile();
-  /* The phone folds the secondary controls (target chip, interrupt, compact,
-     images) behind one toggle: mic and send stay, the row stops crowding. */
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const [interrupting, setInterrupting] = useState(false);
-  const [attachingTerminal, setAttachingTerminal] = useState(false);
-  const [compacting, setCompacting] = useState(false);
-  /* Two-step compact: the first click arms the button, only the second sends
-     /compact — a stray click must never condense a live agent's context. */
-  const [compactArmed, setCompactArmed] = useState(false);
+  /* Interrupt / compact / attach-terminal / mode chip moved into the unified
+     control strip (issue #241) — the composer keeps only the message surface
+     (text, images, mic, send) and its delivery receipts. */
   const [sent, setSent] = useState<SentEntry[]>([]);
   const [immediateRuntimeReceipts, setImmediateRuntimeReceipts] = useState<RuntimeReceipt[]>([]);
   /* One idempotency key per message draft: reused verbatim on a retry (never a
@@ -227,12 +262,6 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      is disabled or the session is legacy/unhosted). */
   const runtimeReceipts = useRuntimeReceiptsForArtifact(file.path, cardId);
   const displayedRuntimeReceipts = mergeRuntimeReceipts(runtimeReceipts, immediateRuntimeReceipts);
-
-  useEffect(() => {
-    if (!compactArmed) return;
-    const timer = window.setTimeout(() => setCompactArmed(false), 4_000);
-    return () => window.clearTimeout(timer);
-  }, [compactArmed]);
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
@@ -300,6 +329,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
   const send = async (overrideText?: string, retry?: { receiptId: number; clientMessageId?: string }) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || (!payloadText.trim() && !attachments.images.length)) return;
+    /* Dead host (§5): the draft survives but no POST is attempted, so no new
+       `rejected: dead-host` receipts can stack. The banner is the single source
+       of the bad news; the composer only says why Send is inert. */
+    if (deadHost) {
+      setStatus({ kind: "err", text: t("deadHost.sendBlocked") });
+      return;
+    }
     setBusy(true);
     setStatus(null);
     /* Idempotency key: the backend can dedupe a retried held/failed delivery
@@ -342,6 +378,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               idempotencyKey: clientMessageId,
               clientMessageId,
               images: attachments.images.map((image) => ({ base64: image.base64, mime: image.mime })),
+              /* The "on resume" profile (issue #241 §4): when this send reopens a
+                 finished root conversation, boot it with the model/effort the
+                 strip's picker saved. Ignored for a live pane or a subagent relay. */
+              ...(spawnMode && !relayMode ? resumeProfileBody(file) : {}),
             }),
           }).then(async (response) => {
             const body = await response.json() as typeof json;
@@ -444,173 +484,13 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
     });
   };
 
-  const interrupt = async () => {
-    if (interrupting) return;
-    setInterrupting(true);
-    setStatus(null);
-    try {
-      const result = structuredSession
-        ? await interruptRuntime(structuredSession.session.conversationId, mintIdempotencyKey())
-        : await fetch("/api/tmux", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "interrupt", path: file.path }),
-          }).then(async (response) => {
-            const body = await response.json() as { ok?: boolean; error?: string };
-            return { ok: response.ok && body.ok === true, error: body.error };
-          });
-      if (!result.ok) {
-        setStatus({ kind: "err", text: result.error ?? t("composer.failedInterrupt") });
-        return;
-      }
-      setStatus({ kind: "ok", text: t("composer.escapeSent") });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setInterrupting(false);
-    }
-  };
-
-  const attachTerminal = async () => {
-    if (attachingTerminal) return;
-    setAttachingTerminal(true);
-    setStatus(null);
-    try {
-      const response = await fetch("/api/tmux", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "attach-terminal", path: file.path }),
-      });
-      const body = await response.json() as { ok?: boolean; target?: string; error?: string };
-      if (!response.ok || !body.ok) {
-        setStatus({ kind: "err", text: body.error ?? t("composer.attachTerminalFailed") });
-        return;
-      }
-      setStatus({ kind: "ok", text: t("composer.attachTerminalReady", { target: body.target ?? "" }) });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setAttachingTerminal(false);
-    }
-  };
-
-  /* Types /compact into the live pane; the compaction band then appears in
-     the feed on its own once the transcript grows the marker. */
-  const compact = async () => {
-    if (compacting) return;
-    setCompacting(true);
-    setStatus(null);
-    try {
-      const res = await fetch("/api/tmux", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "compact", path: file.path }),
-      });
-      const json = (await res.json()) as { ok?: boolean; error?: string };
-      if (!res.ok || !json.ok) {
-        setStatus({ kind: "err", text: json.error ?? t("composer.failedCompact") });
-        return;
-      }
-      setStatus({ kind: "ok", text: t("composer.compactSent") });
-    } catch {
-      setStatus({ kind: "err", text: t("common.serverUnavailable") });
-    } finally {
-      setCompacting(false);
-    }
-  };
-
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     void send();
   };
 
-  const modeChip = (
-    <span
-      className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"
-      title={structuredSession ? t("composer.structuredHost") : relayMode ? t("composer.titleRelay") : spawnMode ? t("composer.titleSpawnResumed") : `tmux ${target}`}
-    >
-      {structuredSession ? (
-        <>
-          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> {t("composer.structured")}
-        </>
-      ) : relayMode ? (
-        <>
-          <ArrowUpToLine className="h-3 w-3 shrink-0" aria-hidden /> {t("composer.root")}
-        </>
-      ) : spawnMode ? (
-        <>
-          <Play className="h-3 w-3 shrink-0" aria-hidden /> resume
-        </>
-      ) : (
-        <>
-          <SquareTerminal className="h-3 w-3 shrink-0" aria-hidden /> <span className="truncate font-mono">{target}</span>
-        </>
-      )}
-    </span>
-  );
-
-  /* Phone composer controls meet the 44px minimum; desktop keeps the compact p-2. */
-  const iconBtn = isMobile ? "h-11 w-11" : "p-2";
-  const liveControls = !spawnMode ? (
-    <>
-      <Hint label={t("composer.interruptTitle")}>
-        <button
-          type="button"
-          aria-label={t("composer.interruptAria")}
-          disabled={interrupting}
-          onClick={() => void interrupt()}
-          className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
-        >
-          {interrupting ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <Square className="h-4 w-4" fill="currentColor" aria-hidden />}
-        </button>
-      </Hint>
-      {structuredSession ? (
-        <Hint label={t("composer.attachTerminal")}>
-          <button
-            type="button"
-            aria-label={t("composer.attachTerminal")}
-            disabled={attachingTerminal}
-            onClick={() => void attachTerminal()}
-            className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
-          >
-            {attachingTerminal ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden /> : <SquareTerminal className="h-4 w-4" aria-hidden />}
-          </button>
-        </Hint>
-      ) : <Hint label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactTitle")}>
-        <button
-          type="button"
-          aria-label={compactArmed ? t("composer.compactConfirmTitle") : t("composer.compactAria")}
-          disabled={compacting}
-          onClick={() => {
-            if (!compactArmed) {
-              setCompactArmed(true);
-              return;
-            }
-            setCompactArmed(false);
-            void compact();
-          }}
-          className={`inline-flex shrink-0 items-center justify-center gap-1 rounded-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${
-            isMobile ? "min-h-11 px-2.5" : "p-2"
-          } ${
-            compactArmed
-              ? "bg-info/10 text-info"
-              : "text-muted hover:bg-sunken hover:text-info"
-          }`}
-        >
-          {compacting ? (
-            <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
-          ) : compactArmed ? (
-            <>
-              <Check className="h-4 w-4" aria-hidden />
-              <span className="text-[10.5px] font-bold">{t("composer.compactConfirm")}</span>
-            </>
-          ) : (
-            <FoldVertical className="h-4 w-4" aria-hidden />
-          )}
-        </button>
-      </Hint>}
-    </>
-  ) : null;
+  /* Mode chip, interrupt, compact, and attach-terminal now live in the unified
+     control strip (issue #241); the composer no longer renders them. */
 
   const canQuickAck = !spawnMode || relayMode;
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
@@ -706,49 +586,20 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
               ]
             : []
         }
-        showImage={!isMobile}
+        showImage={!deadHost}
+        imageDisabledReason={structuredSession ? t("strip.imagesStructured") : undefined}
+        sendDisabledReason={deadHost ? t("deadHost.sendBlocked") : undefined}
         receipts={
           displayedRuntimeReceipts.length
             ? <RuntimeComposerReceipts
                 receipts={displayedRuntimeReceipts}
-                actionsDisabled={busy || voiceSending}
+                actionsDisabled={busy || voiceSending || deadHost}
                 onRetry={(receipt) => void retryRuntimeReceipt(receipt)}
                 onEdit={editRuntimeReceipt}
               />
             : undefined
         }
-        leftSlot={
-          isMobile ? (
-            <div className="flex min-w-0 items-center gap-1.5">
-              <button
-                type="button"
-                aria-expanded={toolsOpen}
-                aria-label={t("composer.moreTools")}
-                title={t("composer.moreTools")}
-                onClick={() => setToolsOpen((value) => !value)}
-                className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
-              >
-                <Plus className={`h-4 w-4 transition-transform ${toolsOpen ? "rotate-45" : ""}`} aria-hidden />
-              </button>
-              {toolsOpen ? (
-                <>
-                  {modeChip}
-                  {liveControls}
-                  <ImagePickerButton
-                    ariaLabel={t("composer.addImages")}
-                    className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
-                    onFiles={attachments.addFiles}
-                  />
-                </>
-              ) : null}
-            </div>
-          ) : (
-            <div className="flex min-w-0 items-center gap-1.5">
-              {modeChip}
-              {liveControls}
-            </div>
-          )
-        }
+        leftSlot={null}
       />
     </form>
   );

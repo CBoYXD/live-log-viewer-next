@@ -12,6 +12,9 @@ import {
   mintIdempotencyKey,
   openAttentions,
   receiptIsTerminal,
+  receiptIsTerminalSuccess,
+  collapseReceipts,
+  humanReceiptReasonKey,
   type RuntimeAttention,
   type RuntimeEnvelope,
   type RuntimeReceipt,
@@ -363,5 +366,55 @@ describe("mintIdempotencyKey", () => {
     const b = mintIdempotencyKey();
     expect(a.startsWith("op_")).toBe(true);
     expect(a).not.toBe(b);
+  });
+});
+
+/* --------------------- receipt-row redesign (issue #247 §7) --------------------- */
+
+describe("humanReceiptReasonKey", () => {
+  test("maps known dead-host aliases to one sentence key, unknowns to null", () => {
+    expect(humanReceiptReasonKey("dead-host")).toBe("receipt.human.deadHost");
+    expect(humanReceiptReasonKey("HOST-DEAD")).toBe("receipt.human.deadHost"); // case-insensitive
+    expect(humanReceiptReasonKey(" unhosted ")).toBe("receipt.human.deadHost"); // trimmed
+    expect(humanReceiptReasonKey("quota-exceeded")).toBeNull();
+    expect(humanReceiptReasonKey(null)).toBeNull();
+  });
+});
+
+describe("collapseReceipts", () => {
+  const r = (operationId: string, overrides: Partial<RuntimeReceipt> = {}) =>
+    receipt({ operationId, conversationId: "c", ...overrides });
+
+  test("terminal successes are silent — they never surface as a row (the transcript is the proof)", () => {
+    const collapsed = collapseReceipts([r("a", { status: "delivered" }), r("b", { status: "answered" })]);
+    expect(collapsed.failure).toBeNull();
+    expect(collapsed.inFlight).toEqual([]);
+    // kept only for the forensic `history` disclosure
+    expect(collapsed.history.length).toBe(2);
+    expect(receiptIsTerminalSuccess("steered")).toBe(true);
+  });
+
+  test("in-flight receipts stay visible so their pulse dot survives", () => {
+    const collapsed = collapseReceipts([r("a", { status: "delivering" }), r("b", { status: "queued", queuePosition: 2 })]);
+    expect(collapsed.inFlight.map((x) => x.operationId)).toEqual(["a", "b"]);
+  });
+
+  test("identical consecutive failures collapse into one row with a ×N counter", () => {
+    const collapsed = collapseReceipts([
+      r("a", { status: "failed", reason: "dead-host" }),
+      r("b", { status: "failed", reason: "dead-host" }),
+      r("c", { status: "failed", reason: "dead-host" }),
+    ]);
+    expect(collapsed.failure?.count).toBe(3);
+    expect(collapsed.failure?.receipt.operationId).toBe("a"); // the newest is the head
+  });
+
+  test("a different failure reason breaks the run, leaving the older one in history", () => {
+    const collapsed = collapseReceipts([
+      r("a", { status: "failed", reason: "dead-host" }),
+      r("b", { status: "rejected", reason: "turn-active" }),
+    ]);
+    expect(collapsed.failure?.count).toBe(1);
+    expect(collapsed.failure?.receipt.operationId).toBe("a");
   });
 });

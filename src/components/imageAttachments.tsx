@@ -150,12 +150,17 @@ export function ImagePickerButton({
   onFiles,
   ariaLabel,
   className,
+  disabledReason,
 }: {
   onFiles: (files: File[]) => void;
   ariaLabel: string;
   className: string;
+  /** When set, the picker is disabled and the reason rides the aria-label +
+      title (issue #247 §7: structured hosts can't take images yet). */
+  disabledReason?: string;
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
+  const disabled = Boolean(disabledReason);
   return (
     <>
       <input
@@ -169,7 +174,15 @@ export function ImagePickerButton({
           event.target.value = "";
         }}
       />
-      <button type="button" aria-label={ariaLabel} onClick={() => fileRef.current?.click()} className={className}>
+      <button
+        type="button"
+        aria-label={disabled ? `${ariaLabel} — ${disabledReason}` : ariaLabel}
+        title={disabledReason}
+        aria-disabled={disabled || undefined}
+        disabled={disabled}
+        onClick={() => { if (!disabled) fileRef.current?.click(); }}
+        className={className}
+      >
         <ImageIcon className="h-4 w-4" aria-hidden />
       </button>
     </>

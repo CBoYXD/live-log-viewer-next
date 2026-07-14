@@ -1,0 +1,58 @@
+import { expect, test } from "bun:test";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { translate } from "@/lib/i18n";
+import type { AttachCommand } from "@/lib/agent/attachCommand";
+
+import { AttachTerminalDialogView } from "./AttachTerminalDialog";
+
+const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
+
+const command: AttachCommand = {
+  engine: "claude",
+  accountId: "d",
+  accountLabel: "D · claude-max",
+  cwd: "/home/latand/Projects/atlas",
+  command: "env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/x/d' claude --resume 22222222",
+  fullCommand: "cd '/home/latand/Projects/atlas' && env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='/x/d' claude --resume 22222222",
+};
+
+function view(over: Partial<Parameters<typeof AttachTerminalDialogView>[0]> = {}) {
+  return renderToStaticMarkup(
+    <AttachTerminalDialogView t={t} loading={false} error={null} command={command} onClose={() => {}} onSecondary={() => {}} {...over} />,
+  );
+}
+
+test("the dialog is a labelled modal that shows the account and both copy blocks", () => {
+  const html = view();
+  expect(html).toContain('role="dialog"');
+  expect(html).toContain('aria-modal="true"');
+  expect(html).toContain("D · claude-max");
+  // the cwd block and the resume command block are both present, copyable
+  expect(html).toContain("cd /home/latand/Projects/atlas");
+  expect(html).toContain("claude --resume 22222222");
+  expect(html).toContain(translate("en", "attach.copyFull"));
+  expect(html).toContain(translate("en", "attach.secondaryViewer"));
+});
+
+test("the take-over warning is shown", () => {
+  expect(view()).toContain(translate("en", "attach.takeoverWarning"));
+});
+
+test("a subagent command carries the root-session note", () => {
+  const html = view({ command: { ...command, note: "subagent-root" } });
+  expect(html).toContain(translate("en", "attach.subagentNote"));
+});
+
+test("the loading state is a polite status region, no command yet", () => {
+  const html = view({ loading: true, command: null });
+  expect(html).toContain('role="status"');
+  expect(html).toContain(translate("en", "attach.loading"));
+  expect(html).not.toContain("claude --resume");
+});
+
+test("an error is surfaced as an alert", () => {
+  const html = view({ loading: false, error: "this conversation cannot be attached", command: null });
+  expect(html).toContain('role="alert"');
+  expect(html).toContain("this conversation cannot be attached");
+});

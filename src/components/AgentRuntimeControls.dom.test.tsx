@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
 
-import { AgentRuntimeControls } from "./AgentRuntimeControls";
+import { AgentRuntimeControls, ResumeRuntimeControls, readResumeDraft } from "./AgentRuntimeControls";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -59,6 +59,34 @@ for (const phase of ["pending", "confirming"] as const) {
     flushSync(() => reloaded.root.unmount());
   });
 }
+
+test("the on-resume profile (issue #241 §4) persists under a :resume key and round-trips", async () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  flushSync(() => root.render(<ResumeRuntimeControls file={file} />));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const effort = host.querySelector('select[aria-label="Running agent reasoning effort"]') as HTMLSelectElement;
+  effort.value = "medium";
+  flushSync(() => effort.dispatchEvent(new dom.Event("change", { bubbles: true }) as unknown as Event));
+  const apply = host.querySelector('button[aria-label="Apply"]') as HTMLButtonElement;
+  flushSync(() => apply.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
+
+  // saved under the dedicated resume key — never touching the live-runtime key
+  expect(localStorage.getItem(key + ":resume")).toContain('"effort":"medium"');
+  expect(localStorage.getItem(key)).toBeNull();
+  // and readResumeDraft (what the spawn path reads at send time) returns it
+  expect(readResumeDraft(file).effort).toBe("medium");
+  flushSync(() => root.unmount());
+});
+
+test("readResumeDraft clamps an out-of-range persisted effort back to the file default", () => {
+  localStorage.setItem(key + ":resume", JSON.stringify({ model: "gpt-5.6-sol", effort: "not-a-real-effort", fast: false }));
+  const draft = readResumeDraft(file);
+  expect(draft.model).toBe("gpt-5.6-sol");
+  expect(draft.effort).toBe("high"); // the file's own effort, since the stored one is invalid
+});
 
 test("an edited draft ignores the previous queued response", async () => {
   let resolveFetch!: (value: Response) => void;

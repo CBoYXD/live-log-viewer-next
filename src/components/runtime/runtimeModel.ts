@@ -18,6 +18,7 @@
  */
 
 import type { Flow } from "@/lib/flows/types";
+import type { MessageKey } from "@/lib/i18n";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { Activity } from "@/lib/types";
 import type { Workflow } from "@/lib/workflows/types";
@@ -619,6 +620,86 @@ export function hasBlockingAttention(store: RuntimeStore, session: RuntimeSessio
 /** A receipt is terminal once no further transition is expected. */
 export function receiptIsTerminal(status: ReceiptStatus): boolean {
   return status === "delivered" || status === "answered" || status === "rejected" || status === "failed" || status === "interrupted";
+}
+
+/** A receipt whose outcome is a terminal *success* — the transcript itself is
+    the proof of delivery, so the receipt-row hides it (§7 "success is silent"). */
+export function receiptIsTerminalSuccess(status: ReceiptStatus): boolean {
+  return status === "delivered" || status === "answered" || status === "steered" || status === "turn-started";
+}
+
+/** A receipt still in flight — keeps the quiet pulse dot until it resolves. */
+export function receiptIsInFlight(status: ReceiptStatus): boolean {
+  return status === "pending" || status === "delivering" || status === "queued";
+}
+
+function receiptIsFailure(status: ReceiptStatus): boolean {
+  return status === "rejected" || status === "failed";
+}
+
+/**
+ * Reason codes mapped to human sentence keys (§7 "human words, both
+ * languages"). Unknown reasons are printed verbatim by the caller, prefixed
+ * "not delivered:". Keyed on the sanitized lowercase reason — no Cyrillic in the
+ * discriminant, keys only (§9).
+ */
+export const RECEIPT_REASON_KEYS: Record<string, MessageKey> = {
+  "dead-host": "receipt.human.deadHost",
+  "host-dead": "receipt.human.deadHost",
+  "no-host": "receipt.human.deadHost",
+  unhosted: "receipt.human.deadHost",
+  "host-unavailable": "receipt.human.deadHost",
+  "stale-delivery-key": "receipt.human.staleKey",
+  "duplicate": "receipt.human.duplicate",
+  "turn-active": "receipt.human.turnActive",
+  "no-active-turn": "receipt.human.noTurn",
+};
+
+/** The human sentence key for a receipt's reason, or null for an unknown one. */
+export function humanReceiptReasonKey(reason: string | null | undefined): MessageKey | null {
+  if (!reason) return null;
+  return RECEIPT_REASON_KEYS[reason.trim().toLowerCase()] ?? null;
+}
+
+/** One collapsed failure row: the newest failure plus how many identical
+    consecutive ones folded into it (§7 "×5 · [Retry] [Edit]"). */
+export interface CollapsedFailure {
+  receipt: RuntimeReceipt;
+  count: number;
+}
+
+export interface CollapsedReceipts {
+  /** In-flight receipts (queued/delivering) — each keeps its pulse dot. */
+  inFlight: RuntimeReceipt[];
+  /** At most one visible failure row, with its repeat counter. */
+  failure: CollapsedFailure | null;
+  /** Older receipts kept behind a `history (n)` disclosure for forensics. */
+  history: RuntimeReceipt[];
+}
+
+/**
+ * Collapse a newest-first receipt list into the single-slot status row (§7):
+ * terminal successes disappear (the transcript is the proof), in-flight rows
+ * stay, and identical consecutive failures fold into one row with a counter.
+ * Everything the row doesn't surface lands in `history` for forensics. Pure and
+ * order-deterministic so the reducer is unit-tested.
+ */
+export function collapseReceipts(receipts: RuntimeReceipt[]): CollapsedReceipts {
+  const inFlight = receipts.filter((r) => receiptIsInFlight(r.status));
+  const failures = receipts.filter((r) => receiptIsFailure(r.status));
+  if (failures.length === 0) {
+    return { inFlight, failure: null, history: receipts.filter((r) => receiptIsTerminalSuccess(r.status)) };
+  }
+  const [head, ...rest] = failures;
+  const sameReason = (r: RuntimeReceipt) => (r.reason ?? "") === (head!.reason ?? "");
+  let count = 1;
+  for (const r of rest) {
+    if (sameReason(r)) count += 1;
+    else break;
+  }
+  const foldedIds = new Set([head!.operationId, ...rest.slice(0, count - 1).map((r) => r.operationId)]);
+  const history = receipts.filter((r) => !foldedIds.has(r.operationId) && !receiptIsInFlight(r.status));
+  return { inFlight, failure: { receipt: head!, count }, history };
 }
 
 /**

@@ -52,6 +52,12 @@ export interface ComposerBarProps {
       #25). Rendered under the status line; absent while the runtime bus is off,
       so the composer is unchanged on the landing-disabled path. */
   receipts?: ReactNode;
+  /** When set, the image affordance is disabled and a pasted image is refused
+      with this message (issue #247 §7: structured hosts can't take images yet). */
+  imageDisabledReason?: string;
+  /** When set, Send is disabled with this tooltip and no submit is attempted
+      (issue #247 §5: a dead host blocks sends so no rejected receipts stack). */
+  sendDisabledReason?: string;
 }
 
 function SendMenu({ label, actions, onClose }: { label: string; actions: SendMenuAction[]; onClose: () => void }) {
@@ -130,6 +136,8 @@ export function ComposerBar({
   showImage = true,
   onImageFiles,
   receipts,
+  imageDisabledReason,
+  sendDisabledReason,
 }: ComposerBarProps) {
   const {
     displayText,
@@ -141,6 +149,7 @@ export function ComposerBar({
     insertSpoken,
     stopAndSend,
     submit,
+    setStatus,
     fieldsDisabled,
     canSend,
     dictationRecording,
@@ -150,7 +159,8 @@ export function ComposerBar({
   const isMobile = useIsMobile();
   const [sendMenuOpen, setSendMenuOpen] = useState(false);
   const hasSendMenu = sendMenuActions.length > 0;
-  const sendDisabled = !canSend && !hasSendMenu;
+  const sendBlocked = Boolean(sendDisabledReason);
+  const sendDisabled = sendBlocked || (!canSend && !hasSendMenu);
   /* Composer action buttons (send, image) are a 32px visual control with a 44px
      touch hit area via a pseudo-element (design doc §3.5, matching the anchored
      mic), so the accent send never renders as a full 44×44 block on a phone;
@@ -174,22 +184,22 @@ export function ComposerBar({
           setSendMenuOpen((open) => !open);
         }}
       >
-        <Hint label={dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
+        <Hint label={sendBlocked ? sendDisabledReason! : dictationRecording ? (sendTitleRecording ?? sendLabelRecording) : sendLabelIdle} align="right">
           <button
-            type={dictationRecording ? "button" : "submit"}
+            type={dictationRecording && !sendBlocked ? "button" : "submit"}
             onClick={
-              dictationRecording
+              dictationRecording && !sendBlocked
                 ? () => void stopAndSend()
                 : (event) => {
-                    if (!canSend) {
+                    if (sendBlocked || !canSend) {
                       event.preventDefault();
                       event.stopPropagation();
                     }
                   }
             }
             disabled={sendDisabled}
-            aria-disabled={!canSend}
-            aria-label={dictationRecording ? sendLabelRecording : sendLabelIdle}
+            aria-disabled={sendBlocked || !canSend}
+            aria-label={sendBlocked ? sendDisabledReason! : dictationRecording ? sendLabelRecording : sendLabelIdle}
             style={dictationRecording ? undefined : sendIdleStyle}
             className={`inline-flex shrink-0 items-center justify-center rounded-control border text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-40 aria-disabled:opacity-40 ${iconBtn} ${
               dictationRecording ? "border-danger bg-danger hover:opacity-90" : sendIdleClassName
@@ -226,6 +236,14 @@ export function ComposerBar({
              token here hides its round-trip from the eventual mic press. */
           onFocus={prewarmLiveToken}
           onPaste={(event) => {
+            if (imageDisabledReason) {
+              const hasImage = Array.from(event.clipboardData.items).some((entry) => entry.type.startsWith("image/"));
+              if (hasImage) {
+                event.preventDefault();
+                setStatus({ kind: "err", text: imageDisabledReason });
+              }
+              return;
+            }
             if (onImageFiles) {
               const picks = Array.from(event.clipboardData.items)
                 .filter((entry) => entry.type.startsWith("image/"))
@@ -269,10 +287,11 @@ export function ComposerBar({
         <div className="flex items-center justify-between gap-1.5">
           <div className="flex min-w-0 items-center gap-1.5">{leftSlot}</div>
           {showImage ? (
-            <Hint label={imageAriaLabel}>
+            <Hint label={imageDisabledReason ?? imageAriaLabel}>
               <ImagePickerButton
                 ariaLabel={imageAriaLabel}
-                className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${iconBtn}`}
+                disabledReason={imageDisabledReason}
+                className={`inline-flex shrink-0 items-center justify-center rounded-control text-muted hover:bg-sunken hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 ${iconBtn}`}
                 onFiles={onImageFiles ?? attachments.addFiles}
               />
             </Hint>
