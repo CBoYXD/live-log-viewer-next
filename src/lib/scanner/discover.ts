@@ -3,11 +3,12 @@ import { access, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import type { FileEntry, ProjectCatalogEntry, RootKey } from "../types";
+import { forEachCooperatively, mapCooperatively } from "../cooperative";
 import { sessionProjectProjection } from "../session/titleProjection";
 import { codexThreadIdFromPath, nativeCodexParentThreadId } from "./codexNative";
 import { describe } from "./describe";
-import { conversationCatalogSnapshot } from "./conversationCatalog";
-import { projectCatalogSnapshotFromRaw } from "./projectCatalog";
+import type { ConversationCatalogEntry } from "./conversationCatalog";
+import { beginProjectCatalogScan, projectCatalogSnapshotFromRaw } from "./projectCatalog";
 import { projectResolutionStateKey } from "./projectState";
 import { EXTS, ROOTS, scanRootEntries } from "./roots";
 import { selectSchemeWindow } from "./schemeWindow";
@@ -107,36 +108,43 @@ async function discoverRaw(roots: Roots | RootEntries, limit: Limit): Promise<Ra
   /* Codex account roots follow the legacy root in registry order. A copied
      rollout therefore resolves to its managed-account copy before ranking. */
   const codexRollouts = new Map<string, RawEntry>();
-  for (const entry of raw) {
+  await forEachCooperatively(raw, (entry) => {
     const filename = path.basename(entry.path);
-    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) continue;
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) return;
     const current = codexRollouts.get(filename);
     if (!current || current.root !== entry.root) codexRollouts.set(filename, entry);
-  }
-  return raw.filter((entry) => {
-    const filename = path.basename(entry.path);
-    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl")) return true;
-    return codexRollouts.get(filename) === entry;
   });
+  const deduplicated: RawEntry[] = [];
+  await forEachCooperatively(raw, (entry) => {
+    const filename = path.basename(entry.path);
+    if (entry.rootName !== "codex-sessions" || !filename.startsWith("rollout-") || !filename.endsWith(".jsonl") || codexRollouts.get(filename) === entry) {
+      deduplicated.push(entry);
+    }
+  });
+  return deduplicated;
 }
 
 function cappedEntries(ranked: RawEntry[], projectByPath: ReadonlyMap<string, string>): RawEntry[] {
   return selectSchemeWindow(ranked, (entry) => projectByPath.get(entry.path) ?? "other");
 }
 
-function canonicalProjectCatalog(
+async function canonicalProjectCatalog(
   projectByPath: ReadonlyMap<string, string>,
+  conversationCatalog: readonly ConversationCatalogEntry[],
   excludedSummaryPaths?: ReadonlySet<string>,
   sourceCatalog: readonly ProjectCatalogEntry[] = [],
-): { projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] } {
+): Promise<{ projectByPath: Map<string, string>; projectCatalog: ProjectCatalogEntry[] }> {
   const canonicalByPath = new Map(projectByPath);
-  for (const [pathname, project] of sessionProjectProjection(true).projectByPath) {
+  await forEachCooperatively([...sessionProjectProjection(true).projectByPath], ([pathname, project]) => {
     if (canonicalByPath.has(pathname)) canonicalByPath.set(pathname, project);
-  }
+  });
   const groups = new Map<string, ProjectCatalogEntry>();
-  const sourceRoots = new Map(sourceCatalog.map((entry) => [entry.project, entry.projectRoot] as const));
-  for (const entry of conversationCatalogSnapshot()) {
-    if (excludedSummaryPaths?.has(entry.path)) continue;
+  const sourceRoots = new Map<string, string | undefined>();
+  await forEachCooperatively(sourceCatalog, (entry) => {
+    sourceRoots.set(entry.project, entry.projectRoot);
+  });
+  await forEachCooperatively(conversationCatalog, (entry) => {
+    if (excludedSummaryPaths?.has(entry.path)) return;
     const project = canonicalByPath.get(entry.path) ?? entry.project;
     const group = groups.get(project) ?? { project, smt: 0, conversations: 0 };
     group.smt = Math.max(group.smt, entry.mtime);
@@ -145,22 +153,22 @@ function canonicalProjectCatalog(
     const projectRoot = sourceRoots.get(sourceProject);
     if (!group.projectRoot && projectRoot) group.projectRoot = projectRoot;
     groups.set(project, group);
-  }
+  });
   return {
     projectByPath: canonicalByPath,
     projectCatalog: [...groups.values()].sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
   };
 }
 
-function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): FileEntry[] {
+async function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, string>, demoted?: ReadonlySet<string>, pin?: ReadonlySet<string>): Promise<FileEntry[]> {
   const stateKey = projectResolutionStateKey();
   raw.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
   const rawByCodexThread = new Map<string, RawEntry>();
-  for (const entry of raw) {
-    if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) continue;
+  await forEachCooperatively(raw, (entry) => {
+    if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return;
     const threadId = codexThreadIdFromPath(entry.path);
     if (threadId) rawByCodexThread.set(threadId, entry);
-  }
+  });
   /* Demoted transcripts (archived migration predecessors — their conversation
      lives on under a successor path) rank below every current transcript for
      the recency cap: an account-migration wave must not eat half the cap and
@@ -182,17 +190,16 @@ function entriesFromRaw(raw: RawEntry[], projectByPath?: ReadonlyMap<string, str
       selected.push(pinned);
     }
   }
-  for (let index = 0; index < selected.length; index += 1) {
-    const entry = selected[index]!;
-    if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) continue;
+  await forEachCooperatively(selected, (entry) => {
+    if (entry.rootName !== "codex-sessions" || !entry.path.endsWith(".jsonl")) return;
     const parentThreadId = nativeCodexParentThreadId(entry.path, entry.st.size);
     const parent = parentThreadId ? rawByCodexThread.get(parentThreadId) : undefined;
     if (parent && !selectedPaths.has(parent.path)) {
       selectedPaths.add(parent.path);
       selected.push(parent);
     }
-  }
-  return selected.map((entry) => {
+  });
+  return mapCooperatively(selected, (entry) => {
     const meta = describe(entry.rootName, entry.root, entry.path, entry.st, stateKey);
     return {
       path: entry.path,
@@ -227,14 +234,21 @@ export async function discoverFilesWithProjectCatalog(
   files: FileEntry[];
   projectCatalog: ProjectCatalogEntry[];
 }> {
+  const scanToken = beginProjectCatalogScan(options.persist !== false);
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const snapshot = projectCatalogSnapshotFromRaw(raw, {
+  const snapshot = await projectCatalogSnapshotFromRaw(raw, {
     persist: options.persist,
     excludedSummaryPaths: options.demote,
+    scanToken,
   });
-  const { projectCatalog, projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, options.demote, snapshot.projectCatalog);
-  return { files: entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
+  const { projectCatalog, projectByPath } = await canonicalProjectCatalog(
+    snapshot.projectByPath,
+    snapshot.conversationCatalog,
+    options.demote,
+    snapshot.projectCatalog,
+  );
+  return { files: await entriesFromRaw(raw, projectByPath, options.demote, options.pin), projectCatalog };
 }
 
 export async function discoverFiles(
@@ -242,16 +256,23 @@ export async function discoverFiles(
   demote?: ReadonlySet<string>,
   pin?: ReadonlySet<string>,
 ): Promise<FileEntry[]> {
+  const scanToken = beginProjectCatalogScan(false);
   const limit = createLimiter(48);
   const raw = await discoverRaw(roots, limit);
-  const snapshot = projectCatalogSnapshotFromRaw(raw, { persist: false });
-  const { projectByPath } = canonicalProjectCatalog(snapshot.projectByPath, undefined, snapshot.projectCatalog);
+  const snapshot = await projectCatalogSnapshotFromRaw(raw, { persist: false, scanToken });
+  const { projectByPath } = await canonicalProjectCatalog(
+    snapshot.projectByPath,
+    snapshot.conversationCatalog,
+    undefined,
+    snapshot.projectCatalog,
+  );
   return entriesFromRaw(raw, projectByPath, demote, pin);
 }
 
 /** Cold-start fallback for the list/search route. It builds only lightweight
  * catalog metadata and leaves the scheme processing pipeline untouched. */
 export async function refreshConversationCatalog(roots: Roots | RootEntries = scanRootEntries()): Promise<void> {
+  const scanToken = beginProjectCatalogScan(false);
   const raw = await discoverRaw(roots, createLimiter(48));
-  projectCatalogSnapshotFromRaw(raw, { persist: false });
+  await projectCatalogSnapshotFromRaw(raw, { persist: false, scanToken });
 }

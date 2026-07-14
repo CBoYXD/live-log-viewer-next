@@ -2,11 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { statePath } from "@/lib/configDir";
 import { migrateBoardProjects } from "@/lib/board/store";
+import { statePath } from "@/lib/configDir";
+import { forEachCooperatively, mapCooperatively } from "@/lib/cooperative";
 
 import type { ProjectCatalogEntry } from "../types";
-import { replaceConversationCatalog } from "./conversationCatalog";
+import { replaceConversationCatalog, type ConversationCatalogEntry } from "./conversationCatalog";
 import { describe } from "./describe";
 import type { RawEntry } from "./discover";
 import { PROJECT_RESOLUTION_VERSION, projectResolutionStateKey } from "./projectState";
@@ -41,6 +42,24 @@ type ProjectCatalogState = {
 };
 
 const CATALOG_FILE = "project-catalog.json";
+const projectCatalogRuntime = globalThis as typeof globalThis & {
+  __llvProjectCatalogPublicationGeneration?: number;
+  __llvProjectCatalogPersistenceGeneration?: number;
+};
+
+export interface ProjectCatalogScanToken {
+  publication: number;
+  persistence: number | null;
+}
+
+export function beginProjectCatalogScan(persist: boolean): ProjectCatalogScanToken {
+  const publication = (projectCatalogRuntime.__llvProjectCatalogPublicationGeneration ?? 0) + 1;
+  projectCatalogRuntime.__llvProjectCatalogPublicationGeneration = publication;
+  if (!persist) return { publication, persistence: null };
+  const persistence = (projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration ?? 0) + 1;
+  projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration = persistence;
+  return { publication, persistence };
+}
 
 function catalogPath(): string {
   return statePath(CATALOG_FILE);
@@ -208,32 +227,40 @@ function unambiguousMigrations(
   return migrations;
 }
 
-export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persist?: boolean; excludedSummaryPaths?: ReadonlySet<string> } = {}): {
+export async function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: {
+  persist?: boolean;
+  excludedSummaryPaths?: ReadonlySet<string>;
+  scanToken?: ProjectCatalogScanToken;
+} = {}): Promise<{
   projectCatalog: ProjectCatalogEntry[];
   projectByPath: Map<string, string>;
-} {
+  conversationCatalog: ConversationCatalogEntry[];
+}> {
+  const scanToken = options.scanToken ?? beginProjectCatalogScan(options.persist !== false);
   const state = readState();
   const stateKey = projectResolutionStateKey();
   const nextFiles: Record<string, CachedProjectFile> = {};
   const groups = new Map<string, ProjectCatalogEntry>();
   const rootCandidates = new Map<string, Map<string, { count: number; newest: number }>>();
   const projectByPath = new Map<string, string>();
-  const previousProjects = new Map(raw.map((entry) => [entry.path, state.files[entry.path]?.project]));
-  const files = raw.map((entry) => cachedFile(entry, state, stateKey));
+  const previousProjects = new Map<string, string | undefined>();
+  await forEachCooperatively(raw, (entry) => {
+    previousProjects.set(entry.path, state.files[entry.path]?.project);
+  });
+  const files = await mapCooperatively(raw, (entry) => cachedFile(entry, state, stateKey));
   const claudeSessionProjects = new Map<string, string>();
-  for (let index = 0; index < raw.length; index += 1) {
-    const entry = raw[index]!;
+  await forEachCooperatively(raw, (entry, index) => {
     const file = files[index]!;
     const slug = file.rootName === "claude-projects" && file.session ? claudeSlug(entry) : null;
     if (slug) claudeSessionProjects.set(slug, file.project);
-  }
-  for (let index = 0; index < raw.length; index += 1) {
+  });
+  await forEachCooperatively(raw, (_entry, index) => {
     const slug = claudeSlug(raw[index]!);
     const project = slug ? claudeSessionProjects.get(slug) : undefined;
     if (project) files[index]!.project = project;
-  }
+  });
   const changes = new Map<string, Set<string>>();
-  for (const file of files) {
+  await forEachCooperatively(files, (file) => {
     nextFiles[file.path] = {
       rootName: file.rootName,
       size: file.size,
@@ -271,21 +298,22 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       candidates.set(file.projectRoot, candidate);
       rootCandidates.set(project, candidates);
     }
-  }
-  for (const [project, candidates] of rootCandidates) {
+  });
+  await forEachCooperatively([...rootCandidates], ([project, candidates]) => {
     const projectRoot = [...candidates]
       .sort(([leftPath, left], [rightPath, right]) =>
         right.count - left.count || right.newest - left.newest || leftPath.localeCompare(rightPath))[0]?.[0];
     if (projectRoot) groups.get(project)!.projectRoot = projectRoot;
-  }
-  for (const pathname of options.excludedSummaryPaths ?? []) {
+  });
+  await forEachCooperatively([...(options.excludedSummaryPaths ?? [])], (pathname) => {
     const file = nextFiles[pathname];
     const group = file ? groups.get(file.project || "other") : undefined;
     if (file?.session && group && group.conversations > 0) group.conversations -= 1;
-  }
-  replaceConversationCatalog(files.flatMap((file, index) => {
-    if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return [];
-    return [{
+  });
+  const conversationCatalog: ConversationCatalogEntry[] = [];
+  await forEachCooperatively(files, (file, index) => {
+    if (!file.session || (file.engine !== "codex" && file.engine !== "claude")) return;
+    conversationCatalog.push({
       path: file.path,
       root: file.rootName,
       name: path.relative(raw[index]!.root, file.path),
@@ -298,9 +326,13 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       fmt: file.fmt,
       mtime: file.mtimeMs / 1000,
       size: file.size,
-    }];
-  }));
-  if (options.persist !== false) {
+    });
+  });
+  const isCurrentPublication = projectCatalogRuntime.__llvProjectCatalogPublicationGeneration === scanToken.publication;
+  const isCurrentPersistence = scanToken.persistence !== null
+    && projectCatalogRuntime.__llvProjectCatalogPersistenceGeneration === scanToken.persistence;
+  if (isCurrentPublication) replaceConversationCatalog(conversationCatalog);
+  if (isCurrentPersistence && options.persist !== false) {
     let boardHealed = true;
     try {
       boardHealed = migrateBoardProjects(unambiguousMigrations(changes, groups));
@@ -318,9 +350,10 @@ export function projectCatalogSnapshotFromRaw(raw: RawEntry[], options: { persis
       .filter((entry) => entry.conversations > 0)
       .sort((a, b) => b.smt - a.smt || a.project.localeCompare(b.project)),
     projectByPath,
+    conversationCatalog,
   };
 }
 
-export function projectCatalogFromRaw(raw: RawEntry[]): ProjectCatalogEntry[] {
-  return projectCatalogSnapshotFromRaw(raw).projectCatalog;
+export async function projectCatalogFromRaw(raw: RawEntry[]): Promise<ProjectCatalogEntry[]> {
+  return (await projectCatalogSnapshotFromRaw(raw)).projectCatalog;
 }
