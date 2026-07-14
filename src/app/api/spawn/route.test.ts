@@ -10,7 +10,7 @@ import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { codexSessionRoots } from "@/lib/accounts/codex";
 import { spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
-import { spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
+import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
@@ -222,6 +222,34 @@ test("operator callers may grant native sub-agent permission", async () => {
   expect(await response.json()).toEqual({ error: "working directory is required" });
 });
 
+test("structured spawn flag reaches the pane-less capability gate", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-smoke-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "0";
+  try {
+    const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "codex", cwd, prompt: "smoke" }),
+    }));
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "structured spawn requires LLV_STRUCTURED_HOSTS=1" });
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+  }
+});
+
 test("spawn route projects a launched path-pending receipt as a truthful success", () => {
   const store = registry();
   const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra", clientAttemptId: "attempt_path_pending", requestDigest: "digest" });
@@ -246,6 +274,59 @@ test("spawn route projects a launched path-pending receipt as a truthful success
     launchId: begun.receipt.launchId,
     conversationId: begun.receipt.conversationId,
   });
+});
+
+test("a completed pane-less receipt replays as a launched structured conversation", () => {
+  const store = registry();
+  const pathname = `/sessions/${crypto.randomUUID()}.jsonl`;
+  const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+  if (begun.kind !== "created") throw new Error("expected a new receipt");
+  const settled = store.settleSpawn(begun.receipt.launchId, {
+    key: { engine: "codex", sessionId: crypto.randomUUID() },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: "terra",
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:hosted",
+      process: { pid: 10, startIdentity: "10:one" },
+      eventCursor: 1,
+      protocolVersion: "test",
+      writerClaimEpoch: 1,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 1,
+    claimOwner: "structured-host:test",
+    pendingAction: "spawn",
+  });
+  if (settled.kind !== "settled") throw new Error("expected a settled receipt");
+
+  expect(spawnResponseForReceipt(settled.receipt, pathname, { structured: true })).toMatchObject({
+    launched: true,
+    target: null,
+    path: pathname,
+    state: "settled",
+  });
+});
+
+test("a staged pane-less receipt replays with accepted status", () => {
+  const response = {
+    ok: true as const,
+    target: null,
+    path: "/sessions/pending.jsonl",
+    launchId: "launch-pending",
+    conversationId: "conversation_pending",
+    launched: false,
+    retrySafe: false,
+    state: "path-pending" as const,
+  };
+
+  expect(spawnReplayStatus(response, true)).toBe(202);
+  expect(spawnReplayStatus(response, false)).toBe(200);
 });
 
 test("a pane-bound launch verification failure returns launched false with its teaching error", () => {

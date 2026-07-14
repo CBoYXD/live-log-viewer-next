@@ -16,6 +16,8 @@ import { listFiles } from "@/lib/scanner";
 import { pathAllowed } from "@/lib/scanner/roots";
 import { allowedKillTarget, consumeKillTarget } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
+import { materializeStructuredTerminal } from "@/lib/runtime/structuredTerminal";
+import { dispatchStructuredControl } from "@/lib/runtime/structuredControls";
 import {
   captureTmuxAttachReference,
   collectImagePayloads,
@@ -188,6 +190,22 @@ export async function POST(req: NextRequest): Promise<NextResponse<SendResponse 
   if (!hasPid && !filePath && !conversationId.startsWith("conversation_")) {
     return NextResponse.json({ error: "pid, path, or conversationId is required" }, { status: 400 });
   }
+
+  if (body.action === "attach-terminal") {
+    if (!filePath || !pathAllowed(filePath)) {
+      return NextResponse.json({ error: "valid transcript path is required" }, { status: 400 });
+    }
+    try {
+      const attached = await materializeStructuredTerminal(filePath);
+      return NextResponse.json({ ok: true, target: attached.target });
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 409 });
+    }
+  }
+
+  const explicitAction = typeof body.action === "string" ? body.action : "";
+  const structuredControl = await dispatchStructuredControl({ path: filePath, conversationId, action: explicitAction });
+  if (structuredControl) return NextResponse.json(structuredControl.body, { status: structuredControl.status });
 
   if (body.action === "interrupt") return respond(await interruptConversation(filePath));
   if (body.action === "compact") return respond(await compactConversation(filePath));
