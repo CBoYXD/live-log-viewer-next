@@ -10,7 +10,8 @@ RUN bun install --frozen-lockfile
 FROM node:22.16.0-bookworm-slim AS build
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1 \
-    NODE_ENV=production
+    NODE_ENV=production \
+    NEXT_PUBLIC_RUNTIME_UI=1
 RUN npm install -g bun@1.2.18
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
@@ -31,6 +32,7 @@ FROM node:22.16.0-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
+    NEXT_PUBLIC_RUNTIME_UI=1 \
     HOSTNAME=127.0.0.1 \
     PORT=8898 \
     LLV_WHISPER_VENV=/opt/llv-whisper-venv \
