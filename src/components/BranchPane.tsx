@@ -209,7 +209,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
     >
       {/* The favorited-state crown perched on the top edge (issue #224); lives on
           this unclipped wrapper so it can overhang the card frame from above. */}
-      {showFavorite ? <FavoriteCrownMarker id={cardId} /> : null}
+      {showFavorite ? <FavoriteCrownMarker id={cardId} touch={isMobile} /> : null}
       <section
         ref={paneRef}
         /* Text inside the column must stay selectable: the canvas drag-pan skips

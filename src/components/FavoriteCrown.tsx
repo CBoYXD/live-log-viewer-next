@@ -40,6 +40,10 @@ export function FavoriteCrown({
      reveal — a favorited or touch crown is already shown. */
   const near = useProximity(cardRef, PROXIMITY_RADIUS, !touch && !favorited);
   if (!favorites) return null;
+  /* Desktop favorited state lives on the top-edge marker alone — rendering the
+     header crown too shows two crowns at once (owner complaint 2026-07-14).
+     Touch keeps the 44px header toggle and drops the marker instead. */
+  if (favorited && !touch) return null;
 
   const visible = favorited || touch || near;
   const label = t(favorited ? "branch.unfavorite" : "branch.favorite");
@@ -78,24 +82,36 @@ export function FavoriteCrown({
 /**
  * The favorited-state marker (issue #224): a gold crown that sits ON the
  * window's top-right edge, overlapping the frame from above like a crown worn by
- * the card. Purely decorative — the header {@link FavoriteCrown} owns the toggle
- * — so it is `aria-hidden` and click-through. Renders nothing unless this id is
+ * the card. On desktop it is ALSO the toggle — the header {@link FavoriteCrown}
+ * unmounts once favorited, so this is the only crown on screen (two crowns at
+ * once was the owner complaint 2026-07-14). On touch the header keeps the 44px
+ * toggle and the marker is not rendered. Renders nothing unless this id is
  * favorited (or outside a `FavoritesProvider`), so an unfavorited card is clean.
  *
  * Mount on the card's UNCLIPPED outer wrapper: the negative top offset must
  * overhang the pane's rounded frame, which its own `overflow-hidden` section
  * would otherwise cut.
  */
-export function FavoriteCrownMarker({ id }: { id: string }) {
+export function FavoriteCrownMarker({ id, touch = false }: { id: string; touch?: boolean }) {
   const favorites = useFavorites();
-  if (!favorites?.has(id)) return null;
+  const { t } = useLocale();
+  if (touch || !favorites?.has(id)) return null;
+  const label = t("branch.unfavorite");
   return (
-    <span
-      aria-hidden
+    <button
+      type="button"
+      data-scheme-ui
       data-favorite-marker="on"
-      className="favorite-crown-marker pointer-events-none absolute -top-2.5 right-3 z-[3] inline-flex h-5 w-5 items-center justify-center rounded-full"
+      aria-pressed
+      aria-label={label}
+      title={label}
+      onClick={(event) => {
+        event.stopPropagation();
+        favorites.toggle(id);
+      }}
+      className="favorite-crown-marker absolute -top-2.5 right-3 z-[3] inline-flex h-6 w-6 items-center justify-center rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
     >
       <Crown className="h-4 w-4 fill-crown text-crown drop-shadow-[0_1px_2px_color-mix(in_srgb,var(--color-crown)_55%,transparent)]" aria-hidden />
-    </span>
+    </button>
   );
 }
