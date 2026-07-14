@@ -370,6 +370,92 @@ test("a failed route kick retries queued controls and messages without a host-st
   }
 });
 
+test("a failed kill projection retries through the coalesced drain and terminalizes", async () => {
+  const directory = path.join(sandbox, "controller-kill-projection-retry");
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "b6b55ea7-4a5e-4fe5-894d-2f332a7247c7";
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "kill-retry-account",
+    launchProfile: profile,
+    turn: { state: "idle", source: "assistant", terminalAt: null },
+    observedAt: "2026-07-14T12:00:00.000Z",
+  }]);
+  const conversationId = Object.keys(registry.snapshot().conversations)[0]!;
+  const key = { engine: "codex" as const, sessionId };
+  registry.upsert({
+    key,
+    artifactPath,
+    cwd: directory,
+    accountId: "kill-retry-account",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "fake:kill-retry-host",
+      process: null,
+      eventCursor: 0,
+      protocolVersion: "fake-v1",
+      writerClaimEpoch: 0,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const journal = new RuntimeJournal(path.join(directory, "events.sqlite"), { structuredHosts: true });
+  const baseClient = runtimeJournalClient(journal);
+  let failNextDeadProjection = false;
+  let deadProjectionAttempts = 0;
+  const client = {
+    ...baseClient,
+    append: async (...args: Parameters<RuntimeHostClient["append"]>) => {
+      const [event] = args;
+      if (event.kind === "session-status" && event.payload.host === "dead") {
+        deadProjectionAttempts += 1;
+        if (failNextDeadProjection) {
+          failNextDeadProjection = false;
+          throw new Error("transient dead projection failure");
+        }
+      }
+      return await baseClient.append(...args);
+    },
+  } satisfies RuntimeHostClient;
+  const host = observableFakeHost(new FakeEngineHost());
+
+  try {
+    await bindStructuredDeliveryQueue([{ key, host }], { registry, client });
+    const operationId = "operation-kill-projection-retry";
+    journal.executeOperation({
+      kind: "kill",
+      operationId,
+      idempotencyKey: operationId,
+      conversationId,
+      sessionKey: key,
+    });
+    failNextDeadProjection = true;
+
+    await kickStructuredDeliveryQueue();
+    expect(journal.operationResult(operationId)?.receipt.status).toBe("queued");
+    await waitForCondition(() => journal.operationResult(operationId)?.receipt.status === "delivered");
+
+    expect(deadProjectionAttempts).toBe(2);
+    expect(journal.snapshot().sessions.find((session) => session.conversationId === conversationId)).toMatchObject({
+      sessionKey: key,
+      host: "dead",
+    });
+  } finally {
+    await bindStructuredDeliveryQueue([], { registry, client: null });
+    journal.close();
+  }
+});
+
 test("a delivering entry resumes after restart through the host ledger without a second engine write", async () => {
   const filename = path.join(sandbox, "events.sqlite");
   const ledger = createFakeDeliveryLedger();
