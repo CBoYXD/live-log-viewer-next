@@ -10,7 +10,8 @@ import type { TFunction } from "@/lib/i18n";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { useComposer } from "@/hooks/useComposer";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { sendRuntimeMessage, useRuntimeReceiptsForArtifact, useRuntimeSession } from "@/hooks/useRuntime";
+import { sendRuntimeMessage, useRuntimeReceiptsForArtifact } from "@/hooks/useRuntime";
+import { useAgentCapabilities } from "./useAgentCapabilities";
 import { useTmuxTarget } from "@/hooks/useTmuxTarget";
 import { conversationIdentity } from "@/lib/accounts/identity";
 import { cardMigrationState, migrationHoldsSends } from "@/lib/accounts/migration";
@@ -260,11 +261,10 @@ export function TmuxComposer({
      path under the target account, and the draft/held receipts must ride along
      (falls back to path pre-migration). */
   const cardId = conversationIdentity(file);
-  const runtimeSession = useRuntimeSession(cardId);
-  const structuredSession = runtimeSession && !runtimeSession.legacy
-    && (runtimeSession.session.hostKind === "codex-app-server" || runtimeSession.session.hostKind === "claude-broker")
-    ? runtimeSession
-    : null;
+  // The structured session Stop/Send route through — the conversation's own
+  // structured host, or the ROOT's for a structured-root subagent (finding 1),
+  // so a claude-broker root's child sends via /api/runtime/send, never /api/tmux.
+  const { structuredSession } = useAgentCapabilities(file);
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
      pretending the text reached the live predecessor pane. */
@@ -535,7 +535,13 @@ export function TmuxComposer({
   /* Mode chip, interrupt, compact, and attach-terminal now live in the unified
      control strip (issue #241); the composer no longer renders them. */
 
-  const canQuickAck = !spawnMode || relayMode;
+  /* The main send surface is inert on a dead host (§5) or an unresolved host
+     (finding 1); quick-ack calls the same `send()`, so it must obey the same
+     block — otherwise the menu offers a control whose POST the inner guard
+     silently swallows (round-3 finding). Blocked ⇒ the action leaves the menu
+     entirely, so neither pointer nor keyboard can reach an enabled quick-ack. */
+  const sendBlocked = deadHost || Boolean(sendBlockedReason);
+  const canQuickAck = (!spawnMode || relayMode) && !sendBlocked;
   const quickAckDisabled = busy || voiceSending || attachments.images.length > 0;
 
   return (

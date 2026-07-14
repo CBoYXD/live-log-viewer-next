@@ -100,18 +100,37 @@ test("a finished (proc-null) conversation stays resume under the plane — not u
 
 /* ------------------- finding 2: scanner-shaped subagents ------------------- */
 
-test("a scanner-shaped subagent (proc:null) resolves from its root-host liveness", () => {
-  const child = file({ proc: null, pid: null, kind: "subagent", parent: "/root.jsonl" });
-  // live root → the documented live-subagent controls appear
-  expect(surfaceFor(child, null, { runtimeEnabled: true, root: "live" })).toBe<StripSurface>("live-subagent");
-  const caps = capabilitiesFor(child, null, { runtimeEnabled: true, root: "live" });
-  expect(caps.controls.stop.state).toBe("enabled");
-  expect(caps.controls.kill.state).toBe("enabled");
+const child = () => file({ proc: null, pid: null, kind: "subagent", parent: "/root.jsonl" });
+
+test("a scanner-shaped subagent under a live TMUX root gets the legacy live-subagent row", () => {
+  const c = child();
+  expect(surfaceFor(c, null, { runtimeEnabled: true, root: { liveness: "live", structured: false } })).toBe<StripSurface>("live-subagent");
+  const caps = capabilitiesFor(c, null, { runtimeEnabled: true, root: { liveness: "live", structured: false } });
+  expect(caps.controls.stop.state).toBe("enabled");   // ESC → root pane via /api/tmux
+  expect(caps.controls.kill.state).toBe("enabled");   // /api/proc → root pid
+  expect(caps.controls.images.state).toBe("enabled");
   expect(caps.controls.terminal.state).toBe("enabled");
-  // a dead/finished root keeps the child gated (inert), never live controls
-  expect(surfaceFor(child, null, { runtimeEnabled: true, root: "gated" })).toBe<StripSurface>("inert");
-  // an as-yet-unknown root under the plane also stays inert (no relay control fires)
-  expect(surfaceFor(child, null, { runtimeEnabled: true, root: "unknown" })).toBe<StripSurface>("inert");
+});
+
+test("a scanner-shaped subagent under a live STRUCTURED root gets structured-subagent (no tmux/proc controls)", () => {
+  const c = child();
+  expect(surfaceFor(c, null, { runtimeEnabled: true, root: { liveness: "live", structured: true } })).toBe<StripSurface>("structured-subagent");
+  const caps = capabilitiesFor(c, null, { runtimeEnabled: true, root: { liveness: "live", structured: true } });
+  // Stop enabled with the root-agent note (relays to the root's structured interrupt)
+  expect(caps.controls.stop.state).toBe("enabled");
+  expect(caps.controls.stop.state === "enabled" && caps.controls.stop.note).toBe("strip.stopSubagent");
+  // Kill and images inherit the structured host's #240/#239 restrictions — no /api/proc, no image POST
+  expect(caps.controls.kill.state).toBe("disabled");
+  expect(caps.controls.kill.state === "disabled" && caps.controls.kill.reason).toBe("strip.awaits240");
+  expect(caps.controls.images.state).toBe("disabled");
+  expect(caps.controls.terminal.state).toBe("enabled");
+});
+
+test("a dead/finished/unknown root keeps a scanner-shaped subagent gated (inert)", () => {
+  const c = child();
+  expect(surfaceFor(c, null, { runtimeEnabled: true, root: { liveness: "gated", structured: false } })).toBe<StripSurface>("inert");
+  expect(surfaceFor(c, null, { runtimeEnabled: true, root: { liveness: "gated", structured: true } })).toBe<StripSurface>("inert");
+  expect(surfaceFor(c, null, { runtimeEnabled: true, root: { liveness: "unknown", structured: true } })).toBe<StripSurface>("inert");
 });
 
 /* ------------------------------ §4 matrix rows ------------------------------ */

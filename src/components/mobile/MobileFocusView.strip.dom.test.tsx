@@ -100,7 +100,7 @@ test("the mobile focus view mounts the strip and classifies a scanner-shaped sub
 
   const strip = (host as unknown as HTMLElement).querySelector("[data-agent-control-strip]");
   expect(strip).not.toBeNull();
-  expect(strip?.getAttribute("data-strip-surface")).toBe("live-subagent");
+  expect(strip?.getAttribute("data-strip-surface")).toBe("structured-subagent");
   // mobile control targets are 44px (h-11 w-11) — the strip's own buttons
   const stripButtons = [...(strip as HTMLElement).querySelectorAll("button")];
   expect(stripButtons.some((b) => b.className.includes("h-11") && b.className.includes("w-11"))).toBe(true);

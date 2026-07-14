@@ -96,7 +96,9 @@ function render(rounds: DeckRound[], reviewerMode: Flow["reviewerMode"] = "pane"
   dom.document.body.append(host);
   const rootInstance = createRoot(host as unknown as HTMLElement);
   roots.add(rootInstance);
-  flushSync(() => rootInstance.render(<RoundDeck flow={flow(reviewerMode)} rounds={rounds} focusRound={null} dormant />));
+  // active (not dormant): the strip renders; dormant suppression is covered by
+  // the scheme-node suite.
+  flushSync(() => rootInstance.render(<RoundDeck flow={flow(reviewerMode)} rounds={rounds} focusRound={null} />));
   return host as unknown as HTMLElement;
 }
 
@@ -105,18 +107,18 @@ const hasComposer = (host: HTMLElement) => host.querySelector("textarea") !== nu
 
 test("an in-progress round mounts the strip (live-subagent) above a composer", () => {
   const host = render([{ key: "r1", round: round(), file: subagent }]);
-  expect(surface(host)).toBe("live-subagent");
+  expect(surface(host)).toBe("structured-subagent");
   expect(hasComposer(host)).toBe(true);
 });
 
 test("a finished round keeps the strip but drops the composer", () => {
   const host = render([{ key: "r1", round: round({ verdict: "APPROVE", reviewedAt: "2026-07-12T01:00:00Z" }), file: subagent }]);
-  expect(surface(host)).toBe("live-subagent");
+  expect(surface(host)).toBe("structured-subagent");
   expect(hasComposer(host)).toBe(false);
 });
 
 test("a headless flow drops the composer even for an in-progress round", () => {
   const host = render([{ key: "r1", round: round(), file: subagent }], "headless");
-  expect(surface(host)).toBe("live-subagent");
+  expect(surface(host)).toBe("structured-subagent");
   expect(hasComposer(host)).toBe(false);
 });

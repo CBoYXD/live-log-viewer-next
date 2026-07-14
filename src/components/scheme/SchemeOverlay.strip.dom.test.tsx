@@ -13,7 +13,7 @@ import { resolveExpandedNode } from "./expandedNode";
  * Finding 6 (issue #241): the REAL full-window overlay wiring — the board's
  * `resolveExpandedNode` picking the node and mounting it as an `expanded`
  * `BranchPane` — must carry the control strip and classify a scanner-shaped
- * subagent as `live-subagent`. Regressions in the overlay path fail here
+ * subagent from its structured root. Regressions in the overlay path fail here
  * independently of the inline board node.
  */
 
@@ -92,6 +92,6 @@ test("the overlay resolves the node and mounts an expanded strip (live-subagent)
 
   const strip = (host as unknown as HTMLElement).querySelector("[data-agent-control-strip]");
   expect(strip).not.toBeNull();
-  expect(strip?.getAttribute("data-strip-surface")).toBe("live-subagent");
+  expect(strip?.getAttribute("data-strip-surface")).toBe("structured-subagent");
   expect((host as unknown as HTMLElement).querySelector("textarea")).not.toBeNull();
 });

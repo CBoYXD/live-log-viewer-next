@@ -13,7 +13,6 @@
 
 import type { MessageKey } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
-import type { HostAxis } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 /** The controls the strip (and the header kill) gate on. */
@@ -34,7 +33,8 @@ export type Capability =
  */
 export type StripSurface =
   | "live-root"      // running top-level tmux claude/codex agent
-  | "live-subagent"  // running child pane — ESC/kill land in the root
+  | "live-subagent"  // running child of a live *tmux* root — ESC/kill land in the root pane
+  | "structured-subagent" // running child of a live *structured* root — Stop relays to the root's structured interrupt
   | "structured"     // pane-less structured host (codex-app-server / claude-broker)
   | "resume"         // finished, resumable root conversation
   | "dead"           // host died / went unhosted — banner owns recovery (§5)
@@ -57,6 +57,18 @@ export interface StripCapabilities {
 export type RootLiveness = "live" | "gated" | "unknown";
 
 /**
+ * The canonical root host of a Claude subagent, resolved from the runtime store.
+ * `structured` distinguishes a `claude-broker`/`codex-app-server` root (whose
+ * child must relay Stop through the structured interrupt channel and inherit the
+ * structured Kill/images restrictions) from a legacy tmux root (whose child
+ * keeps canonical tmux routing) — issue #241 finding 1 (round 3).
+ */
+export interface RootHost {
+  liveness: RootLiveness;
+  structured: boolean;
+}
+
+/**
  * How the caller establishes host authority. When `runtimeEnabled` is true the
  * runtime plane is the source of truth for host capability: a conversation with
  * no resolved runtime session is *unresolved*, not "legacy tmux with a running
@@ -66,8 +78,8 @@ export type RootLiveness = "live" | "gated" | "unknown";
  */
 export interface HostOptions {
   runtimeEnabled?: boolean;
-  /** For a Claude subagent: the liveness of its canonical root host. */
-  root?: RootLiveness;
+  /** For a Claude subagent: its canonical root host (liveness + kind). */
+  root?: RootHost;
 }
 
 /** Resolved host authority — the single place `null` runtime state is classified. */
@@ -90,12 +102,16 @@ function resolveHost(rv: RuntimeSessionView | null, opts: HostOptions): HostReso
   return { kind: "unresolved" };
 }
 
-/** Derive a Claude subagent's root-host liveness from the root's runtime view. */
-export function rootLivenessFrom(root: { host: HostAxis } | null): RootLiveness {
-  if (!root) return "unknown";
-  if (root.host === "dead" || root.host === "unhosted") return "gated";
-  if (root.host === "hosted") return "live";
-  return "unknown"; // registering / recovering / conflict — transitional
+/** Derive a Claude subagent's root host (liveness + kind) from the root's view. */
+export function rootHostFrom(root: RuntimeSessionView | null): RootHost {
+  if (!root) return { liveness: "unknown", structured: false };
+  const structured = isStructuredHost(root);
+  const axis = root.session.host;
+  const liveness: RootLiveness =
+    axis === "dead" || axis === "unhosted" ? "gated"
+    : axis === "hosted" ? "live"
+    : "unknown"; // registering / recovering / conflict — transitional
+  return { liveness, structured };
 }
 
 /** A Claude subagent transcript, whose own proc/pid the scanner leaves null. */
@@ -146,7 +162,12 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts:
   // so no relay control fires against an unconfirmed host. `opts.root` is only
   // absent in pure-legacy mode, where the child's own proc is the fallback.
   if (isClaudeSubagent(file)) {
-    if (opts.root === "live") return "live-subagent";
+    // A live root grants the strip; a structured root routes controls through the
+    // structured plane (Stop → root interrupt, Kill/images inherit #240/#239),
+    // while a legacy tmux root keeps canonical tmux routing.
+    if (opts.root?.liveness === "live") return opts.root.structured ? "structured-subagent" : "live-subagent";
+    // Pure-legacy mode (plane off) passes no root: the child's own proc is the
+    // fallback and its root is necessarily a tmux pane.
     if (opts.root === undefined && host.kind !== "unresolved" && file.proc === "running") return "live-subagent";
     return isResumableConversation(file) ? "resume" : "inert";
   }
@@ -203,6 +224,23 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
           kill: ENABLED,
           terminal: ENABLED,
           images: ENABLED,
+          send: ENABLED,
+        },
+      };
+    case "structured-subagent":
+      return {
+        surface,
+        controls: {
+          // A structured root can't honor a tmux ESC or an /api/proc kill: Stop
+          // relays to the ROOT conversation's structured interrupt (the caller
+          // routes it), while Kill and images inherit the same structured
+          // restrictions as the root itself (#240/#239). The note names the root.
+          stop: enabledWithNote("strip.stopSubagent"),
+          compact: disabled("strip.compactSubagent"),
+          runtime: HIDDEN,
+          kill: disabled("strip.awaits240"),
+          terminal: ENABLED,
+          images: disabled("strip.imagesStructured"),
           send: ENABLED,
         },
       };

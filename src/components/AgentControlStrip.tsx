@@ -12,7 +12,6 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { interruptRuntime } from "@/hooks/useRuntime";
 import { useLocale, type MessageKey, type TFunction } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
-import type { RuntimeSessionView } from "@/hooks/useRuntime";
 
 import { mintIdempotencyKey } from "@/components/runtime/runtimeModel";
 import { useAgentCapabilities } from "./useAgentCapabilities";
@@ -27,11 +26,6 @@ import {
 /** Width faces (design §3). Continuous scheme-node zoom picks these by measured
     pane width, not a media query. */
 type StripLayout = "full" | "narrow" | "mini";
-
-function structuredSessionOf(rv: RuntimeSessionView | null): RuntimeSessionView | null {
-  if (!rv || rv.legacy) return null;
-  return rv.session.hostKind === "codex-app-server" || rv.session.hostKind === "claude-broker" ? rv : null;
-}
 
 /** One icon button honoring a control's capability: enabled, or disabled with a
     tooltip naming why/when (the reason is appended to the aria-label so screen
@@ -267,8 +261,7 @@ export function AgentControlStripView({
 export function AgentControlStrip({ file }: { file: FileEntry }) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
-  const { caps, runtime: runtimeSession, attachMode } = useAgentCapabilities(file);
-  const structuredSession = structuredSessionOf(runtimeSession);
+  const { caps, attachMode, structuredSession } = useAgentCapabilities(file);
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [layout, setLayout] = useState<StripLayout>("full");

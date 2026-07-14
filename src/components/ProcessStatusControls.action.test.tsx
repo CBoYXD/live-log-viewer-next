@@ -1,5 +1,6 @@
 import { afterEach, expect, mock, test } from "bun:test";
 import { act } from "react";
+import { useActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -30,15 +31,15 @@ mock.module("@/hooks/useRuntime", () => ({
 const { ProcessStatusControls } = await import("./TaskHeader");
 
 const dom = new Window();
+useActEnv();
 Object.assign(globalThis, {
-  IS_REACT_ACT_ENVIRONMENT: true,
   window: dom, document: dom.document, navigator: dom.navigator,
   Node: dom.Node, HTMLElement: dom.HTMLElement, Event: dom.Event,
   localStorage: dom.localStorage, sessionStorage: dom.sessionStorage,
 });
 
 function rv(hostKind: HostKind, host: HostAxis, artifactPath?: string): RuntimeSessionView {
-  return { session: { hostKind, host, artifactPath } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: false };
+  return { session: { hostKind, host, artifactPath } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: hostKind === "tmux-legacy" };
 }
 
 function file(over: Partial<FileEntry> = {}): FileEntry {
@@ -99,11 +100,11 @@ test("a live tmux root shows an enabled Kill that confirms then posts to /api/pr
   await act(async () => root.unmount());
 });
 
-test("a scanner-shaped live subagent shows an enabled Kill that posts the child path (server resolves the root)", async () => {
-  // The runtime plane is authoritative and carries the live root host keyed by
+test("a scanner-shaped subagent under a live TMUX root shows an enabled Kill that posts the child path (server resolves the root)", async () => {
+  // The runtime plane is authoritative and carries the live tmux root keyed by
   // the subagent's artifact path — the production shape (finding 2).
   planeEnabled = true;
-  rootByArtifact = (path) => (path === "/root.jsonl" ? rv("claude-broker", "hosted", "/root.jsonl") : null);
+  rootByArtifact = (path) => (path === "/root.jsonl" ? rv("tmux-legacy", "hosted", "/root.jsonl") : null);
   const calls: { url: string; body: unknown }[] = [];
   globalThis.fetch = ((url: string, init?: RequestInit) => {
     calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
@@ -121,6 +122,22 @@ test("a scanner-shaped live subagent shows an enabled Kill that posts the child 
   expect(procCalls.length).toBe(1);
   // The client sends the child path; /api/proc resolves it to the root pid.
   expect(procCalls[0]!.body).toMatchObject({ path: "/child.jsonl" });
+  await act(async () => root.unmount());
+});
+
+test("a scanner-shaped subagent under a live STRUCTURED root shows a DISABLED Kill and never posts (#240)", async () => {
+  planeEnabled = true;
+  rootByArtifact = (path) => (path === "/root.jsonl" ? rv("claude-broker", "hosted", "/root.jsonl") : null);
+  const calls: string[] = [];
+  globalThis.fetch = ((url: string) => { calls.push(String(url)); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as unknown as Response); }) as typeof fetch;
+
+  const child = file({ path: "/child.jsonl", kind: "subagent", parent: "/root.jsonl", proc: null, pid: null });
+  const { host, root } = await mount(child);
+  const kill = killBtns(host)[0]!;
+  expect(kill.disabled).toBe(true);
+  expect(kill.getAttribute("aria-label")).toContain(translate("en", "strip.awaits240"));
+  await clickButton(kill);
+  expect(calls.some((u) => u.includes("/api/proc"))).toBe(false);
   await act(async () => root.unmount());
 });
 

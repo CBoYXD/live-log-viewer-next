@@ -37,6 +37,15 @@ export async function dispatchStructuredControl(
   if (!entry?.structuredHost) return null;
 
   if (request.action !== "interrupt") {
+    // Dead/unhosted structured recovery (issue #247 §5): the host process is gone
+    // and its writer claim released, so there is no live ownership to fence.
+    // A resume on such an entry falls through to the canonical respawn path,
+    // which reboots the conversation from its retained account/cwd/launch
+    // profile. Every other control — and resume on a LIVE structured host —
+    // stays rejected so a running host is never duplicated.
+    if (request.action === "resume" && (entry.status === "dead" || entry.status === "unhosted")) {
+      return null;
+    }
     const label = ["compact", "dialog-key", "kill", "reconfigure", "resume"].includes(request.action)
       ? request.action
       : "requested";

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
+import { useActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -14,8 +15,8 @@ import { AttachTerminalDialog } from "./AttachTerminalDialog";
    action must surface a failure rather than appear to complete. */
 
 const dom = new Window();
+useActEnv();
 Object.assign(globalThis, {
-  IS_REACT_ACT_ENVIRONMENT: true,
   window: dom, document: dom.document, navigator: dom.navigator,
   Node: dom.Node, HTMLElement: dom.HTMLElement, Event: dom.Event,
   localStorage: dom.localStorage, sessionStorage: dom.sessionStorage,

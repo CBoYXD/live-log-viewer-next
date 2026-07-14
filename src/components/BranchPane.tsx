@@ -411,8 +411,10 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
         {/* Unified control strip (issue #241): the single action surface, mounted
             once here so it exists on every surface — including `noComposer`
             review rounds that still need Stop. Renders nothing on surfaces where
-            no control applies. */}
-        <AgentControlStrip file={file} />
+            no control applies. Dormant far-zoom board nodes suppress it entirely
+            (the dormant-node contract): the strip returns on activation, and
+            active review panes keep it regardless of `noComposer`. */}
+        {dormant ? null : <AgentControlStrip file={file} />}
         {noComposer ? null : <TmuxComposer file={file} pollPaused={feedPaused} deadHost={deadHost} sendBlockedReason={sendBlockedReason} />}
       </section>
     </div>

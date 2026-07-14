@@ -104,7 +104,7 @@ const subagent: FileEntry = {
   proc: null, pid: null, conversationId: "conv-child", model: "sonnet", pendingQuestion: null, waitingInput: null,
 };
 
-function render(nodes: SchemeNode[]): HTMLElement {
+function render(nodes: SchemeNode[], dormant = false): HTMLElement {
   const host = dom.document.createElement("div");
   dom.document.body.append(host);
   const rootInstance = createRoot(host as unknown as HTMLElement);
@@ -116,7 +116,7 @@ function render(nodes: SchemeNode[]): HTMLElement {
       files={nodes.map((n) => n.file)}
       interactive
       lite={false}
-      dormant
+      dormant={dormant}
       selected={null}
       multi={new Set()}
       session={false}
@@ -145,9 +145,16 @@ test("a scheme node mounts the strip: live-root for the running root", () => {
   expect(surfaceOf(host, "/root.jsonl")).toBe("live-root");
 });
 
-test("a scheme node classifies a scanner-shaped subagent as live-subagent via its live root", () => {
+test("a scheme node classifies a scanner-shaped subagent from its live structured root", () => {
   const host = render([node(root, 100), node(subagent, 700)]);
-  expect(surfaceOf(host, "/child.jsonl")).toBe("live-subagent");
+  expect(surfaceOf(host, "/child.jsonl")).toBe("structured-subagent");
   // the root-agent Stop note is rendered on the child's strip
   expect(host.querySelector('[data-scheme-node="/child.jsonl"]')?.textContent).toContain("interrupts the root agent");
+});
+
+test("dormant far-zoom scheme nodes render no control strip; active nodes restore it", () => {
+  const dormantHost = render([node(root, 100), node(subagent, 700)], true);
+  expect(dormantHost.querySelectorAll("[data-agent-control-strip]").length).toBe(0);
+  const activeHost = render([node(root, 100)], false);
+  expect(surfaceOf(activeHost, "/root.jsonl")).toBe("live-root");
 });

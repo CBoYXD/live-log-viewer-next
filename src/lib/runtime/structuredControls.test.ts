@@ -13,7 +13,7 @@ import { dispatchStructuredControl } from "./structuredControls";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-controls-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-function structuredConversation(): { registry: AgentRegistry; path: string; conversationId: string } {
+function structuredConversation(): { registry: AgentRegistry; path: string; conversationId: string; id: string } {
   const id = crypto.randomUUID();
   const pathname = path.join(sandbox, `${id}.jsonl`);
   const registry = new AgentRegistry(path.join(sandbox, `${id}.registry.json`), undefined, undefined, { sqliteMode: "off" });
@@ -42,7 +42,26 @@ function structuredConversation(): { registry: AgentRegistry; path: string; conv
     pendingAction: null,
   });
   if (settled.kind !== "settled") throw new Error("structured conversation was unavailable");
-  return { registry, path: pathname, conversationId: begun.receipt.conversationId };
+  return { registry, path: pathname, conversationId: begun.receipt.conversationId, id };
+}
+
+/** Transition a structured entry to a dead host while retaining its structured
+    columns and releasing the writer claim — the shape terminal persistence
+    leaves behind after the host process exits (registry.ts terminal path). */
+function killStructuredHost(registry: AgentRegistry, id: string): void {
+  registry.setStructuredHostClaimed(
+    { engine: "codex", sessionId: id },
+    {
+      kind: "codex-app-server", endpoint: "fake:stdio",
+      process: { pid: process.pid, startIdentity: "test-process" },
+      eventCursor: 1, protocolVersion: "fake-v1", writerClaimEpoch: 1,
+      activeTurnRef: null, pendingAttention: [], activeFlags: [],
+    },
+    "dead",
+    "structured-host:test",
+    1,
+    true,
+  );
 }
 
 test.each(["compact", "dialog-key", "kill", "reconfigure", "resume"])(
@@ -66,6 +85,32 @@ test("structured ownership resolves from conversation identity", async () => {
   });
 
   expect(result).toEqual({ status: 409, body: { error: "structured host does not support the resume control" } });
+});
+
+test("a dead structured host lets resume fall through to canonical recovery (issue #247 §5)", async () => {
+  const fixture = structuredConversation();
+  killStructuredHost(fixture.registry, fixture.id);
+  // resume on a dead entry returns null → the route runs the legacy respawn path
+  const dead = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "resume" }, {
+    registry: fixture.registry,
+    client: null,
+  });
+  expect(dead).toBeNull();
+  // every other control on the dead entry stays fenced (only resume recovers)
+  const compact = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "compact" }, {
+    registry: fixture.registry,
+    client: null,
+  });
+  expect(compact).toEqual({ status: 409, body: { error: "structured host does not support the compact control" } });
+});
+
+test("a live structured host still rejects resume (no duplicate host)", async () => {
+  const fixture = structuredConversation();
+  const live = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "resume" }, {
+    registry: fixture.registry,
+    client: null,
+  });
+  expect(live).toEqual({ status: 409, body: { error: "structured host does not support the resume control" } });
 });
 
 test("structured interrupt uses the runtime command channel", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { act } from "react";
+import { useActEnv } from "@/test-helpers/actEnv";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
@@ -8,8 +9,8 @@ import type { FileEntry } from "@/lib/types";
 import { AgentRuntimeControls, ResumeRuntimeControls, readResumeDraft, savedResumeProfile } from "./AgentRuntimeControls";
 
 const dom = new Window();
+useActEnv();
 Object.assign(globalThis, {
-  IS_REACT_ACT_ENVIRONMENT: true,
   window: dom, document: dom.document, navigator: dom.navigator,
   Node: dom.Node, HTMLElement: dom.HTMLElement, HTMLSelectElement: dom.HTMLSelectElement,
   HTMLButtonElement: dom.HTMLButtonElement, Event: dom.Event, MouseEvent: dom.MouseEvent,
