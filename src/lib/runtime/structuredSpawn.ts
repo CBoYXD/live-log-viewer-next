@@ -109,6 +109,16 @@ export async function recoverPendingStructuredSpawns(
 
   const snapshot = registry.snapshot();
   for (const receipt of Object.values(snapshot.receipts)) {
+    const effect = spawnEffects.get(receipt.launchId);
+    if (receipt.state === "starting" && !receipt.key && effect) {
+      const operation = await client.operationStatus(receipt.launchId);
+      if (operation?.receipt.status === "queued" || operation?.receipt.status === "pending" || operation?.receipt.status === "delivering") {
+        const reason = `structured spawn interrupted before identity staging: ${receipt.launchId}`;
+        await client.transitionOperation(receipt.launchId, "failed", { reason });
+        registry.failStructuredSpawn(receipt.launchId, reason);
+      }
+      continue;
+    }
     if (receipt.state !== "path-pending" || !receipt.key || !receipt.artifactPath) continue;
     const entry = snapshot.entries[sessionKeyId(receipt.key)];
     const operation = await client.operationStatus(receipt.launchId);
@@ -150,7 +160,6 @@ export async function recoverPendingStructuredSpawns(
       continue;
     }
     if (!entry?.structuredHost || entry.status === "dead" || entry.status === "unhosted") continue;
-    const effect = spawnEffects.get(receipt.launchId);
     const prompt = typeof effect?.prompt === "string" ? effect.prompt : null;
     if (prompt === null || effect?.conversationId !== receipt.conversationId || effect?.cwd !== receipt.cwd) {
       throw new Error(`structured spawn recovery is missing durable prompt admission for ${receipt.launchId}`);

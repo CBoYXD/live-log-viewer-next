@@ -549,6 +549,35 @@ test("a failed replacement retries from the current attempt and keeps one pendin
   journal.close();
 });
 
+test("retry chains expose only the current leaf while retaining every durable attempt", () => {
+  const dir = sandbox("visible-retry-leaf");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-visible-retry"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-visible-retry",
+      sessionKey: { engine: "codex", sessionId: "thread-visible-retry" },
+      hostKind: "codex-app-server", host: "hosted", turn: "idle", provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const original = journal.executeOperation({ kind: "send", operationId: "op-visible-original", idempotencyKey: "visible-original", conversationId: "conv-visible-retry", text: "one", policy: "queue" });
+  journal.transitionOperation(original.operationId, "failed", { reason: "dead-host" });
+  const replacement = journal.retryOperation(original.operationId, "visible-replacement");
+  journal.transitionOperation(replacement.operationId, "failed", { reason: "dead-host" });
+  const leaf = journal.retryOperation(replacement.operationId, "visible-leaf");
+  journal.transitionOperation(leaf.operationId, "delivered");
+
+  expect(journal.snapshot().sessions[0]?.recentReceipts).toEqual([
+    expect.objectContaining({ operationId: leaf.operationId, status: "delivered" }),
+  ]);
+  expect(journal.operationResult(original.operationId)?.receipt.status).toBe("failed");
+  expect(journal.operationResult(replacement.operationId)?.receipt.status).toBe("failed");
+  expect(journal.replay(0).events.filter((event) => event.kind === "receipt").length).toBeGreaterThanOrEqual(6);
+  journal.close();
+});
+
 test("filtered effect batches skip a full page of unrelated pending work", () => {
   const dir = sandbox("filtered-effect-batch");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });

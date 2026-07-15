@@ -518,6 +518,27 @@ test("startup recovery finalizes a staged spawn without duplicating its admitted
   expect((await client.operationStatus(begun.receipt.launchId))?.receipt.status).toBe("delivered");
 });
 
+test("startup recovery terminalizes an admitted spawn interrupted before identity staging", async () => {
+  const id = crypto.randomUUID();
+  const cwd = path.join(sandbox, `unstaged-recovery-${id}`);
+  fs.mkdirSync(cwd, { recursive: true });
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeClient(journal);
+  const begun = registry.beginSpawnRequest({ engine: "codex", cwd, transport: "structured", accountId: "codex-subscription" });
+  if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
+  await client.command({
+    kind: "spawn", operationId: begun.receipt.launchId, idempotencyKey: begun.receipt.launchId,
+    conversationId: begun.receipt.conversationId, engine: "codex", cwd, prompt: "durably admitted", accountId: "codex-subscription", parentConversationId: null,
+  });
+
+  await recoverPendingStructuredSpawns(registry, client);
+
+  expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({ state: "failed", key: null });
+  expect((await client.operationStatus(begun.receipt.launchId))?.receipt).toMatchObject({ status: "failed" });
+  expect((await client.effectBatch(["runtime.spawn"], 0)).filter((effect) => effect.payload.operationId === begun.receipt.launchId)).toEqual([]);
+});
+
 test("startup recovery cleans a staged host whose spawn operation already failed", async () => {
   const id = crypto.randomUUID();
   const cwd = path.join(sandbox, `failed-recovery-${id}`);

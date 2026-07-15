@@ -153,6 +153,27 @@ function receipts(value: unknown): RuntimeOperationReceipt[] {
   return Array.isArray(value) ? value.filter((item): item is RuntimeOperationReceipt => Boolean(item) && typeof item === "object") : [];
 }
 
+/**
+ * Receipts are append-only audit records.  The session projection is a
+ * presentation index, so a replacement hides every ancestor in its retry
+ * chain.  Keep this derivation here so snapshots and live projection use the
+ * same rule. Durable operation rows and events remain unchanged.
+ */
+function visibleReceipts(value: RuntimeOperationReceipt[]): RuntimeOperationReceipt[] {
+  const byOperationId = new Map(value.map((receipt) => [receipt.operationId, receipt]));
+  const superseded = new Set<string>();
+  for (const receipt of value) {
+    const seen = new Set<string>();
+    let ancestor = receipt.retryOfOperationId ?? null;
+    while (ancestor && !seen.has(ancestor)) {
+      seen.add(ancestor);
+      superseded.add(ancestor);
+      ancestor = byOperationId.get(ancestor)?.retryOfOperationId ?? null;
+    }
+  }
+  return value.filter((receipt) => !superseded.has(receipt.operationId));
+}
+
 function baseSession(id: string, payload: Record<string, unknown>, revision: number): RuntimeSession {
   const key = record(payload.sessionKey);
   const capabilities = record(payload.capabilities);
@@ -1156,7 +1177,10 @@ export class RuntimeJournal {
       if (typeof receipt.conversationId === "string") {
         const session = this.entity<RuntimeSession>("session", receipt.conversationId);
         if (session) {
-          const recentReceipts = [receipt, ...session.recentReceipts.filter((item) => item.operationId !== operationId)].slice(0, 8);
+          const recentReceipts = visibleReceipts([
+            receipt,
+            ...session.recentReceipts.filter((item) => item.operationId !== operationId),
+          ]).slice(0, 8);
           this.upsertEntity("session", receipt.conversationId, session.revision, { ...session, recentReceipts }, event.seq);
         }
       }
