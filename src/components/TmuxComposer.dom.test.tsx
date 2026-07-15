@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
+import { act } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
@@ -244,16 +245,27 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
   flushSync(() => root.render(<TmuxComposer file={file} />));
 
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
+  const submitAndFlush = async () => {
+    const reactTestGlobals = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
+    const previousActEnvironment = reactTestGlobals.IS_REACT_ACT_ENVIRONMENT;
+    reactTestGlobals.IS_REACT_ACT_ENVIRONMENT = true;
+    try {
+      await act(async () => {
+        textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    } finally {
+      reactTestGlobals.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+  };
   expect(textarea.value).toBe("try this again");
-  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await submitAndFlush();
 
   expect(sentKeys).toHaveLength(1);
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit"));
   expect(edit).toBeDefined();
   flushSync(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await submitAndFlush();
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);
