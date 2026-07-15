@@ -37,6 +37,10 @@ import { cleanTitle, engineTintOf } from "./utils";
 import { draftWorkingDirectory } from "./projectModel";
 
 type Engine = "claude" | "codex";
+type SpawnImageNegotiation = {
+  spawnTransport: "tmux" | "structured";
+  imageInput: Record<Engine, { supported: boolean; reason: string | null }>;
+};
 
 const ENGINES: { key: Engine; label: string }[] = [
   { key: "claude", label: "Claude" },
@@ -379,6 +383,7 @@ export function DraftAgentPane({
   const [deployConfirm, setDeployConfirmState] = useState(() => readField(draftId, "confirm"));
   const [accounts, setAccounts] = useState<{ id: string; label: string }[]>([]);
   const [dirs, setDirs] = useState<string[]>([]);
+  const [spawnImageNegotiation, setSpawnImageNegotiation] = useState<SpawnImageNegotiation | null>(null);
   const [attempt, setAttemptState] = useState<SpawnAttempt | null>(() => readAttempt(draftId));
   const [slowBoot, setSlowBoot] = useState(false);
   const attentionRef = useRef<HTMLDivElement>(null);
@@ -501,9 +506,15 @@ export function DraftAgentPane({
   useEffect(() => {
     let cancelled = false;
     fetch("/api/spawn?project=" + encodeURIComponent(project) + (src ? "&src=" + encodeURIComponent(src) : ""))
-      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null; cwdExists?: boolean }>)
+      .then((res) => res.json() as Promise<{ dirs?: string[]; cwd?: string | null; cwdExists?: boolean; spawnTransport?: unknown; imageInput?: unknown }>)
       .then((json) => {
         if (cancelled) return;
+        if ((json.spawnTransport === "tmux" || json.spawnTransport === "structured") && json.imageInput && typeof json.imageInput === "object") {
+          const imageInput = json.imageInput as SpawnImageNegotiation["imageInput"];
+          if (typeof imageInput.claude?.supported === "boolean" && typeof imageInput.codex?.supported === "boolean") {
+            setSpawnImageNegotiation({ spawnTransport: json.spawnTransport, imageInput });
+          }
+        }
         if (Array.isArray(json.dirs)) setDirs(json.dirs);
         const inherited = typeof json.cwd === "string" ? json.cwd.trim() : "";
         const shouldInherit = Boolean(awaitingInheritedCwdRef.current && inherited);
@@ -620,10 +631,23 @@ export function DraftAgentPane({
   }, [attempt, submitAttempt]);
 
   const selectedRole = roles.find((role) => role.id === roleId) ?? null;
+  const spawnImagesDisabled = spawnImageNegotiation === null
+    || (spawnImageNegotiation.spawnTransport === "structured" && !spawnImageNegotiation.imageInput[engine].supported);
+  const spawnImagesReason = spawnImageNegotiation === null
+    ? t("composer.imageCapabilityLoading")
+    : spawnImageNegotiation.spawnTransport === "structured" && engine === "codex"
+      ? t("composer.codexImagesVertical2")
+      : spawnImageNegotiation.spawnTransport === "structured" && !spawnImageNegotiation.imageInput[engine].supported
+        ? t("composer.structuredImagesProtocol")
+        : undefined;
 
   const send = async (overrideText?: string) => {
     const payloadText = overrideText ?? text;
     if (busy || voiceSending || attempt) return;
+    if (attachments.images.length && spawnImagesDisabled) {
+      setStatus({ kind: "err", text: spawnImagesReason ?? t("composer.structuredImagesUnavailable") });
+      return;
+    }
     if (cwdNeedsConfirmation) {
       setStatus({ kind: "err", text: t("draft.confirmRecoveredDir") });
       return;
@@ -652,7 +676,6 @@ export function DraftAgentPane({
       }
     }
     if (!payloadText.trim() && !attachments.images.length) return;
-    /* Mint attempt identity when the user submits the draft. */
     const candidate = createSpawnAttempt(newAttemptId(), Date.now(), {
       engine,
       model,
@@ -835,6 +858,8 @@ export function DraftAgentPane({
           sendLabelRecording={t("draft.stopAndLaunch")}
           sendIdleClassName="hover:opacity-90"
           sendIdleStyle={{ backgroundColor: tint.color, borderColor: tint.color }}
+          imageDisabled={spawnImagesDisabled}
+          imageDisabledReason={spawnImagesReason}
           leftSlot={
             <span
               className="inline-flex min-w-0 items-center gap-1 rounded-control bg-sunken px-1.5 py-1 text-caption font-semibold text-secondary"

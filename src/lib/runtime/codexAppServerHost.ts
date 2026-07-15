@@ -14,14 +14,8 @@ import type {
   QueueEntry,
   RuntimeEvent,
 } from "./engineHost";
-import { RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
-import {
-  FileRuntimeEventStore,
-  nextRuntimeEventSequence,
-  reconcileRuntimeEventCursor,
-  type RuntimeEventCursorRecoveryReporter,
-  type RuntimeEventStore,
-} from "./eventStore";
+import { normalizeQueueEntry, RuntimeReplayGapError } from "./engineHost";
+import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -440,6 +434,14 @@ export class CodexAppServerHost implements EngineHost {
     if (this.dead || this.releasing || this.released || !this.writerFenceAllowsActuation()) {
       return { outcome: "rejected", reason: "dead-host" };
     }
+    const normalized = normalizeQueueEntry(entry);
+    if (normalized.content.images.length) throw new Error("Codex structured image delivery is disabled until vertical 2.");
+    entry = {
+      id: normalized.id,
+      text: normalized.content.text,
+      contentDigest: normalized.contentDigest,
+      ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
+    };
     if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
     const confirmed = await this.confirmedDelivery(entry);
     if (confirmed) return confirmed;
@@ -891,7 +893,7 @@ export class CodexAppServerHost implements EngineHost {
       if (this.pendingDeliveries.get(entry.id)?.promise !== promise) return;
       this.fail(new Error("Codex delivery confirmation timed out; outcome is uncertain"));
     }, this.requestTimeoutMs);
-    const pending = { text: entry.text, receipt, promise, resolve: resolveDelivery, reject: rejectDelivery, timer };
+    const pending = { text: entry.text!, receipt, promise, resolve: resolveDelivery, reject: rejectDelivery, timer };
     this.pendingDeliveries.set(entry.id, pending);
     return promise;
   }

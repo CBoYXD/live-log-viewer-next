@@ -26,7 +26,8 @@ import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import { runtimeHostClient } from "@/lib/runtime/client";
 import { runtimeScope } from "@/lib/runtime/contracts";
 import { runtimeEventsEnabled } from "@/lib/runtime/flags";
-import { reconcileStructuredSpawnReplay, spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
+import { runtimeImageCapability, runtimeImageStore } from "@/lib/runtime/runtimeImageStore";
+import { spawnStructuredConversation, structuredClaudePermissionMode } from "@/lib/runtime/structuredSpawn";
 import { structuredSpawnGap, spawnTransport } from "@/lib/runtime/spawnTransport";
 import { listFiles } from "@/lib/scanner";
 import { projectForCwd } from "@/lib/scanner/describe";
@@ -70,6 +71,11 @@ interface SuggestResponse {
   cwd: string | null;
   /** Whether the recorded source directory currently exists. */
   cwdExists: boolean;
+  spawnTransport: "tmux" | "structured";
+  imageInput: {
+    claude: ReturnType<typeof runtimeImageCapability>;
+    codex: ReturnType<typeof runtimeImageCapability>;
+  };
 }
 
 function addDir(dirs: string[], cwd: string | null, project: string): void {
@@ -102,7 +108,17 @@ export async function GET(req: NextRequest): Promise<NextResponse<SuggestRespons
     addDir(dirs, cwd, project);
   }
   if (!dirs.length) dirs.push(os.homedir());
-  return NextResponse.json({ dirs, cwd: srcCwd, cwdExists });
+  const transport = spawnTransport();
+  return NextResponse.json({
+    dirs,
+    cwd: srcCwd,
+    cwdExists,
+    spawnTransport: transport,
+    imageInput: {
+      claude: runtimeImageCapability("claude", transport === "structured"),
+      codex: runtimeImageCapability("codex", false),
+    },
+  });
 }
 
 async function postSpawn(
@@ -346,11 +362,22 @@ async function postSpawn(
     if (transport === "structured") {
       const runtimeClient = dependencies.runtimeHostClient();
       if (!runtimeClient) throw new Error("structured spawn runtime host is unavailable");
-      deferStructuredSpawn(begun.receipt, runtimeClient);
-      return NextResponse.json(
-        spawnResponseForReceipt(begun.receipt, begun.receipt.artifactPath, { structured: true }),
-        { status: 202 },
-      );
+      const imageRefs = runtimeImageStore().putMany(images);
+      const response = await dependencies.spawnStructuredConversation({
+        engine,
+        receipt: begun.receipt,
+        spec,
+        account,
+        prompt,
+        imageRefs,
+        registry,
+        client: runtimeClient,
+      });
+      if (parentArtifactPath && response.path) {
+        rememberHandoffChild(response.path, parentArtifactPath);
+        persistHandoffLineage();
+      }
+      return NextResponse.json(response);
     }
     /* Pasted images land in the inbox and reach the fresh agent as file paths
        appended to its first prompt — the same contract the pane composer uses. */

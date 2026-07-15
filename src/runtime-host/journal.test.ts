@@ -10,7 +10,8 @@ import { mergeRuntimeReceipts } from "@/components/TmuxComposer";
 import { applyEvent, installSnapshot } from "@/components/runtime/runtimeModel";
 import type { Flow } from "@/lib/flows/types";
 import { UnixRuntimeHostClient } from "@/lib/runtime/client";
-import { runtimePresentationReceipt, runtimeScope } from "@/lib/runtime/contracts";
+import { runtimeScope } from "@/lib/runtime/contracts";
+import { structuredContentDigest, type StructuredImageRef } from "@/lib/runtime/structuredContent";
 
 import { RuntimeHost, RuntimeHostFence } from "./host";
 import { RuntimeJournal, RuntimeJournalFault } from "./journal";
@@ -143,7 +144,14 @@ test("snapshot exposes the canonical projected runtime model", () => {
       workflowId: null,
       cwd: "/repo",
       artifactPath: "/sessions/one.jsonl",
-      capabilities: { steer: true, structuredAttention: true },
+      capabilities: {
+        steer: true,
+        structuredAttention: true,
+        imageInput: expect.objectContaining({
+          supported: false,
+          reason: "Codex structured image delivery is disabled until vertical 2.",
+        }),
+      },
       activeTurnId: "turn-one",
       drift: null,
     }],
@@ -233,74 +241,55 @@ test("send operations converge by idempotency key and persist one receipt and ef
   journal.close();
 });
 
-test("operation idempotency keys are scoped to their conversation", () => {
-  const dir = sandbox("operation-conversation-dedupe");
-  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
-  const first = journal.executeOperation({
-    kind: "send",
-    operationId: "op-conversation-one",
-    idempotencyKey: "composer-message-one",
-    conversationId: "conversation-one",
-    text: "first conversation",
-    policy: "queue",
+test("image refs remain ordered and participate in journal idempotency", () => {
+  const dir = sandbox("operation-images");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-images"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-images",
+      sessionKey: { engine: "claude", sessionId: "session-images" },
+      hostKind: "claude-broker",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
   });
-  const second = journal.executeOperation({
-    kind: "send",
-    operationId: "op-conversation-two",
-    idempotencyKey: "composer-message-one",
-    conversationId: "conversation-two",
-    text: "second conversation",
-    policy: "queue",
-  });
-
-  expect(first.replayed).toBe(false);
-  expect(second.replayed).toBe(false);
-  expect(first.receipt.idempotencyKey).toBe(second.receipt.idempotencyKey);
-  expect(journal.snapshot().recentOperations).toHaveLength(2);
-  journal.close();
-});
-
-test("runtime restart upgrades global operation idempotency without losing receipts", () => {
-  const dir = sandbox("operation-idempotency-upgrade");
-  const filename = path.join(dir, "events.sqlite");
-  const originalCommand = {
+  const images: StructuredImageRef[] = [
+    { sha256: "a".repeat(64), mime: "image/png", bytes: 67 },
+    { sha256: "b".repeat(64), mime: "image/webp", bytes: 80 },
+  ];
+  const command = {
     kind: "send" as const,
-    operationId: "op-before-idempotency-upgrade",
-    idempotencyKey: "composer-message-one",
-    conversationId: "conversation-before-upgrade",
-    text: "persist through upgrade",
+    operationId: "op-images",
+    idempotencyKey: "key-images",
+    conversationId: "conv-images",
+    text: "",
+    images,
+    contentDigest: structuredContentDigest({ text: "", images }),
     policy: "queue" as const,
   };
-  const initial = new RuntimeJournal(filename, { maxEvents: 100, now: () => 100 });
-  const original = initial.executeOperation(originalCommand);
-  initial.close();
 
-  const db = new Database(filename);
-  db.exec(`
-    BEGIN IMMEDIATE;
-    ALTER TABLE operations RENAME TO operations_scoped_idempotency;
-    CREATE TABLE operations (
-      operation_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE,
-      request_hash TEXT NOT NULL, request_json TEXT NOT NULL,
-      receipt_json TEXT NOT NULL, event_seq INTEGER NOT NULL
-    );
-    INSERT INTO operations(operation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq)
-    SELECT operation_id, idempotency_key, request_hash, request_json, receipt_json, event_seq
-    FROM operations_scoped_idempotency;
-    DROP TABLE operations_scoped_idempotency;
-    COMMIT;
-  `);
-  db.close();
-
-  const restarted = new RuntimeJournal(filename, { maxEvents: 100, now: () => 101 });
-  expect(restarted.executeOperation(originalCommand)).toEqual({ ...original, replayed: true });
-  expect(restarted.executeOperation({
-    ...originalCommand,
-    operationId: "op-after-idempotency-upgrade",
-    conversationId: "conversation-after-upgrade",
-    text: "reuse the composer id in another conversation",
-  }).replayed).toBe(false);
-  restarted.close();
+  const first = journal.executeOperation(command);
+  expect(first.receipt).toMatchObject({ status: "queued", text: "", imageCount: 2 });
+  expect(journal.effectBatch()[0]?.payload).toMatchObject({
+    operationId: "op-images",
+    text: "",
+    images,
+    contentDigest: command.contentDigest,
+  });
+  expect(Buffer.byteLength(JSON.stringify(journal.effectBatch()[0]))).toBeLessThan(16 * 1024);
+  expect(() => journal.executeOperation({
+    ...command,
+    images: [{ ...images[0]!, sha256: "c".repeat(64) }, images[1]!],
+    contentDigest: structuredContentDigest({
+      text: "",
+      images: [{ ...images[0]!, sha256: "c".repeat(64) }, images[1]!],
+    }),
+  })).toThrow("idempotency key already belongs to another request");
+  journal.close();
 });
 
 test("structured send receipts advance through the durable delivery lifecycle", () => {

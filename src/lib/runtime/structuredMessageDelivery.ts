@@ -11,7 +11,8 @@ import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/m
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
-import { recoverDeadStructuredConversation } from "./structuredRecovery";
+import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
+import { structuredContent, type StructuredImageRef } from "./structuredContent";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { markStructuredHostStartupReady } from "./startupStatus";
 
@@ -24,7 +25,9 @@ export interface StructuredMessageRequest {
   policy?: "queue" | "steer-if-active" | "interrupt-active";
   turnId?: string | null;
   text: string;
-  hasImages: boolean;
+  images?: RuntimeImageUpload[];
+  imageRefs?: StructuredImageRef[];
+  hasImages?: boolean;
 }
 
 export type StructuredMessageResult =
@@ -40,7 +43,7 @@ export interface StructuredMessageDependencies {
   requestMigrationTick?: () => void;
   startupFailed?: () => boolean;
   startupRecovered?: () => void;
-  recover?: typeof recoverDeadStructuredConversation;
+  storeImages?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
 }
 
 export interface HeldStructuredMessageRequest {
@@ -49,7 +52,7 @@ export interface HeldStructuredMessageRequest {
   deliveryId: string;
   clientMessageId: string;
   text: string;
-  command?: HeldDeliveryCommand;
+  imageRefs?: StructuredImageRef[];
 }
 
 export interface HeldStructuredMessageDependencies {
@@ -220,7 +223,13 @@ export async function deliverHeldStructuredMessage(
   if (session.hostKind === "tmux-legacy") return requiresStructuredHeldCommand(request) ? "failed" : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return "delivery-uncertain";
   try {
-    const command = request.command ?? {
+    const refs = request.imageRefs ?? [];
+    const imageCapability = session.capabilities.imageInput
+      ?? runtimeImageCapability(session.sessionKey.engine, false);
+    if (refs.length > 0 && !imageCapability.supported) return "failed";
+    const content = structuredContent(request.text, refs);
+    const result = await client.command({
+      kind: "send",
       operationId: request.deliveryId,
       kind: "send" as const,
       policy: "interrupt-active" as const,
@@ -230,9 +239,10 @@ export async function deliverHeldStructuredMessage(
       operationId: command.operationId,
       conversationId: request.conversationId,
       idempotencyKey: request.clientMessageId,
-      text: request.text,
-      policy: command.policy,
-      ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
+      text: content.content.text,
+      ...(refs.length ? { images: refs } : {}),
+      contentDigest: content.contentDigest,
+      policy: "interrupt-active",
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();
@@ -277,17 +287,18 @@ export async function enqueueStructuredMessage(
     ? snapshot.sessions.find((candidate) => candidate.conversationId === request.conversationId)
     : undefined)
     ?? snapshot.sessions.find((candidate) => candidate.artifactPath === request.path);
-  if (!session) {
-    return holdDuringRuntimeSynchronization(
-      request,
-      (dependencies.registry ?? agentRegistry)(),
-      dependencies.requestMigrationTick ?? requestAccountMigrationTick,
-    );
+  if (!session || session.hostKind === "tmux-legacy") return null;
+  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return null;
+  const rawImages = request.images ?? [];
+  const suppliedRefs = request.imageRefs ?? [];
+  const wantsImages = request.hasImages === true || rawImages.length > 0 || suppliedRefs.length > 0;
+  const imageCapability = session.capabilities.imageInput
+    ?? runtimeImageCapability(session.sessionKey.engine, false);
+  if (wantsImages && !imageCapability.supported) {
+    return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
   }
-  if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
-  if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
-  if (request.hasImages) {
-    return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
+  if (request.hasImages && rawImages.length === 0 && suppliedRefs.length === 0) {
+    return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
   const registry = (dependencies.registry ?? agentRegistry)();
@@ -314,8 +325,20 @@ export async function enqueueStructuredMessage(
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
   try {
+    if (rawImages.length > 0 && suppliedRefs.length > 0) throw new Error("structured image payload is ambiguous");
+    const refs = suppliedRefs.length > 0
+      ? suppliedRefs
+      : (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
+    const content = structuredContent(request.text, refs);
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
-    let reservation = registry.holdDelivery(conversation.id, request.text, idempotencyKey, "text", commandInput(request));
+    let reservation = registry.holdDelivery(
+      conversation.id,
+      content.content.text,
+      idempotencyKey,
+      refs.length ? "runtime-images" : "text",
+      refs,
+      content.contentDigest,
+    );
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {
       reservation = registry.retryUncertainDelivery(reservation.id);
@@ -358,9 +381,11 @@ export async function enqueueStructuredMessage(
       operationId: reservation.command.operationId,
       conversationId: conversation.id,
       idempotencyKey,
-      text: request.text,
-      policy: reservation.command.policy,
-      ...(reservation.command.turnId !== undefined ? { turnId: reservation.command.turnId } : {}),
+      text: content.content.text,
+      ...(refs.length ? { images: refs } : {}),
+      contentDigest: content.contentDigest,
+      policy: request.policy ?? "interrupt-active",
+      ...(request.turnId !== undefined ? { turnId: request.turnId } : {}),
     });
     const receipt = result.receipt;
     if (receipt.status === "rejected" || receipt.status === "failed" || receipt.status === "uncertain") {

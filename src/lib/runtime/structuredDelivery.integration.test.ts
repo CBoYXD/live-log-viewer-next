@@ -627,7 +627,7 @@ test("a delivering entry resumes after restart through the host ledger without a
   await expect(firstQueue.drain()).rejects.toThrow("runtime stopped before confirmation commit");
   expect(firstJournal.operationResult("operation-one")?.receipt.status).toBe("delivering");
   expect(firstJournal.effectBatch()).toHaveLength(1);
-  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
+  expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   firstJournal.close();
 
   const reopenedJournal = new RuntimeJournal(filename, { structuredHosts: true });
@@ -640,7 +640,7 @@ test("a delivering entry resumes after restart through the host ledger without a
     turnId: "turn:operation-one",
   });
   expect(reopenedJournal.effectBatch()).toEqual([]);
-  expect(ledger.writes).toEqual([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
+  expect(ledger.writes).toMatchObject([{ id: "operation-one", text: "hello", expectedTurnId: null }]);
   reopenedJournal.close();
 });
 
@@ -1308,8 +1308,8 @@ test("a migration-held delivery switches from the source host to the published C
 
   expect(order.slice(0, 3)).toEqual(["verify", "publish", "commit"]);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toEqual([{
-    id: held.command.operationId,
+  expect(successorLedger.writes).toMatchObject([{
+    id: held.id,
     text: "continue on the successor",
     expectedTurnId: null,
   }]);
@@ -1513,8 +1513,8 @@ test("a migration-held delivery switches from the source host to the published C
 
   expect(publications).toBe(1);
   expect(sourceLedger.writes).toEqual([]);
-  expect(successorLedger.writes).toEqual([{
-    id: held.command.operationId,
+  expect(successorLedger.writes).toMatchObject([{
+    id: held.id,
     text: "continue on the Claude successor",
     expectedTurnId: null,
   }]);
@@ -1668,7 +1668,7 @@ test("successor cleanup drains a delayed publication before restoring path-only 
   await kickStructuredDeliveryQueue();
 
   expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id });
-  expect(sourceLedger.writes).toEqual([{
+  expect(sourceLedger.writes).toMatchObject([{
     id: expect.any(String),
     text: "continue after rollback",
     expectedTurnId: null,
@@ -1910,7 +1910,7 @@ test("late discarded-successor cleanup republishes the committed retarget host",
   await kickStructuredDeliveryQueue();
 
   expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id });
-  expect(committedLedger.writes).toEqual([{
+  expect(committedLedger.writes).toMatchObject([{
     id: expect.any(String),
     text: "continue after retarget",
     expectedTurnId: null,

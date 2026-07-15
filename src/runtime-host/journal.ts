@@ -30,6 +30,8 @@ import {
   type ViewerDeploymentReceipt,
   type ViewerDeploymentStatus,
 } from "@/lib/runtime/contracts";
+import { parseStructuredImageRefs, structuredContent } from "@/lib/runtime/structuredContent";
+import { runtimeImageCapability } from "@/lib/runtime/runtimeImageStore";
 
 export class RuntimeJournalFault extends Error {}
 
@@ -201,6 +203,9 @@ function baseSession(id: string, payload: Record<string, unknown>, revision: num
     capabilities: {
       steer: capabilities.steer === true,
       structuredAttention: capabilities.structuredAttention === true,
+      imageInput: capabilities.imageInput && typeof capabilities.imageInput === "object"
+        ? capabilities.imageInput as RuntimeSession["capabilities"]["imageInput"]
+        : runtimeImageCapability(key.engine === "claude" ? "claude" : "codex", false),
     },
     activeTurnId: typeof payload.activeTurnId === "string" ? payload.activeTurnId : null,
     drift: payload.drift && typeof payload.drift === "object" ? payload.drift as RuntimeSession["drift"] : null,
@@ -318,6 +323,7 @@ export class RuntimeJournal {
     beforeAdmission?: () => void,
   ): RuntimeOperationResult {
     this.assertHealthy();
+    command = this.normalizeOperation(command);
     this.assertOperation(command);
     const operationId = command.operationId?.trim() || newOperationId();
     const requestValue = { ...command } as Record<string, unknown>;
@@ -1000,8 +1006,8 @@ export class RuntimeJournal {
     if (command.operationId !== undefined && (!command.operationId.trim() || command.operationId.includes(":") || /\s/.test(command.operationId))) throw new Error("operationId is invalid");
     if (Buffer.byteLength(JSON.stringify(command)) > 256 * 1024) throw new Error("runtime operation exceeds 256 KiB");
     if (command.kind === "send" || command.kind === "steer") {
-      if (!command.text.trim()) throw new Error("message text is required");
-      if (command.images !== undefined && (!Array.isArray(command.images) || command.images.length > 16 || command.images.some((image) => typeof image !== "string"))) throw new Error("message images are invalid");
+      if (!command.text.trim() && !command.images?.length) throw new Error("message content is required");
+      if (!command.contentDigest) throw new Error("message content digest is required");
     }
     if (command.kind === "answer" && !command.attentionId.trim()) throw new Error("attentionId is required");
     if (command.kind === "kill"
@@ -1015,12 +1021,48 @@ export class RuntimeJournal {
     }
   }
 
-  private operationReceipt(
-    command: RuntimeOperationCommand,
-    operationId: string,
-    retryOfOperationId?: string,
-    retryParent: RuntimeOperationReceipt | null = null,
-  ): RuntimeOperationReceipt {
+  private normalizeOperation(command: RuntimeOperationCommand): RuntimeOperationCommand {
+    if (command.kind !== "send" && command.kind !== "steer" && command.kind !== "spawn") return command;
+    const rawImages = command.images ?? [];
+    const images = parseStructuredImageRefs(rawImages, 16);
+    if (!images) throw new Error("message images are invalid");
+    const text = command.kind === "spawn" ? command.prompt : command.text;
+    if (!text.trim() && images.length === 0) {
+      if (command.kind === "spawn") {
+        const rest = { ...command };
+        delete rest.images;
+        delete rest.contentDigest;
+        return { ...rest, prompt: "" };
+      }
+      throw new Error("message content is required");
+    }
+    const normalized = structuredContent(text, images);
+    if (command.contentDigest && command.contentDigest !== normalized.contentDigest) {
+      throw new Error("message content digest mismatch");
+    }
+    if (command.kind === "spawn") {
+      const rest = { ...command };
+      delete rest.images;
+      delete rest.contentDigest;
+      return {
+        ...rest,
+        prompt: normalized.content.text,
+        ...(images.length ? { images } : {}),
+        contentDigest: normalized.contentDigest,
+      };
+    }
+    const rest = { ...command };
+    delete rest.images;
+    delete rest.contentDigest;
+    return {
+      ...rest,
+      text: normalized.content.text,
+      ...(images.length ? { images } : {}),
+      contentDigest: normalized.contentDigest,
+    };
+  }
+
+  private operationReceipt(command: RuntimeOperationCommand, operationId: string): RuntimeOperationReceipt {
     const session = this.entity<RuntimeSession>("session", command.conversationId);
     let status: RuntimeReceiptStatus;
     let reason: string | null = null;
@@ -1115,6 +1157,7 @@ export class RuntimeJournal {
       queuePosition,
       reason,
       text: command.kind === "send" || command.kind === "steer" ? command.text.slice(0, 240) : null,
+      ...(command.kind === "send" || command.kind === "steer" ? { imageCount: command.images?.length ?? 0 } : {}),
       at: new Date(this.now()).toISOString(),
       revision,
     };
@@ -1177,7 +1220,11 @@ export class RuntimeJournal {
           parentConversationId,
           cwd: command.cwd,
           artifactPath: null,
-          capabilities: { steer: command.engine === "codex", structuredAttention: true },
+          capabilities: {
+            steer: command.engine === "codex",
+            structuredAttention: true,
+            imageInput: runtimeImageCapability(command.engine, false),
+          },
           activeTurnId: null,
         },
       }));
