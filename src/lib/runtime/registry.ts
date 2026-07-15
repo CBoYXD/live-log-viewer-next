@@ -5,7 +5,7 @@ import type {
   ProcessIdentity,
   StructuredHostColumns,
 } from "@/lib/agent/registry";
-import type { SessionKey } from "@/lib/agent/sessionKey";
+import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 
 import { CodexAppServerHost, type CodexAppServerHostOptions } from "./codexAppServerHost";
@@ -196,6 +196,8 @@ export interface AdoptedClaudeHost {
   host: ClaudeStreamBrokerHost;
 }
 
+export type StructuredHostAdoptionFilter = (entry: AgentRegistryEntry) => boolean;
+
 const STRUCTURED_CLAIM_PREFIX = "structured-host:";
 const ORPHAN_TERM_GRACE_MS = 250;
 const ORPHAN_KILL_GRACE_MS = 1_000;
@@ -238,16 +240,58 @@ async function terminateVerifiedClaudeOrphan(
   return waitForVerifiedProcessExit(processIdentity, ORPHAN_KILL_GRACE_MS);
 }
 
-/** Boot seam: resume every durable Codex row when structured hosting is enabled. */
+/** Reconciles claimable structured ownership for rows excluded by startup adoption. */
+export async function demoteSkippedStructuredRegistryHosts(
+  registry: AgentRegistry,
+  shouldAdopt: StructuredHostAdoptionFilter,
+): Promise<void> {
+  const rows = Object.values(registry.snapshot().entries).filter((entry) =>
+    entry.structuredHost && !shouldAdopt(entry));
+  for (const entry of rows) {
+    const host = entry.structuredHost!;
+    const alreadyDead = entry.status === "dead"
+      && host.process === null
+      && entry.claimOwner === null
+      && host.endpoint === "stdio:released"
+      && host.activeTurnRef === null
+      && host.pendingAttention.length === 0
+      && host.activeFlags.length === 0;
+    if (alreadyDead) continue;
+    const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
+    try {
+      await registry.withOperationLock(entry.key, owner, async () => {
+        const current = registry.snapshot().entries[sessionKeyId(entry.key)];
+        if (!current?.structuredHost || shouldAdopt(current)) return;
+        const claimed = registry.claimStructuredHost(entry.key, owner, { allowUnhosted: true });
+        if (!claimed?.structuredHost || !claimed.claimOwner) return;
+        const demoted = registry.setStructuredHostClaimed(entry.key, {
+          ...claimed.structuredHost,
+          endpoint: "stdio:released",
+          process: null,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        }, "dead", claimed.claimOwner, claimed.claimEpoch, true);
+        if (!demoted) throw new Error("structured host writer claim is stale");
+      });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "agent registry is busy") throw error;
+    }
+  }
+}
+
+/** Boot seam: resume selected durable Codex rows when structured hosting is enabled. */
 export async function adoptCodexRegistryHosts(
   registry: AgentRegistry,
   optionsFor: (entry: AgentRegistryEntry) => CodexAppServerHostOptions,
   env: NodeJS.ProcessEnv = process.env,
+  shouldAdopt: StructuredHostAdoptionFilter = () => true,
 ): Promise<AdoptedCodexHost[]> {
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.snapshot().entries).filter((entry) =>
     entry.key.engine === "codex"
-    && entry.structuredHost?.kind === "codex-app-server");
+    && entry.structuredHost?.kind === "codex-app-server"
+    && shouldAdopt(entry));
   const adopted: AdoptedCodexHost[] = [];
   for (const entry of rows) {
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };
@@ -281,16 +325,18 @@ export async function adoptCodexRegistryHosts(
 }
 
 
-/** Boot seam: resume every durable Claude broker row when structured hosting is enabled. */
+/** Boot seam: resume selected durable Claude broker rows when structured hosting is enabled. */
 export async function adoptClaudeRegistryHosts(
   registry: AgentRegistry,
   optionsFor: (entry: AgentRegistryEntry) => ClaudeStreamBrokerHostOptions,
   env: NodeJS.ProcessEnv = process.env,
+  shouldAdopt: StructuredHostAdoptionFilter = () => true,
 ): Promise<AdoptedClaudeHost[]> {
   if (!structuredHostsEnabled(env)) return [];
   const rows = Object.values(registry.snapshot().entries).filter((entry) =>
     entry.key.engine === "claude"
-    && entry.structuredHost?.kind === "claude-broker");
+    && entry.structuredHost?.kind === "claude-broker"
+    && shouldAdopt(entry));
   const adopted: AdoptedClaudeHost[] = [];
   for (const entry of rows) {
     const owner = { pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) };

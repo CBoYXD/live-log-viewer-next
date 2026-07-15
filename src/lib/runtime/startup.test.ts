@@ -10,6 +10,7 @@ import { RuntimeJournal } from "@/runtime-host/journal";
 import type { RuntimeHostClient } from "./client";
 import { bindStructuredDeliveryQueue } from "./structuredDeliveryController";
 import { createFakeDeliveryLedger, FakeEngineHost } from "./fixtures/fakeEngineHost";
+import type { StructuredHostAdoptionFilter } from "./registry";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { adoptStructuredHostsAtStartup, type StructuredStartupDependencies } from "./startup";
 
@@ -404,7 +405,213 @@ test("fresh-journal startup projects a live tmux registry row for composer fallb
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("startup reconciles a failed spawn after host adoption fails", async () => {
+function addStructuredRestartConversation(
+  registry: AgentRegistry,
+  directory: string,
+  input: {
+    sessionId: string;
+    status: "live" | "dead";
+    turn: "busy" | "terminal";
+    activeTurnRef?: string | null;
+  },
+) {
+  const artifactPath = path.join(directory, `${input.sessionId}.jsonl`);
+  fs.writeFileSync(artifactPath, "");
+  const launchProfile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: null,
+    launchProfile,
+    turn: {
+      state: input.turn,
+      source: "lifecycle",
+      terminalAt: input.turn === "terminal" ? "2026-07-15T06:00:00.000Z" : null,
+    },
+    observedAt: "2026-07-15T06:00:00.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId: input.sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: null,
+    launchProfile,
+    status: input.status,
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:retained",
+      process: null,
+      eventCursor: 8,
+      protocolVersion: "test",
+      writerClaimEpoch: 3,
+      activeTurnRef: input.activeTurnRef ?? null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 3,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  return { artifactPath, conversation };
+}
+
+async function startupAdoptionAttempts(
+  registry: AgentRegistry,
+  client: RuntimeHostClient | null = null,
+): Promise<string[]> {
+  const attempts: string[] = [];
+  const select = (
+    engine: "codex" | "claude",
+    received: AgentRegistry,
+    shouldAdopt: StructuredHostAdoptionFilter,
+  ) => {
+    for (const entry of Object.values(received.snapshot().entries)) {
+      if (entry.key.engine === engine && shouldAdopt(entry)) attempts.push(`${entry.key.engine}:${entry.key.sessionId}`);
+    }
+  };
+  await adoptStructuredHostsAtStartup({
+    registry,
+    client,
+    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      select("codex", received, shouldAdopt);
+      return [];
+    },
+    adoptClaude: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
+      select("claude", received, shouldAdopt);
+      return [];
+    },
+  });
+  return attempts;
+}
+
+test("startup adoption boots one live unfinished host across terminal history", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-adoption-gate-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const liveSessionId = "11111111-1111-4111-8111-111111111111";
+  addStructuredRestartConversation(registry, directory, {
+    sessionId: liveSessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "turn-live",
+  });
+  for (let index = 2; index <= 8; index += 1) {
+    const digit = String(index);
+    addStructuredRestartConversation(registry, directory, {
+      sessionId: `${digit.repeat(8)}-${digit.repeat(4)}-4${digit.repeat(3)}-8${digit.repeat(3)}-${digit.repeat(12)}`,
+      status: "live",
+      turn: "terminal",
+      activeTurnRef: `stale-turn-${digit}`,
+    });
+  }
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${liveSessionId}`]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup adoption boots a terminal host with a pending delivery", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-pending-delivery-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "99999999-9999-4999-8999-999999999999";
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "dead",
+    turn: "terminal",
+  });
+  registry.holdDelivery(conversation.id, "deliver after restart", "pending-at-restart");
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([`codex:${sessionId}`]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup adoption boots the terminal host targeted by a queued runtime operation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-queued-operation-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "bbbbbbbb-1111-4111-8111-bbbbbbbbbbbb";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "dead",
+    turn: "terminal",
+  });
+  addStructuredRestartConversation(registry, directory, {
+    sessionId: "cccccccc-1111-4111-8111-cccccccccccc",
+    status: "dead",
+    turn: "terminal",
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: conversation.id },
+    kind: "session-status",
+    payload: {
+      conversationId: conversation.id,
+      sessionKey: { engine: "codex", sessionId },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      artifactPath,
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const queued = journal.executeOperation({
+    kind: "send",
+    operationId: "queued-at-restart",
+    idempotencyKey: "queued-at-restart",
+    conversationId: conversation.id,
+    text: "continue queued work",
+    policy: "queue",
+  });
+  expect(queued.receipt.status).toBe("queued");
+
+  expect(await startupAdoptionAttempts(registry, runtimeJournalClient(journal)))
+    .toEqual([`codex:${sessionId}`]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("terminal retained structured metadata stays dead and projects its finished conversation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-terminal-retained-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+  const { artifactPath, conversation } = addStructuredRestartConversation(registry, directory, {
+    sessionId,
+    status: "dead",
+    turn: "terminal",
+  });
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+
+  expect(await startupAdoptionAttempts(registry, runtimeJournalClient(journal))).toEqual([]);
+  expect(registry.conversation(conversation.id)?.turn).toMatchObject({ state: "terminal" });
+  expect(registry.snapshot().entries[`codex:${sessionId}`]).toMatchObject({
+    status: "dead",
+    claimOwner: null,
+    structuredHost: {
+      endpoint: "stdio:released",
+      process: null,
+      activeTurnRef: null,
+    },
+  });
+  expect(journal.snapshot().sessions).toMatchObject([{
+    conversationId: conversation.id,
+    sessionKey: { engine: "codex", sessionId },
+    hostKind: "codex-app-server",
+    host: "dead",
+    turn: "unknown",
+    artifactPath,
+    activeTurnId: null,
+  }]);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("startup keeps a failed spawn host dead while reconciling its receipt", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-failed-spawn-"));
   const sessionId = crypto.randomUUID();
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
@@ -456,9 +663,9 @@ test("startup reconciles a failed spawn after host adoption fails", async () => 
   const dependencies: StructuredStartupDependencies = {
     registry,
     client,
-    adopt: async (received) => {
+    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
       const entry = received.snapshot().entries[`codex:${sessionId}`];
-      if (entry?.structuredHost) {
+      if (entry?.structuredHost && shouldAdopt(entry)) {
         failedAdoptions += 1;
         received.setStructuredHost(key, {
           ...entry.structuredHost,
@@ -477,7 +684,7 @@ test("startup reconciles a failed spawn after host adoption fails", async () => 
   expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
   expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
 
-  expect(failedAdoptions).toBe(1);
+  expect(failedAdoptions).toBe(0);
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
     state: "failed",
     error: "engine process could not resume",
@@ -510,7 +717,7 @@ test("startup reconciles a failed spawn after host adoption fails", async () => 
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("startup settles a delivered spawn after host adoption fails", async () => {
+test("startup keeps a delivered spawn host dead while settling its receipt", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-delivered-spawn-"));
   const sessionId = crypto.randomUUID();
   const artifactPath = path.join(directory, `${sessionId}.jsonl`);
@@ -570,9 +777,9 @@ test("startup settles a delivered spawn after host adoption fails", async () => 
   const dependencies: StructuredStartupDependencies = {
     registry,
     client: startupClient,
-    adopt: async (received) => {
+    adopt: async (received, _optionsFor, _env, shouldAdopt = () => true) => {
       const entry = received.snapshot().entries[`codex:${sessionId}`];
-      if (entry?.structuredHost) {
+      if (entry?.structuredHost && shouldAdopt(entry)) {
         failedAdoptions += 1;
         received.setStructuredHost(key, {
           ...entry.structuredHost,
@@ -591,7 +798,7 @@ test("startup settles a delivered spawn after host adoption fails", async () => 
   expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
   expect(await adoptStructuredHostsAtStartup(dependencies)).toEqual([]);
 
-  expect(failedAdoptions).toBe(1);
+  expect(failedAdoptions).toBe(0);
   expect(registry.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
     state: "completed",
     artifactPath,
