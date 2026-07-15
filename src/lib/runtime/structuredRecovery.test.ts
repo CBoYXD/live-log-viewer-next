@@ -16,7 +16,7 @@ import { structuredResumeSessionId } from "./structuredSpawn";
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-recovery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-test("dead structured recovery retains ownership and starts a pane-less resume host", async () => {
+test("dead Codex structured recovery retains ownership and starts a pane-less resume host", async () => {
   const sessionId = crypto.randomUUID();
   const cwd = path.join(sandbox, sessionId);
   const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
@@ -107,6 +107,104 @@ test("dead structured recovery retains ownership and starts a pane-less resume h
   });
 
   expect(spawnCalls).toHaveLength(1);
+  expect(result).toMatchObject({
+    target: null,
+    path: artifactPath,
+    conversationId: conversation.id,
+    spawned: true,
+  });
+});
+
+test("dead Claude structured recovery retains ownership and starts a pane-less resume host", async () => {
+  const sessionId = crypto.randomUUID();
+  const cwd = path.join(sandbox, `claude-${sessionId}`);
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.writeFileSync(artifactPath, "");
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const profile = emptyLaunchProfile({
+    cwd,
+    model: "claude-opus-5-1",
+    effort: "high",
+    permissionMode: "default",
+    allowSubagents: true,
+  });
+  const conversation = registry.ensureConversation("claude", artifactPath, "retained-claude-account");
+  registry.upsert({
+    key: { engine: "claude", sessionId },
+    artifactPath,
+    cwd,
+    accountId: "retained-claude-account",
+    launchProfile: profile,
+    status: "dead",
+    host: null,
+    structuredHost: {
+      kind: "claude-broker",
+      endpoint: "stdio:released",
+      process: null,
+      eventCursor: 9,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const account: AccountContext = {
+    engine: "claude",
+    accountId: "retained-claude-account",
+    kind: "managed",
+    home: path.join(cwd, "account"),
+    transcriptRoot: cwd,
+    env: { NODE_ENV: "test" },
+  };
+  let spawnCalls = 0;
+
+  const result = await recoverDeadStructuredConversation({
+    path: artifactPath,
+    conversationId: conversation.id,
+  }, {
+    registry,
+    client: {} as RuntimeHostClient,
+    transport: () => "structured",
+    resolveAccount: (engine, accountId) => {
+      expect(engine).toBe("claude");
+      expect(accountId).toBe("retained-claude-account");
+      return account;
+    },
+    spawn: async (input) => {
+      spawnCalls += 1;
+      expect(input.prompt).toBe("");
+      expect(structuredResumeSessionId(input)).toBe(sessionId);
+      expect(input.receipt).toMatchObject({
+        conversationId: conversation.id,
+        purpose: "resume-successor",
+        transport: "structured",
+        accountId: "retained-claude-account",
+      });
+      expect(input.spec).toMatchObject({
+        cwd,
+        engine: "claude",
+        transcript: artifactPath,
+        launchProfile: profile,
+      });
+      return {
+        ok: true,
+        target: null,
+        path: artifactPath,
+        launchId: input.receipt.launchId,
+        conversationId: conversation.id,
+        launched: true,
+        retrySafe: false,
+        state: "settled",
+      };
+    },
+  });
+
+  expect(spawnCalls).toBe(1);
   expect(result).toMatchObject({
     target: null,
     path: artifactPath,

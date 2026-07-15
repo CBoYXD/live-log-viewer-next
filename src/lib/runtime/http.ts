@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { NextRequest, NextResponse } from "next/server";
 
 import { agentRegistry, type AgentRegistry } from "@/lib/agent/registry";
@@ -39,6 +41,10 @@ const DEFAULT_RETRY_DEPENDENCIES: RuntimeRetryHttpDependencies = {
   client: runtimeHostClient,
   kick: kickStructuredDeliveryQueue,
 };
+
+function terminalRetryIdempotencyKey(operationId: string): string {
+  return `retry_${createHash("sha256").update(operationId).digest("hex")}`;
+}
 
 export async function handleRuntimeCommand(
   request: NextRequest,
@@ -145,20 +151,19 @@ export async function handleRuntimeRetry(
         nextIdempotencyKey = value.idempotencyKey;
       }
     }
-    if (nextIdempotencyKey) {
-      const previous = await client.operationStatus(operationId);
-      if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
-      if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
-        return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
-      }
-      if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
-        return NextResponse.json({ error: "only terminal failed runtime operations can start a new attempt" }, { status: 409 });
-      }
-      await (dependencies.recover ?? recoverDeadStructuredConversation)(
-        { path: "", conversationId: previous.receipt.conversationId },
-        { client },
-      );
+    const previous = await client.operationStatus(operationId);
+    if (!previous) return NextResponse.json({ error: "operation not found" }, { status: 404 });
+    if (previous.receipt.kind !== "send" && previous.receipt.kind !== "steer") {
+      return NextResponse.json({ error: "runtime operation does not support retry" }, { status: 409 });
     }
+    if (previous.receipt.status !== "failed" && previous.receipt.status !== "rejected") {
+      return NextResponse.json({ error: "only terminal failed runtime operations can start a new attempt" }, { status: 409 });
+    }
+    nextIdempotencyKey ??= terminalRetryIdempotencyKey(operationId);
+    await (dependencies.recover ?? recoverDeadStructuredConversation)(
+      { path: "", conversationId: previous.receipt.conversationId },
+      { client },
+    );
     const result = await client.retryOperation(operationId, nextIdempotencyKey);
     dependencies.kick();
     return NextResponse.json({ operationId: result.operationId, receipt: result.receipt }, { status: 202 });

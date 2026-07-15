@@ -326,7 +326,7 @@ export async function spawnStructuredConversation(
   const processIdentity = dependencies.processIdentity ?? (() => ({ pid: process.pid, startIdentity: procBackend.processIdentity(process.pid) }));
   const operationId = input.receipt.launchId;
   let host: SpawnedStructuredHost | null = null;
-  let binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
+  const binding: HostBinding = { stopPersistence: () => {}, unregister: async () => {} };
   let key: SessionKey | null = null;
   try {
     await input.client.command({

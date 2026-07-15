@@ -46,7 +46,7 @@ export interface DeliverySuccess {
   target: string | null;
   outcome?: "delivered-to-live" | "resumed" | "held" | "pending" | "reconfigured" | "queued" | "delivering" | "delivered";
   imagePaths?: string[];
-  /** Set when the message booted a fresh agent window instead of an existing pane. */
+  /** Set when delivery started a successor host for a finished conversation. */
   spawned?: boolean;
   structured?: true;
   operationId?: string;

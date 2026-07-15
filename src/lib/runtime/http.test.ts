@@ -14,6 +14,7 @@ import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { FakeEngineHost, createFakeDeliveryLedger } from "./fixtures/fakeEngineHost";
 import { handleRuntimeCommand, handleRuntimeRetry, type RuntimeHttpDependencies } from "./http";
 import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./structuredDeliveryController";
+import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { enqueueStructuredMessage } from "./structuredMessageDelivery";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 
@@ -294,7 +295,69 @@ test("direct runtime send and steer stay held while their conversation migrates"
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("runtime retry recovers ownership and starts a fresh durable operation", async () => {
+test("runtime retry with an empty body recovers ownership and starts a fresh durable operation", async () => {
+  const retried: Array<[string, string | undefined]> = [];
+  const recoveries: unknown[] = [];
+  const client = {
+    operationStatus: async (operationId: string) => ({
+      operationId,
+      replayed: false,
+      receipt: {
+        operationId,
+        idempotencyKey: "send-original",
+        conversationId: "conversation_retry_empty",
+        kind: "send" as const,
+        status: "failed" as const,
+        at: "2026-07-10T00:00:00.000Z",
+        revision: 3,
+      },
+    }),
+    retryOperation: async (operationId: string, nextIdempotencyKey?: string) => {
+      retried.push([operationId, nextIdempotencyKey]);
+      return {
+        operationId: "op-empty-replacement",
+        replayed: false,
+        receipt: {
+          operationId: "op-empty-replacement",
+          idempotencyKey: nextIdempotencyKey!,
+          conversationId: "conversation_retry_empty",
+          kind: "send" as const,
+          status: "queued" as const,
+          at: "2026-07-10T00:00:00.000Z",
+          revision: 4,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  const retryRequest = new NextRequest("http://127.0.0.1/api/runtime/operations/op-empty-original", {
+    method: "POST",
+    headers: { host: "127.0.0.1" },
+  });
+
+  const response = await handleRuntimeRetry(retryRequest, "op-empty-original", {
+    enabled: () => true,
+    client: () => client,
+    kick: () => {},
+    recover: async (input) => {
+      recoveries.push(input);
+      return {
+        target: null,
+        path: "/retry-empty.jsonl",
+        conversationId: "conversation_retry_empty",
+        spawned: true,
+      };
+    },
+  });
+
+  expect(response.status).toBe(202);
+  expect(recoveries).toEqual([{ path: "", conversationId: "conversation_retry_empty" }]);
+  expect(retried).toHaveLength(1);
+  expect(retried[0]?.[0]).toBe("op-empty-original");
+  expect(retried[0]?.[1]).toBeString();
+  expect(retried[0]?.[1]).not.toBe("send-original");
+});
+
+test("runtime retry accepts an explicit fresh idempotency key", async () => {
   const retried: Array<[string, string | undefined]> = [];
   const recoveries: unknown[] = [];
   let kicks = 0;
@@ -362,6 +425,19 @@ test("runtime retry recovers ownership and starts a fresh durable operation", as
   }), "op-one", {
     enabled: () => true,
     client: () => ({
+      operationStatus: async () => ({
+        operationId: "op-one",
+        replayed: false,
+        receipt: {
+          operationId: "op-one",
+          idempotencyKey: "send-one",
+          conversationId: "conversation_retry",
+          kind: "send",
+          status: "failed",
+          at: "2026-07-10T00:00:00.000Z",
+          revision: 3,
+        },
+      }),
       retryOperation: async () => {
         throw new RuntimeHostUnavailableError(
           "idempotency key already belongs to another request",
@@ -369,9 +445,94 @@ test("runtime retry recovers ownership and starts a fresh durable operation", as
         );
       },
     }) as unknown as RuntimeHostClient,
+    recover: async () => ({
+      target: null,
+      path: "/retry.jsonl",
+      conversationId: "conversation_retry",
+      spawned: false,
+    }),
     kick: () => { throw new Error("conflicted retry kicked delivery"); },
   });
   expect(conflict.status).toBe(409);
+});
+
+test("runtime retry network replay returns the same replacement operation", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-http-retry-replay-"));
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: { type: "session", id: "conversation_retry_replay" },
+    kind: "session-status",
+    payload: {
+      conversationId: "conversation_retry_replay",
+      sessionKey: { engine: "codex", sessionId: "session-retry-replay" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "idle",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  journal.executeOperation({
+    kind: "send",
+    operationId: "op-retry-replay-original",
+    idempotencyKey: "send-retry-replay-original",
+    conversationId: "conversation_retry_replay",
+    text: "deliver once after a lost HTTP response",
+    policy: "queue",
+  });
+  journal.transitionOperation("op-retry-replay-original", "delivering");
+  journal.transitionOperation("op-retry-replay-original", "failed", { reason: "dead-host" });
+  const client = {
+    operationStatus: async (operationId: string) => journal.operationResult(operationId),
+    retryOperation: async (operationId: string, nextIdempotencyKey?: string) =>
+      journal.retryOperation(operationId, nextIdempotencyKey),
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    enabled: () => true,
+    client: () => client,
+    recover: async () => ({
+      target: null,
+      path: "/retry-replay.jsonl",
+      conversationId: "conversation_retry_replay" as const,
+      spawned: false,
+    }),
+    kick: () => {},
+  };
+  const retry = () => handleRuntimeRetry(new NextRequest(
+    "http://127.0.0.1/api/runtime/operations/op-retry-replay-original",
+    { method: "POST", headers: { host: "127.0.0.1" } },
+  ), "op-retry-replay-original", dependencies);
+
+  const first = await retry();
+  const replayed = await retry();
+  const firstBody = await first.json() as { operationId: string; receipt: { idempotencyKey: string } };
+  const replayedBody = await replayed.json() as { operationId: string; receipt: { idempotencyKey: string } };
+
+  expect(first.status).toBe(202);
+  expect(replayed.status).toBe(202);
+  expect(replayedBody).toEqual(firstBody);
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: `effect:${firstBody.operationId}`,
+      payload: expect.objectContaining({ idempotencyKey: firstBody.receipt.idempotencyKey }),
+    }),
+  ]);
+  const ledger = createFakeDeliveryLedger();
+  await new StructuredDeliveryQueue({
+    effects: async (kinds, afterEventSeq) => journal.effectBatch(100, kinds, afterEventSeq),
+    transition: async (operationId, status, details) => {
+      journal.transitionOperation(operationId, status, details);
+    },
+  }, () => new FakeEngineHost(ledger)).drain();
+  expect(ledger.writes).toEqual([{
+    id: firstBody.operationId,
+    text: "deliver once after a lost HTTP response",
+    expectedTurnId: null,
+  }]);
+  expect(journal.effectBatch()).toEqual([]);
+
+  journal.close();
+  fs.rmSync(directory, { recursive: true, force: true });
 });
 
 test("runtime retry rejects malformed JSON before retrying an operation", async () => {

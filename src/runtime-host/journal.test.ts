@@ -403,6 +403,105 @@ test("terminal delivery retry on a replacement host mints one fresh operation", 
   reopened.close();
 });
 
+test("a rejected dead-host retry replays after its replacement starts delivery", () => {
+  const dir = sandbox("rejected-retry-in-flight-replay");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  const projectHost = (host: "hosted" | "dead") => journal.append({
+    scope: runtimeScope("session", "conv-rejected-replay"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-rejected-replay",
+      sessionKey: { engine: "claude", sessionId: "thread-rejected-replay" },
+      hostKind: "claude-broker",
+      host,
+      turn: host === "hosted" ? "idle" : "unknown",
+      provenance: "structured",
+      capabilities: { steer: false, structuredAttention: true },
+    },
+  });
+  projectHost("dead");
+  const original = journal.executeOperation({
+    kind: "send",
+    operationId: "op-rejected-replay-original",
+    idempotencyKey: "key-rejected-replay-original",
+    conversationId: "conv-rejected-replay",
+    text: "deliver once after recovery",
+    policy: "queue",
+  });
+  expect(original.receipt).toMatchObject({ status: "rejected", reason: "dead-host" });
+  projectHost("hosted");
+
+  const replacement = journal.retryOperation(
+    original.operationId,
+    "key-rejected-replay-replacement",
+  );
+  journal.transitionOperation(replacement.operationId, "delivering", { turnId: null });
+  const replayed = journal.retryOperation(
+    original.operationId,
+    "key-rejected-replay-network-retry",
+  );
+
+  expect(replayed).toMatchObject({
+    operationId: replacement.operationId,
+    replayed: true,
+    receipt: { status: "delivering", retryOfOperationId: original.operationId },
+  });
+  expect(journal.effectBatch()).toHaveLength(1);
+  journal.close();
+});
+
+test("a terminal steer retry creates one deterministic replacement effect", () => {
+  const dir = sandbox("terminal-steer-retry");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
+  journal.append({
+    scope: runtimeScope("session", "conv-steer-retry"),
+    kind: "session-status",
+    payload: {
+      conversationId: "conv-steer-retry",
+      sessionKey: { engine: "codex", sessionId: "thread-steer-retry" },
+      hostKind: "codex-app-server",
+      host: "hosted",
+      turn: "running",
+      activeTurnId: "turn-steer-retry",
+      provenance: "structured",
+      capabilities: { steer: true, structuredAttention: true },
+    },
+  });
+  const original = journal.executeOperation({
+    kind: "steer",
+    operationId: "op-steer-retry-original",
+    idempotencyKey: "key-steer-retry-original",
+    conversationId: "conv-steer-retry",
+    text: "amend the active turn once",
+    turnId: "turn-steer-retry",
+  });
+  journal.transitionOperation(original.operationId, "delivering", { turnId: "turn-steer-retry" });
+  journal.transitionOperation(original.operationId, "failed", { reason: "dead-host" });
+
+  const replacement = journal.retryOperation(original.operationId, "key-steer-retry-replacement");
+  const replayed = journal.retryOperation(original.operationId, "key-steer-retry-network-replay");
+
+  expect(replacement.receipt).toMatchObject({
+    kind: "steer",
+    status: "pending",
+    turnId: "turn-steer-retry",
+    retryOfOperationId: original.operationId,
+  });
+  expect(replayed).toMatchObject({ operationId: replacement.operationId, replayed: true });
+  expect(journal.effectBatch()).toEqual([
+    expect.objectContaining({
+      id: `effect:${replacement.operationId}`,
+      kind: "runtime.steer",
+      payload: expect.objectContaining({
+        operationId: replacement.operationId,
+        text: "amend the active turn once",
+        turnId: "turn-steer-retry",
+      }),
+    }),
+  ]);
+  journal.close();
+});
+
 test("a failed replacement retries from the current attempt and keeps one pending effect", () => {
   const dir = sandbox("replacement-retry-chain");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { structuredHosts: true });
