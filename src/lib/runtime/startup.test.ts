@@ -416,14 +416,15 @@ function addStructuredRestartConversation(
     activeTurnRef?: string | null;
     transcriptRecords?: Record<string, unknown>[];
     transcriptSuffix?: string;
+    alignFirstRecordToTailBoundary?: boolean;
   },
 ) {
   const engine = input.engine ?? "codex";
   const artifactPath = path.join(directory, `${input.sessionId}.jsonl`);
-  fs.writeFileSync(
-    artifactPath,
-    (input.transcriptRecords ?? []).map((record) => JSON.stringify(record)).join("\n") + (input.transcriptSuffix ?? ""),
-  );
+  const transcript = (input.transcriptRecords ?? []).map((record) => JSON.stringify(record)).join("\n") + (input.transcriptSuffix ?? "");
+  fs.writeFileSync(artifactPath, input.alignFirstRecordToTailBoundary
+    ? `${JSON.stringify({ padding: "before-window" })}\n${transcript}${" ".repeat(128 * 1024 - Buffer.byteLength(transcript))}`
+    : transcript);
   const launchProfile = emptyLaunchProfile({ cwd: directory });
   registry.reconcileConversations([{
     engine,
@@ -567,6 +568,33 @@ test.each(["codex", "claude"] as const)(
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
         : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+    });
+
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+    expect(await startupAdoptionAttempts(registry)).toEqual([]);
+    expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  },
+);
+
+test.each(["codex", "claude"] as const)(
+  "a 128 KiB-aligned terminal %s transcript stays retired across repeated startup",
+  async (engine) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), `llv-runtime-startup-repeat-aligned-terminal-${engine}-`));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    const sessionId = `${engine === "codex" ? "4" : "5"}0000000-0000-4000-8000-000000000001`;
+    const { conversation } = addStructuredRestartConversation(registry, directory, {
+      engine,
+      sessionId,
+      status: "live",
+      turn: "busy",
+      activeTurnRef: `stale-${engine}`,
+      transcriptRecords: engine === "codex"
+        ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
+        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+      alignFirstRecordToTailBoundary: true,
     });
 
     expect(await startupAdoptionAttempts(registry)).toEqual([]);

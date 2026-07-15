@@ -64,6 +64,32 @@ describe("turnStateFromRecords (codex)", () => {
 });
 
 describe("readStableTailRecords", () => {
+  test("preserves a Codex terminal record aligned to the 128 KiB tail boundary", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stable-tail-aligned-codex-"));
+    const transcript = path.join(directory, "transcript.jsonl");
+    const record = { timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } };
+    const line = JSON.stringify(record);
+    const tailBytes = 128 * 1024;
+    fs.writeFileSync(transcript, `${JSON.stringify({ padding: "before-window" })}\n${line}${" ".repeat(tailBytes - line.length)}`);
+
+    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", records: [record] });
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  test("preserves a Claude terminal record aligned to the 128 KiB tail boundary", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stable-tail-aligned-claude-"));
+    const transcript = path.join(directory, "transcript.jsonl");
+    const record = { type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" };
+    const line = JSON.stringify(record);
+    const tailBytes = 128 * 1024;
+    fs.writeFileSync(transcript, `${JSON.stringify({ padding: "before-window" })}\n${line}${" ".repeat(tailBytes - line.length)}`);
+
+    expect(await readStableTailRecords(transcript)).toEqual({ integrity: "complete", records: [record] });
+
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
   test("rejects corrupt and truncated JSONL rows", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-stable-tail-invalid-"));
     const corrupt = path.join(directory, "corrupt.jsonl");

@@ -42,10 +42,12 @@ export async function readStableTailRecords(pathname: string, nbytes = 131_072):
     if (!Number.isSafeInteger(size)) return { integrity: "uncertain", records: [] };
     const length = Math.min(size, nbytes);
     const seek = size - length;
-    const buffer = Buffer.alloc(length);
+    const boundaryBytes = seek > 0 ? 1 : 0;
+    const readSeek = seek - boundaryBytes;
+    const buffer = Buffer.alloc(length + boundaryBytes);
     let offset = 0;
-    while (offset < length) {
-      const read = await handle.read(buffer, offset, length - offset, seek + offset);
+    while (offset < buffer.length) {
+      const read = await handle.read(buffer, offset, buffer.length - offset, readSeek + offset);
       if (read.bytesRead === 0) return { integrity: "uncertain", records: [] };
       offset += read.bytesRead;
     }
@@ -57,9 +59,12 @@ export async function readStableTailRecords(pathname: string, nbytes = 131_072):
 
     let jsonBuffer = buffer;
     if (seek > 0) {
-      const firstNewline = buffer.indexOf(0x0a);
-      if (firstNewline < 0) return { integrity: "complete", records: [] };
-      jsonBuffer = buffer.subarray(firstNewline + 1);
+      if (buffer[0] === 0x0a) jsonBuffer = buffer.subarray(1);
+      else {
+        const firstNewline = buffer.indexOf(0x0a);
+        if (firstNewline < 0) return { integrity: "complete", records: [] };
+        jsonBuffer = buffer.subarray(firstNewline + 1);
+      }
     }
     let data: string;
     try {
