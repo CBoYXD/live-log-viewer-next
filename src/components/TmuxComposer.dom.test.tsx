@@ -76,9 +76,9 @@ function expectTransportDetailsHidden(host: HTMLElement) {
 test("interrupt automatic retry shows visible busy feedback in English", () => {
   const { host, root } = renderInterruptAutoRetry("en");
 
-  const status = host.querySelector('[role="status"]');
-  expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
-  expect(status?.querySelector(".sr-only")).toBeNull();
+  const summary = host.querySelector("summary");
+  expect(summary?.textContent).toContain("pending: 1");
+  expect(summary?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
   expectTransportDetailsHidden(host);
   flushSync(() => root.unmount());
 });
@@ -86,9 +86,9 @@ test("interrupt automatic retry shows visible busy feedback in English", () => {
 test("interrupt automatic retry shows visible busy feedback in Ukrainian", () => {
   const { host, root } = renderInterruptAutoRetry("uk");
 
-  const status = host.querySelector('[role="status"]');
-  expect(status?.textContent).toContain(translate("uk", "runtime.receipt.busyRetry"));
-  expect(status?.querySelector(".sr-only")).toBeNull();
+  const summary = host.querySelector("summary");
+  expect(summary?.textContent).toContain("очікують: 1");
+  expect(summary?.textContent).toContain(translate("uk", "runtime.receipt.busyRetry"));
   expectTransportDetailsHidden(host);
   flushSync(() => root.unmount());
 });
@@ -146,10 +146,19 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   expect(stack.open).toBe(false);
   const summary = stack.querySelector("summary")!;
   expect(summary.textContent).toContain("Спроб доставки: 3");
-  expect(summary.textContent).toContain("черга: 1");
+  expect(summary.textContent).toContain("очікують: 1");
   expect(summary.textContent).toContain("проблем: 2");
   expect(summary.querySelector("[data-receipt-preview]")?.textContent).toBe(text);
-  expect(summary.getAttribute("aria-label")).toContain("Показати деталі доставки");
+  expect(summary.hasAttribute("aria-label")).toBe(false);
+  const statusId = summary.getAttribute("aria-describedby");
+  expect(statusId).toBeTruthy();
+  const status = stack.querySelector(`#${statusId}`);
+  expect(status?.getAttribute("role")).toBe("status");
+  expect(status?.getAttribute("aria-live")).toBe("polite");
+  expect(status?.textContent).toContain("очікують 1");
+  expect(status?.textContent).toContain("проблем 2");
+  expect(summary.querySelector('[data-receipt-action="show"]')?.textContent).toBe("Показати деталі доставки");
+  expect(summary.querySelector('[data-receipt-action="hide"]')?.textContent).toBe("Сховати деталі доставки");
 
   const details = stack.querySelector("[data-runtime-receipt-details]") as HTMLElement;
   expect(details.className).toContain("max-h-");
@@ -159,6 +168,117 @@ test("multiple delivery attempts collapse into one bounded accessible receipt st
   expect(actions).toHaveLength(2);
   expect(actions.every((button) => button.textContent?.includes("Змінити й надіслати"))).toBe(true);
 
+  flushSync(() => root.unmount());
+});
+
+test("receipt summary keeps the pending count beside busy retry feedback", () => {
+  setLocale("en");
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+
+  flushSync(() => root.render(
+    <RuntimeComposerReceipts
+      receipts={[
+        {
+          operationId: "op-busy",
+          idempotencyKey: "key-busy",
+          conversationId: "conv-one",
+          kind: "send",
+          status: "queued",
+          reason: "delivery-auto-retry",
+          text: "retry this",
+          at: "2026-07-15T16:00:01.000Z",
+          revision: 1,
+        },
+        {
+          operationId: "op-started",
+          idempotencyKey: "key-started",
+          conversationId: "conv-one",
+          kind: "steer",
+          status: "turn-started",
+          text: "then this",
+          at: "2026-07-15T16:00:00.000Z",
+          revision: 1,
+        },
+      ]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  ));
+
+  const summary = host.querySelector("summary")!;
+  expect(summary.textContent).toContain("pending: 2");
+  expect(summary.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
+  const status = host.querySelector("[data-runtime-receipt-status]");
+  expect(status?.textContent).toContain("2 pending");
+  expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
+  flushSync(() => root.unmount());
+});
+
+test("all active delivery states use a neutral pending summary in both locales", () => {
+  const activeStatuses = ["pending", "delivering", "turn-started", "steered", "queued", "uncertain"] as const;
+
+  for (const locale of ["en", "uk"] as const) {
+    setLocale(locale);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    flushSync(() => root.render(
+      <RuntimeComposerReceipts
+        receipts={activeStatuses.map((status, index) => ({
+          operationId: `${locale}-${status}`,
+          idempotencyKey: `${locale}-key-${status}`,
+          conversationId: "conv-one",
+          kind: "send" as const,
+          status,
+          text: `${status} message`,
+          at: `2026-07-15T16:00:0${index}.000Z`,
+          revision: 1,
+        }))}
+        onRetry={() => {}}
+        onEdit={() => {}}
+      />,
+    ));
+
+    const summary = host.querySelector("summary")!;
+    expect(summary.textContent).toContain(locale === "en" ? "pending: 6" : "очікують: 6");
+    expect(summary.textContent).not.toContain(locale === "en" ? "queued: 6" : "черга: 6");
+    expect(summary.querySelector('[data-receipt-action="show"]')?.textContent).toBe(translate(locale, "runtime.receipt.showDetails"));
+    expect(summary.querySelector('[data-receipt-action="hide"]')?.textContent).toBe(translate(locale, "runtime.receipt.hideDetails"));
+    flushSync(() => root.unmount());
+  }
+});
+
+test("expanded receipt rows expose long multiline message text", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const text = `first line\n${"long content ".repeat(30)}`;
+
+  flushSync(() => root.render(
+    <RuntimeComposerReceipts
+      receipts={[{
+        operationId: "op-long-multiline",
+        idempotencyKey: "key-long-multiline",
+        conversationId: "conv-one",
+        kind: "send",
+        status: "failed",
+        reason: "delivery failed",
+        text,
+        at: "2026-07-15T16:00:00.000Z",
+        revision: 1,
+      }]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  ));
+
+  const message = host.querySelector("[data-runtime-receipt-details] [data-receipt-message]") as HTMLElement;
+  expect(message.textContent).toBe(text);
+  expect(message.className).toContain("whitespace-pre-wrap");
+  expect(message.className).toContain("break-words");
+  expect(message.className).not.toContain("truncate");
   flushSync(() => root.unmount());
 });
 

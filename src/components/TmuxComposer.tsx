@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { ArrowRight, ArrowUpToLine, ChevronRight, FoldVertical, Loader2, Play, Square, SquareTerminal, X } from "@/components/icons";
 import { Check, Plus, RotateCcw } from "lucide-react";
@@ -81,6 +81,7 @@ export function RuntimeComposerReceipts({
   onEdit: (receipt: RuntimeReceipt) => void;
 }) {
   const { t } = useLocale();
+  const statusId = useId();
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
@@ -106,12 +107,20 @@ export function RuntimeComposerReceipts({
           data-runtime-receipt-stack
         >
           <summary
-            aria-label={t("runtime.receipt.showDetails")}
+            aria-describedby={statusId}
             className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-control px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
           >
             <ChevronRight className="h-3 w-3 shrink-0 text-muted transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
             <span className="shrink-0 font-semibold text-primary">
               {t("runtime.receipt.summary", { count: messageReceipts.length })}
+            </span>
+            <span className="sr-only">
+              <span className="group-open:hidden" data-receipt-action="show">
+                {t("runtime.receipt.showDetails")}
+              </span>
+              <span className="hidden group-open:inline" data-receipt-action="hide">
+                {t("runtime.receipt.hideDetails")}
+              </span>
             </span>
             <span
               className="min-w-0 flex-1 truncate text-right text-muted"
@@ -123,24 +132,36 @@ export function RuntimeComposerReceipts({
             {pendingReceipts.length ? (
               <Badge
                 tone="warning"
-                role="status"
-                aria-live="polite"
-                className={busyRetry ? "max-w-[42%] overflow-hidden" : ""}
-                title={busyRetry ? t("runtime.receipt.busyRetry") : undefined}
+                className={busyRetry ? "max-w-[52%] overflow-hidden" : ""}
+                title={busyRetry
+                  ? `${t("runtime.receipt.pendingCount", { count: pendingReceipts.length })} · ${t("runtime.receipt.busyRetry")}`
+                  : undefined}
               >
                 <span className={busyRetry ? "truncate" : undefined}>
-                  {busyRetry
-                    ? t("runtime.receipt.busyRetry")
-                    : t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
+                  {t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
+                  {busyRetry ? ` · ${t("runtime.receipt.busyRetry")}` : null}
                 </span>
               </Badge>
             ) : null}
             {problemReceipts.length ? (
-              <Badge tone="danger" role="status" aria-live="polite">
+              <Badge tone="danger">
                 {t("runtime.receipt.problemCount", { count: problemReceipts.length })}
               </Badge>
             ) : null}
           </summary>
+          <span
+            id={statusId}
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            data-runtime-receipt-status
+          >
+            {t("runtime.receipt.statusSummary", {
+              pending: pendingReceipts.length,
+              problems: problemReceipts.length,
+            })}
+            {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
+          </span>
           <div
             className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"
             data-runtime-receipt-details
@@ -155,10 +176,13 @@ export function RuntimeComposerReceipts({
               return (
                 <div
                   key={receipt.operationId}
-                  className="flex min-w-0 items-center justify-end gap-1.5 rounded-control bg-card/70 px-2 py-1"
+                  className="flex min-w-0 items-start justify-end gap-1.5 rounded-control bg-card/70 px-2 py-1"
                   {...(pending ? { "data-optimistic-message": "true" } : {})}
                 >
-                  <span className="min-w-0 flex-1 truncate text-right text-secondary" title={receipt.text ?? undefined}>
+                  <span
+                    className="min-w-0 flex-1 whitespace-pre-wrap break-words text-right text-secondary"
+                    data-receipt-message
+                  >
                     {receipt.text}
                   </span>
                   {pending ? (
