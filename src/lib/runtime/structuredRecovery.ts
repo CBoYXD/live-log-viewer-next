@@ -37,6 +37,7 @@ interface RecoveryCandidate {
   key: SessionKey;
   path: string;
   accountId: string | null;
+  parentConversationId: ViewerConversationId | null;
   spec: ResumeSpec;
   available: boolean;
 }
@@ -71,12 +72,18 @@ function candidateFor(
     ...(entry.launchProfile ?? {}),
     cwd: entry.launchProfile?.cwd || generation.launchProfile.cwd || entry.cwd,
   });
+  const recordedParent = snapshot.lineageEdges[conversation.id]?.parentConversationId
+    ?? profile.parentConversationId;
+  const parentConversationId = recordedParent && recordedParent !== conversation.id
+    ? registry.canonicalConversationId(recordedParent)
+    : null;
   return {
     conversationId: conversation.id,
     engine: conversation.engine,
     key,
     path: generation.path,
     accountId: generation.accountId ?? entry.accountId,
+    parentConversationId: parentConversationId === conversation.id ? null : parentConversationId,
     spec: {
       command: "",
       cwd: profile.cwd,
@@ -119,6 +126,7 @@ async function recoverCandidate(
       transport: "structured",
       accountId: account.accountId,
       conversationId: current.conversationId,
+      parentConversationId: current.parentConversationId,
       purpose: "resume-successor",
       expectedArtifactPath: current.path,
       launchProfile: current.spec.launchProfile,

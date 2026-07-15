@@ -776,6 +776,37 @@ test("spawn acceptance creates the placeholder session and lineage edge atomical
   journal.close();
 });
 
+test("successor spawn preserves one canonical lineage edge and rejects self lineage", () => {
+  const dir = sandbox("successor-lineage");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });
+  const child = "child-one";
+  const parent = "parent-one";
+  for (const [operationId, parentConversationId] of [["op-spawn-one", parent], ["op-spawn-two", parent], ["op-spawn-self", child]] as const) {
+    journal.executeOperation({
+      kind: "spawn",
+      conversationId: child,
+      operationId,
+      idempotencyKey: operationId,
+      engine: "codex",
+      cwd: "/repo",
+      prompt: "Resume the worker",
+      accountId: "account-one",
+      parentConversationId,
+      sessionId: "thread-child-one",
+    });
+  }
+  const snapshot = journal.snapshot();
+  expect(snapshot.sessions).toEqual([expect.objectContaining({
+    conversationId: child,
+    parentConversationId: parent,
+  })]);
+  expect(snapshot.edges).toEqual([expect.objectContaining({
+    parentConversationId: parent,
+    childConversationId: child,
+  })]);
+  journal.close();
+});
+
 test("runtime host advances and publishes a flow from a terminal event without file polling", async () => {
   const dir = sandbox("flow-consumer");
   const journal = new RuntimeJournal(path.join(dir, "events.sqlite"), { maxEvents: 100, now: () => 100 });

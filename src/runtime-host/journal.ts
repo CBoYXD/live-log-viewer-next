@@ -1025,6 +1025,12 @@ export class RuntimeJournal {
       return;
     }
     if (command.kind === "spawn") {
+      const requestedParentConversationId = command.parentConversationId && command.parentConversationId !== command.conversationId
+        ? command.parentConversationId
+        : null;
+      const parentConversationId = requestedParentConversationId
+        ?? this.entity<RuntimeSession>("session", command.conversationId)?.parentConversationId
+        ?? null;
       this.appendInTransaction(normalizeRuntimeEventInput({
         scope: { type: "session", id: command.conversationId },
         kind: "session-status",
@@ -1038,14 +1044,16 @@ export class RuntimeJournal {
           turn: "unknown",
           provenance: "structured",
           accountId: command.accountId ?? null,
-          parentConversationId: command.parentConversationId ?? null,
+          parentConversationId,
           cwd: command.cwd,
           artifactPath: null,
           capabilities: { steer: command.engine === "codex", structuredAttention: true },
           activeTurnId: null,
         },
       }));
-      if (command.parentConversationId) {
+      const duplicateLineage = parentConversationId && this.entityValues<RuntimeEdge>("edge").some((edge) =>
+        edge.parentConversationId === parentConversationId && edge.childConversationId === command.conversationId);
+      if (parentConversationId && !duplicateLineage) {
         const edgeId = `edge-${operationId}`;
         this.appendInTransaction(normalizeRuntimeEventInput({
           scope: { type: "edge", id: edgeId },
@@ -1055,7 +1063,7 @@ export class RuntimeJournal {
           payload: {
             id: edgeId,
             kind: "viewer_spawn",
-            parentConversationId: command.parentConversationId,
+            parentConversationId,
             childConversationId: command.conversationId,
             createdByOperationId: operationId,
             createdAt: new Date(this.now()).toISOString(),

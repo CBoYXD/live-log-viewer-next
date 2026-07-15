@@ -134,18 +134,20 @@ class RoundTripHost implements SpawnedStructuredHost {
   }
 
   attach(afterSeq: number): AsyncIterable<RuntimeEvent> {
-    const host = this;
+    const isReleased = () => this.released;
+    const eventAfter = (cursor: number) => this.events.find((candidate) => candidate.seq > cursor);
+    const waitForEvent = () => new Promise<void>((resolve) => this.waiters.add(resolve));
     return {
       async *[Symbol.asyncIterator]() {
         let cursor = afterSeq;
-        while (!host.released) {
-          const event = host.events.find((candidate) => candidate.seq > cursor);
+        while (!isReleased()) {
+          const event = eventAfter(cursor);
           if (event) {
             cursor = event.seq;
             yield event;
             continue;
           }
-          await new Promise<void>((resolve) => host.waiters.add(resolve));
+          await waitForEvent();
         }
       },
     };
@@ -280,11 +282,16 @@ test("a concurrent structured spawn replay stays pending until durable host setu
   const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
   const client = runtimeClient(journal);
   await bindStructuredDeliveryQueue([], { registry, client });
+  const parent = registry.ensureConversation("codex", path.join(cwd, "parent.jsonl"), "codex-subscription");
+  const child = registry.ensureConversation("codex", artifactPath, "codex-subscription");
   const request = {
     engine: "codex" as const,
     cwd,
     accountId: "codex-subscription",
-    launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" }),
+    parentConversationId: parent.id,
+    conversationId: child.id,
+    purpose: "resume-successor" as const,
+    launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna", parentConversationId: parent.id }),
     clientAttemptId: `attempt_${id}`,
     requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
   };
@@ -331,6 +338,10 @@ test("a concurrent structured spawn replay stays pending until durable host setu
 
   allowBind.resolve();
   await expect(spawning).resolves.toMatchObject({ launched: true, state: "settled", path: artifactPath });
+  expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId))
+    .toMatchObject({ parentConversationId: parent.id });
+  expect(journal.snapshot().edges.filter((edge) => edge.childConversationId === begun.receipt.conversationId))
+    .toEqual([expect.objectContaining({ parentConversationId: parent.id })]);
 });
 
 describe.each(["bind", "publish", "first-message"] as const)("structured spawn %s failure", (barrier) => {
@@ -343,11 +354,16 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
     const journal = new RuntimeJournal(path.join(cwd, "runtime.sqlite"), { structuredHosts: true });
     const client = runtimeClient(journal);
     await bindStructuredDeliveryQueue([], { registry, client });
+    const parent = registry.ensureConversation("codex", path.join(cwd, "reviewed.jsonl"), "codex-subscription");
+    const child = registry.ensureConversation("codex", artifactPath, "codex-subscription");
     const request = {
       engine: "codex" as const,
       cwd,
       accountId: "codex-subscription",
-      launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna" }),
+      parentConversationId: parent.id,
+      conversationId: child.id,
+      purpose: "resume-successor" as const,
+      launchProfile: emptyLaunchProfile({ cwd, model: "gpt-5.6-luna", parentConversationId: parent.id }),
       clientAttemptId: `attempt_${id}`,
       requestDigest: id.replaceAll("-", "").padEnd(64, "0").slice(0, 64),
     };
@@ -416,7 +432,10 @@ describe.each(["bind", "publish", "first-message"] as const)("structured spawn %
     expect(journal.snapshot().sessions.find((session) => session.conversationId === begun.receipt.conversationId)).toMatchObject({
       host: "dead",
       artifactPath,
+      parentConversationId: parent.id,
     });
+    expect(journal.snapshot().edges.filter((edge) => edge.childConversationId === begun.receipt.conversationId))
+      .toEqual([expect.objectContaining({ parentConversationId: parent.id })]);
   });
 });
 

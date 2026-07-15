@@ -23,6 +23,8 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
   fs.mkdirSync(cwd, { recursive: true });
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const parentPath = path.join(cwd, "parent.jsonl");
+  const parent = registry.ensureConversation("codex", parentPath, "retained-account");
   const profile = emptyLaunchProfile({
     cwd,
     model: "gpt-5.6-luna",
@@ -30,6 +32,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
     readOnly: true,
     permissionMode: "never",
     allowSubagents: true,
+    parentConversationId: parent.id,
   });
   const conversation = registry.ensureConversation("codex", artifactPath, "retained-account");
   registry.upsert({
@@ -83,6 +86,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       expect(input.receipt).toMatchObject({
         conversationId: conversation.id,
+        parentConversationId: parent.id,
         purpose: "resume-successor",
         transport: "structured",
         accountId: "retained-account",
@@ -113,6 +117,10 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
     conversationId: conversation.id,
     spawned: true,
   });
+  const lineageEdges = Object.values(registry.snapshot().lineageEdges)
+    .filter((edge) => edge.childConversationId === conversation.id);
+  expect(lineageEdges).toHaveLength(1);
+  expect(lineageEdges[0]).toMatchObject({ parentConversationId: parent.id, source: "viewer-spawn" });
 });
 
 test("dead Claude structured recovery retains ownership and starts a pane-less resume host", async () => {
@@ -122,12 +130,15 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
   fs.mkdirSync(cwd, { recursive: true });
   fs.writeFileSync(artifactPath, "");
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const parentPath = path.join(cwd, "reviewed.jsonl");
+  const reviewed = registry.ensureConversation("claude", parentPath, "retained-claude-account");
   const profile = emptyLaunchProfile({
     cwd,
     model: "claude-opus-5-1",
     effort: "high",
     permissionMode: "default",
     allowSubagents: true,
+    parentConversationId: reviewed.id,
   });
   const conversation = registry.ensureConversation("claude", artifactPath, "retained-claude-account");
   registry.upsert({
@@ -181,6 +192,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       expect(input.receipt).toMatchObject({
         conversationId: conversation.id,
+        parentConversationId: reviewed.id,
         purpose: "resume-successor",
         transport: "structured",
         accountId: "retained-claude-account",
@@ -211,6 +223,10 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
     conversationId: conversation.id,
     spawned: true,
   });
+  const lineageEdges = Object.values(registry.snapshot().lineageEdges)
+    .filter((edge) => edge.childConversationId === conversation.id);
+  expect(lineageEdges).toHaveLength(1);
+  expect(lineageEdges[0]).toMatchObject({ parentConversationId: reviewed.id, source: "viewer-spawn" });
 });
 
 test("live structured ownership prevents a duplicate recovery host", async () => {
