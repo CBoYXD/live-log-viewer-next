@@ -72,6 +72,7 @@ export function createResourcesLoader(
   onFailure: (at: number) => void,
 ) {
   const requests = createFreshAwareCoalescer<boolean>();
+  const controller = new AbortController();
   let disposed = false;
 
   return {
@@ -83,7 +84,7 @@ export function createResourcesLoader(
         if (disposed) return false;
         const at = Date.now() / 1000;
         try {
-          const res = await fetcher("/api/resources" + (forceFresh ? "?fresh=1" : ""));
+          const res = await fetcher("/api/resources" + (forceFresh ? "?fresh=1" : ""), { signal: controller.signal });
           if (!res.ok) throw new Error(String(res.status));
           const json = (await res.json()) as ResourcesPayload;
           if (!disposed) onPayload(json, at);
@@ -96,6 +97,7 @@ export function createResourcesLoader(
     },
     dispose(): void {
       disposed = true;
+      controller.abort();
     },
   };
 }

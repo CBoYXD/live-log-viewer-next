@@ -105,3 +105,33 @@ test("dispose prevents a queued forced refresh from starting", async () => {
   expect(await loader.load(true)).toBeFalse();
   expect(urls).toEqual(["/api/resources"]);
 });
+
+test("dispose aborts the active resource request", async () => {
+  const capture: { signal?: AbortSignal } = {};
+  const loader = createResourcesLoader(
+    async (_input, init) => {
+      const requestSignal = init?.signal;
+      if (!requestSignal) throw new Error("resource request must carry an abort signal");
+      capture.signal = requestSignal;
+      return await new Promise<Response>((_resolve, reject) => {
+        requestSignal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    },
+    () => {
+      throw new Error("disposed loader must not publish a payload");
+    },
+    () => {
+      throw new Error("disposed loader must not publish a failure");
+    },
+  );
+
+  const active = loader.load();
+  await Promise.resolve();
+  const signal = capture.signal;
+  if (!signal) throw new Error("resource request did not start");
+  expect(signal.aborted).toBeFalse();
+
+  loader.dispose();
+  expect(signal?.aborted).toBeTrue();
+  expect(await active).toBeFalse();
+});
