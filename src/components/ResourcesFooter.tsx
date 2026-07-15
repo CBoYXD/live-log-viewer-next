@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { createFreshAwareCoalescer } from "@/lib/asyncCoalescer";
 import { useLocale } from "@/lib/i18n";
 import type { ResourceSession, ResourcesPayload } from "@/lib/types";
 
@@ -60,6 +61,41 @@ interface ResourcesSnap {
   staleSince: number | null;
 }
 
+type ResourcesFetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+/** One request channel for initial load, polling, and post-kill refreshes.
+    Polls share an active request. A forced refresh waits for the active poll
+    and then requests a fresh server snapshot. */
+export function createResourcesLoader(
+  fetcher: ResourcesFetcher,
+  onPayload: (payload: ResourcesPayload, at: number) => void,
+  onFailure: (at: number) => void,
+) {
+  const requests = createFreshAwareCoalescer<boolean>();
+  let disposed = false;
+
+  return {
+    load(fresh = false): Promise<boolean> {
+      return requests.run(fresh, async (forceFresh) => {
+        const at = Date.now() / 1000;
+        try {
+          const res = await fetcher("/api/resources" + (forceFresh ? "?fresh=1" : ""));
+          if (!res.ok) throw new Error(String(res.status));
+          const json = (await res.json()) as ResourcesPayload;
+          if (!disposed) onPayload(json, at);
+          return true;
+        } catch {
+          if (!disposed) onFailure(at);
+          return false;
+        }
+      });
+    },
+    dispose(): void {
+      disposed = true;
+    },
+  };
+}
+
 function stickySnap(prev: ResourcesSnap | null, next: ResourcesPayload, at: number): ResourcesSnap {
   const carriedSystem = next.system === null && (prev?.data.system ?? null) !== null;
   return {
@@ -81,25 +117,25 @@ export function ResourcesFooter() {
      hands the panel a way to force a fresh snapshot right after a kill. */
   const loadRef = useRef<(fresh?: boolean) => Promise<void>>(async () => {});
   useEffect(() => {
-    let alive = true;
-    const load = async (fresh = false) => {
-      const at = Date.now() / 1000;
-      try {
-        const res = await fetch("/api/resources" + (fresh ? "?fresh=1" : ""));
-        if (!res.ok) throw new Error(String(res.status));
-        const json = (await res.json()) as ResourcesPayload;
-        if (!alive) return;
+    const loader = createResourcesLoader(
+      fetch,
+      (json, at) => {
         setSnap((prev) => stickySnap(prev, json, at));
-      } catch {
-        if (alive) setSnap((prev) => (prev ? { ...prev, staleSince: prev.staleSince ?? at } : prev));
-      }
+      },
+      (at) => {
+        setSnap((prev) => (prev ? { ...prev, staleSince: prev.staleSince ?? at } : prev));
+      },
+    );
+    const load = async (fresh = false) => {
+      await loader.load(fresh);
     };
     loadRef.current = load;
     void load();
     const timer = setInterval(() => void load(), POLL_MS);
     return () => {
-      alive = false;
       clearInterval(timer);
+      loader.dispose();
+      loadRef.current = async () => {};
     };
   }, []);
 
