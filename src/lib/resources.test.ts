@@ -7,7 +7,7 @@ import { createTranscriptHostObserver, type TranscriptHost } from "@/lib/agent/t
 import { RESOURCE_FAILURE_STDERR_MAX_BYTES } from "@/lib/resourceCollector";
 import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
-import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, lastResourceTargetRefs, noteSessionTargets, parsePersistedResourceObservation, parseResourcesFixture, resetResourcesForTests, resolveResourceWorkerLaunch, resourceWorkerFileSnapshot, RESOURCE_OBSERVATION_MAX_BYTES, RESOURCE_WORKER_OUTPUT_MAX_BYTES } from "./resources";
+import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, lastResourceTargetRefs, noteSessionTargets, parsePersistedResourceObservation, parseResourcesFixture, resetResourcesForTests, resolveResourceWorkerLaunch, resourceDiagnosticHeader, resourceWorkerFileSnapshot, RESOURCE_OBSERVATION_MAX_BYTES, RESOURCE_WORKER_OUTPUT_MAX_BYTES } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 const EMPTY_WORKER_MESSAGE = JSON.stringify({
@@ -161,6 +161,39 @@ async function withResourceWorkerScript<T>(
   const executable = path.join(directory, "fixture-worker");
   const body = typeof lines === "function" ? lines(directory) : lines;
   writeFileSync(executable, ["#!/bin/sh", ...body, ""].join("\n"));
+  chmodSync(executable, 0o700);
+  const previousExecutable = process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE;
+  process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE = executable;
+  try {
+    return await task(directory);
+  } finally {
+    if (previousExecutable === undefined) delete process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE;
+    else process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE = previousExecutable;
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+async function withResourceWorkerChunks<T>(
+  chunks: Buffer[],
+  task: (directory: string) => Promise<T>,
+): Promise<T> {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "llv-resource-worker-chunks-"));
+  const executable = path.join(directory, "fixture-worker");
+  const pidFile = path.join(directory, "pid");
+  const encodedChunks = JSON.stringify(chunks.map((chunk) => chunk.toString("base64")));
+  writeFileSync(executable, [
+    "#!/usr/bin/env node",
+    'const { writeFileSync } = require("node:fs");',
+    `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+    `const chunks = ${encodedChunks}.map((chunk) => Buffer.from(chunk, "base64"));`,
+    "let index = 0;",
+    "const writeNext = () => {",
+    "  if (index === chunks.length) { process.exitCode = 7; return; }",
+    "  process.stderr.write(chunks[index], () => { index += 1; setTimeout(writeNext, 20); });",
+    "};",
+    "writeNext();",
+    "",
+  ].join("\n"));
   chmodSync(executable, 0o700);
   const previousExecutable = process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE;
   process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE = executable;
@@ -953,6 +986,55 @@ describe("resource recurring reads", () => {
       expect(stderr).toContain("PASSWORD=<redacted>");
       expect(stderr).not.toContain("fresh-secret");
     });
+  });
+
+  test("stderr pipe decoding preserves UTF-8 split at every byte boundary", async () => {
+    const chunks = [Buffer.from("discarded-prefix\n".repeat(300))];
+    const expected: string[] = [];
+    for (const character of ["é", "€", "😀"]) {
+      const encoded = Buffer.from(character);
+      for (let split = 1; split < encoded.length; split += 1) {
+        const label = `${encoded.length}-byte-${split}+${encoded.length - split}:`;
+        expected.push(`${label}${character}`);
+        chunks.push(Buffer.concat([Buffer.from(label), encoded.subarray(0, split)]));
+        chunks.push(Buffer.concat([encoded.subarray(split), Buffer.from("\n")]));
+      }
+    }
+    chunks.push(Buffer.from("API_TOKEN=split-secret\ncollector-tail-complete"));
+    const rawOutputBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
+
+    await withResourceWorkerChunks(chunks, async (directory) => {
+      const outcome = await Promise.race([
+        workerTestReader({ initial: null, workerLimits: { outputMaxBytes: rawOutputBytes } }).read(),
+        new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 2_000)),
+      ]);
+
+      expect(outcome === "hung").toBeFalse();
+      if (outcome === "hung") return;
+      expect(outcome).toMatchObject({ diagnostic: {
+        degradedReason: "collector-crash",
+        failure: { cause: "worker-exit" },
+      } });
+      const stderr = outcome.diagnostic.failure?.stderr ?? "";
+      expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+      expect(stderr).not.toContain("\uFFFD");
+      for (const value of expected) expect(stderr).toContain(value);
+      expect(stderr).toContain("API_TOKEN=<redacted>");
+      expect(stderr).not.toContain("split-secret");
+      expect(stderr.endsWith("collector-tail-complete")).toBeTrue();
+      await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "pid"), "utf8")), "split stderr worker");
+    });
+  });
+
+  test("the resources route preserves split UTF-8 diagnostics in a header-safe value", async () => {
+    const diagnostic = {
+      status: "failed",
+      failure: { stderr: "2-byte:é\n3-byte:€\n4-byte:😀\ncollector-tail-complete" },
+    };
+    const header = resourceDiagnosticHeader(diagnostic);
+
+    expect([...header].every((character) => character.charCodeAt(0) <= 0x7e)).toBeTrue();
+    expect(JSON.parse(header)).toEqual(diagnostic);
   });
 
   test("malformed, oversized, crash, timeout, and immediate-exit paths release complete worker trees", async () => {

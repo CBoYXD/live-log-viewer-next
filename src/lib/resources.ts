@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
 import {
   createResourceCollector,
@@ -64,6 +65,14 @@ export type ResourcesRead = {
   payload: ResourcesPayload;
   diagnostic: ServedResourceDiagnostic;
 };
+
+export function resourceDiagnosticHeader(value: unknown): string {
+  const json = JSON.stringify(value);
+  if (json === undefined) throw new TypeError("resource diagnostic cannot be serialized");
+  return json.replace(/[\u007f-\uffff]/g, (character) => (
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  ));
+}
 
 function emptyResourceBuildPhases(): ResourceBuildPhases {
   return {
@@ -687,9 +696,18 @@ async function collectResourcesInWorker(
     let outcome: (() => void) | null = null;
     let outputBytes = 0;
     let stderrTail = "";
+    const stderrDecoder = new StringDecoder("utf8");
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupStarted = false;
     let leaderExited = false;
+    const appendStderr = (value: string) => {
+      stderrTail += value;
+      let start = stderrTail.length - (RESOURCE_FAILURE_STDERR_MAX_BYTES * 2);
+      if (start <= 0) return;
+      const first = stderrTail.charCodeAt(start);
+      if (first >= 0xdc00 && first <= 0xdfff) start += 1;
+      stderrTail = stderrTail.slice(start);
+    };
     const workerFailure = (
       reason: ResourceDegradedReason,
       cause: ResourceFailureCause,
@@ -748,6 +766,7 @@ async function collectResourcesInWorker(
     });
     worker.once("close", (code, signal) => {
       clearTimeout(timeout);
+      appendStderr(stderrDecoder.end());
       if (!outcome) {
         outcome = () => reject(workerFailure(
           "collector-crash",
@@ -819,7 +838,7 @@ async function collectResourcesInWorker(
     });
     worker.stderr.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
-      stderrTail = (stderrTail + chunk.toString("utf8")).slice(-(RESOURCE_FAILURE_STDERR_MAX_BYTES * 2));
+      appendStderr(stderrDecoder.write(chunk));
       if (outputBytes > outputMaxBytes) {
         finish(() => reject(workerFailure(
           "collector-crash",
