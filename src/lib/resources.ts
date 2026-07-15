@@ -708,8 +708,12 @@ async function collectResourcesInWorker(
     const stderrTail = createResourceDiagnosticTail();
     const stderrDecoder = new StringDecoder("utf8");
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
+    let cleanupPoll: ReturnType<typeof setTimeout> | undefined;
     let cleanupStarted = false;
+    let cleanupComplete = false;
     let leaderExited = false;
+    let workerClosed = false;
+    let settled = false;
     const workerFailure = (
       reason: ResourceDegradedReason,
       cause: ResourceFailureCause,
@@ -737,12 +741,35 @@ async function collectResourcesInWorker(
       }
       return true;
     };
+    const settleIfReady = () => {
+      if (settled || !outcome || !workerClosed || !cleanupComplete) return;
+      settled = true;
+      outcome();
+    };
+    const confirmWorkerGroupAbsent = () => {
+      if (!cleanupStarted || cleanupComplete) return;
+      if (!workerGroupExists()) {
+        cleanupComplete = true;
+        if (closeTimer) clearTimeout(closeTimer);
+        if (cleanupPoll) clearTimeout(cleanupPoll);
+        settleIfReady();
+        return;
+      }
+      cleanupPoll = setTimeout(confirmWorkerGroupAbsent, 5);
+    };
     const terminate = () => {
-      if (cleanupStarted || !signalWorkerGroup("SIGTERM")) return;
+      if (cleanupStarted) return;
       cleanupStarted = true;
+      if (!signalWorkerGroup("SIGTERM")) {
+        cleanupComplete = true;
+        settleIfReady();
+        return;
+      }
       closeTimer = setTimeout(() => {
         if (workerGroupExists()) signalWorkerGroup("SIGKILL");
+        confirmWorkerGroupAbsent();
       }, closeTimeoutMs);
+      confirmWorkerGroupAbsent();
     };
     const finish = (next: () => void) => {
       if (outcome) return;
@@ -769,6 +796,7 @@ async function collectResourcesInWorker(
     worker.once("close", (code, signal) => {
       clearTimeout(timeout);
       stderrTail.append(stderrDecoder.end());
+      workerClosed = true;
       if (!outcome) {
         outcome = () => reject(workerFailure(
           "collector-crash",
@@ -777,8 +805,8 @@ async function collectResourcesInWorker(
         ));
         terminate();
       }
-      if (closeTimer && !workerGroupExists()) clearTimeout(closeTimer);
-      outcome();
+      confirmWorkerGroupAbsent();
+      settleIfReady();
     });
     let output = "";
     worker.stdout.setEncoding("utf8");

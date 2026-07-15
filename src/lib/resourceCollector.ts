@@ -77,6 +77,8 @@ type SensitiveTextMatch = {
   length: number;
   replacement: string;
   quote: "\"" | "'" | null;
+  authorization: boolean;
+  bearer: boolean;
 };
 
 function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
@@ -90,6 +92,8 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
       length: keyed[0].length,
       replacement: `${keyed[1]}=<redacted>`,
       quote: keyed[2] === "\"" || keyed[2] === "'" ? keyed[2] : null,
+      authorization: /AUTHORIZATION/i.test(keyed[1]),
+      bearer: false,
     });
   }
   if (bearer) {
@@ -98,6 +102,8 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
       length: bearer[0].length,
       replacement: `${bearer[1]} <redacted>`,
       quote: null,
+      authorization: false,
+      bearer: true,
     });
   }
   if (standalone) {
@@ -106,6 +112,8 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
       length: standalone[0].length,
       replacement: "<redacted>",
       quote: null,
+      authorization: false,
+      bearer: false,
     });
   }
   return matches.sort((left, right) => left.index - right.index)[0] ?? null;
@@ -142,7 +150,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
   let sanitizedTail = "";
   let pending = "";
   let redacting: "unquoted" | "\"" | "'" | null = null;
-  let carriedCredential: "key" | "value" | null = null;
+  let carriedCredential: "key" | "authorization-key" | "value" | "authorization" | "bearer" | null = null;
   const appendSanitized = (value: string) => {
     sanitizedTail += value;
     let start = sanitizedTail.length - (maxBytes * 2);
@@ -152,7 +160,46 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
     sanitizedTail = sanitizedTail.slice(start);
   };
   const sanitizePending = () => {
+    const beginCredentialRedaction = () => {
+      const quote = pending[0];
+      if (quote === "\"" || quote === "'") pending = pending.slice(1);
+      redacting = quote === "\"" || quote === "'" ? quote : "unquoted";
+      carriedCredential = null;
+    };
     while (pending) {
+      if (carriedCredential === "authorization") {
+        const valueStart = pending.search(/\S/);
+        if (valueStart < 0) {
+          pending = "";
+          return;
+        }
+        pending = pending.slice(valueStart);
+        const bearer = /^(Bearer)\s+(?=\S)/i.exec(pending);
+        if (bearer) {
+          pending = pending.slice(bearer[0].length);
+          beginCredentialRedaction();
+          continue;
+        }
+        if ("bearer".startsWith(pending.toLowerCase())) return;
+        if (/^Bearer\s*$/i.test(pending)) {
+          pending = "";
+          carriedCredential = "bearer";
+          return;
+        }
+        redacting = "unquoted";
+        carriedCredential = null;
+        continue;
+      }
+      if (carriedCredential === "bearer") {
+        const valueStart = pending.search(/\S/);
+        if (valueStart < 0) {
+          pending = "";
+          return;
+        }
+        pending = pending.slice(valueStart);
+        beginCredentialRedaction();
+        continue;
+      }
       if (carriedCredential === "value") {
         const valueStart = pending.search(/\S/);
         if (valueStart < 0) {
@@ -165,20 +212,24 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         carriedCredential = null;
         continue;
       }
-      if (carriedCredential === "key") {
+      if (carriedCredential === "key" || carriedCredential === "authorization-key") {
+        const authorizationKey = carriedCredential === "authorization-key";
         const completedKey = /^[A-Z0-9_.-]*\s*[:=]\s*(?:(["'])|(?=[^"'\s]))/i.exec(pending);
         if (completedKey) {
           appendSanitized("<redacted>");
           pending = pending.slice(completedKey[0].length);
-          redacting = completedKey[1] === "\"" || completedKey[1] === "'" ? completedKey[1] : "unquoted";
-          carriedCredential = null;
+          if (authorizationKey && completedKey[1] === undefined) carriedCredential = "authorization";
+          else {
+            redacting = completedKey[1] === "\"" || completedKey[1] === "'" ? completedKey[1] : "unquoted";
+            carriedCredential = null;
+          }
           continue;
         }
         const delimiter = /^[A-Z0-9_.-]*\s*[:=]\s*$/i.exec(pending);
         if (delimiter) {
           appendSanitized("<redacted>");
           pending = "";
-          carriedCredential = "value";
+          carriedCredential = authorizationKey ? "authorization" : "value";
           return;
         }
         if (/^[A-Z0-9_.-]*\s*$/i.test(pending)) {
@@ -201,6 +252,14 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
       if (match) {
         appendSanitized(pending.slice(0, match.index) + match.replacement);
         pending = pending.slice(match.index + match.length);
+        if (match.authorization && match.quote === null) {
+          carriedCredential = "authorization";
+          continue;
+        }
+        if (match.bearer) {
+          carriedCredential = "bearer";
+          continue;
+        }
         redacting = match.quote ?? "unquoted";
         continue;
       }
@@ -212,7 +271,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         if (bearerStart < pending.length - DIAGNOSTIC_REDACTION_CONTEXT_CHARS) {
           appendSanitized(pending.slice(0, bearerStart) + `${carriedBearer[1]} <redacted>`);
           pending = "";
-          carriedCredential = "value";
+          carriedCredential = "bearer";
           return;
         }
       }
@@ -225,10 +284,10 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
           if (carriedKey[3]) {
             appendSanitized("<redacted>");
             pending = "";
-            carriedCredential = "value";
+            carriedCredential = /AUTHORIZATION/i.test(carriedKey[1]) ? "authorization" : "value";
           } else {
             pending = (carriedKey[1] + carriedKey[2]).slice(-DIAGNOSTIC_REDACTION_CONTEXT_CHARS);
-            carriedCredential = "key";
+            carriedCredential = /AUTHORIZATION/i.test(carriedKey[1]) ? "authorization-key" : "key";
           }
           return;
         }

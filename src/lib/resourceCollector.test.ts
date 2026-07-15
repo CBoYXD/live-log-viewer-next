@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { createResourceCollector, ResourceCollectorFailureError, RESOURCE_FAILURE_STDERR_MAX_BYTES } from "./resourceCollector";
+import { createResourceCollector, createResourceDiagnosticTail, ResourceCollectorFailureError, RESOURCE_FAILURE_STDERR_MAX_BYTES } from "./resourceCollector";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -98,6 +98,133 @@ describe("resource collector", () => {
     expect(Buffer.byteLength(stderr)).toBe(RESOURCE_FAILURE_STDERR_MAX_BYTES);
     expect(stderr).toContain("API_TOKEN=<redacted>");
     expect(stderr).not.toContain("stderr-secret");
+  });
+
+  test("streaming diagnostics fully redact a bare Bearer credential", () => {
+    const tail = createResourceDiagnosticTail();
+    tail.append("Bearer bare-secret-sentinel\nsafe suffix");
+
+    expect(tail.value()).toContain("Bearer <redacted>");
+    expect(tail.value()).toContain("safe suffix");
+    expect(tail.value()).not.toContain("bare-secret-sentinel");
+  });
+
+  test("streaming diagnostics retain keyed Authorization Bearer state across chunks", () => {
+    const tail = createResourceDiagnosticTail();
+    tail.append("Authorization: Bear");
+    tail.append("er keyed-secret-sentinel\nsafe suffix");
+
+    expect(tail.value()).toContain("Authorization=<redacted>");
+    expect(tail.value()).toContain("safe suffix");
+    expect(tail.value()).not.toContain("keyed-secret-sentinel");
+  });
+
+  test("streaming diagnostics fully redact a single-quoted Bearer credential", () => {
+    const tail = createResourceDiagnosticTail();
+    const fragments = ["SINGLELEAK", "QUOTEDLEAK", "SECRETLEAK"];
+    tail.append(`Authorization: Bearer '${fragments.join(" ")}'\nsafe suffix`);
+
+    expect(tail.value()).toContain("Authorization=<redacted>");
+    expect(tail.value()).toContain("safe suffix");
+    for (const fragment of fragments) expect(tail.value()).not.toContain(fragment);
+  });
+
+  test("streaming diagnostics fully redact a double-quoted Bearer credential", () => {
+    const tail = createResourceDiagnosticTail();
+    const fragments = ["DOUBLELEAK", "QUOTEDLEAK", "SECRETLEAK"];
+    tail.append(`Authorization: Bearer "${fragments.join(" ")}"\nsafe suffix`);
+
+    expect(tail.value()).toContain("Authorization=<redacted>");
+    expect(tail.value()).toContain("safe suffix");
+    for (const fragment of fragments) expect(tail.value()).not.toContain(fragment);
+  });
+
+  test("streaming diagnostics bound long Bearer credentials while retaining a safe suffix", async () => {
+    const tail = createResourceDiagnosticTail();
+    const credential = "LONGLEAK!".repeat(1_000);
+    tail.append("discarded-safe-prefix\n".repeat(300));
+    tail.append("Authorization: Bearer ");
+    for (let offset = 0; offset < credential.length; offset += 137) {
+      tail.append(credential.slice(offset, offset + 137));
+    }
+    tail.append("\nsafe diagnostic suffix 😀");
+    const streamed = tail.value();
+    const collector = createResourceCollector({
+      collectorId: "long-bearer",
+      collect: async () => {
+        throw new ResourceCollectorFailureError(
+          "collector-crash",
+          "collector-error",
+          "resource collection failed",
+          { stderr: streamed },
+        );
+      },
+    });
+    const result = await collector.observe(0, 1_000);
+    const diagnostic = result.failure?.diagnostic.stderr ?? "";
+
+    expect(Buffer.byteLength(streamed)).toBeLessThanOrEqual((RESOURCE_FAILURE_STDERR_MAX_BYTES * 2) + (256 * 4));
+    expect(diagnostic).toContain("Authorization=<redacted>");
+    expect(diagnostic).toContain("safe diagnostic suffix 😀");
+    expect(diagnostic).not.toContain("LONGLEAK");
+    expect(diagnostic).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+  });
+
+  test("streaming diagnostics retain Authorization Bearer state through prefix eviction", () => {
+    const tail = createResourceDiagnosticTail();
+    tail.append(`Authorization:${" ".repeat(600)}`);
+    tail.append(`Bearer${" ".repeat(600)}`);
+    tail.append("EVICTIONLEAK!\nsafe suffix");
+    const diagnostic = tail.value();
+
+    expect(diagnostic).toContain("<redacted>");
+    expect(diagnostic).toContain("safe suffix");
+    expect(diagnostic).not.toContain("EVICTIONLEAK");
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual((RESOURCE_FAILURE_STDERR_MAX_BYTES * 2) + (256 * 4));
+  });
+
+  test("streaming diagnostics retain an evicted Authorization key before its delimiter", () => {
+    const tail = createResourceDiagnosticTail();
+    tail.append(`Authorization${" ".repeat(600)}`);
+    tail.append(`:${" ".repeat(600)}`);
+    tail.append("Bearer DELIMITERLEAK!\nsafe suffix");
+    const diagnostic = tail.value();
+
+    expect(diagnostic).toContain("<redacted>");
+    expect(diagnostic).toContain("safe suffix");
+    expect(diagnostic).not.toContain("DELIMITERLEAK");
+    expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual((RESOURCE_FAILURE_STDERR_MAX_BYTES * 2) + (256 * 4));
+  });
+
+  test("streaming Bearer redaction covers every split position and quote form", () => {
+    const safeSuffix = "safe suffix é € 😀";
+    const cases = [
+      { name: "bare", input: `prefix é€😀\nBearer BARELEAK-FRAGMENT\n${safeSuffix}`, fragments: ["BARELEAK", "FRAGMENT"] },
+      { name: "keyed", input: `prefix é€😀\nAuthorization: Bearer KEYEDLEAK-FRAGMENT\n${safeSuffix}`, fragments: ["KEYEDLEAK", "FRAGMENT"] },
+      { name: "single-quoted credential", input: `prefix é€😀\nAuthorization: Bearer 'SINGLELEAK FRAGMENT'\n${safeSuffix}`, fragments: ["SINGLELEAK", "FRAGMENT"] },
+      { name: "double-quoted credential", input: `prefix é€😀\nAuthorization: Bearer "DOUBLELEAK FRAGMENT"\n${safeSuffix}`, fragments: ["DOUBLELEAK", "FRAGMENT"] },
+      { name: "single-quoted value", input: `prefix é€😀\nAuthorization: 'Bearer OUTERSINGLELEAK FRAGMENT'\n${safeSuffix}`, fragments: ["OUTERSINGLELEAK", "FRAGMENT"] },
+      { name: "double-quoted value", input: `prefix é€😀\nAuthorization: "Bearer OUTERDOUBLELEAK FRAGMENT"\n${safeSuffix}`, fragments: ["OUTERDOUBLELEAK", "FRAGMENT"] },
+    ];
+
+    for (const fixture of cases) {
+      for (let split = 0; split <= fixture.input.length; split += 1) {
+        const tail = createResourceDiagnosticTail();
+        tail.append(fixture.input.slice(0, split));
+        tail.append(fixture.input.slice(split));
+        const diagnostic = tail.value();
+        const label = `${fixture.name} split ${split}`;
+
+        expect(diagnostic.includes("<redacted>"), label).toBeTrue();
+        expect(diagnostic.includes(safeSuffix), label).toBeTrue();
+        expect(diagnostic.includes("\uFFFD"), label).toBeFalse();
+        expect(Buffer.byteLength(diagnostic), label).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+        for (const fragment of fixture.fragments) {
+          expect(diagnostic.includes(fragment), `${label} fragment ${fragment}`).toBeFalse();
+        }
+      }
+    }
   });
 
   test("stderr tail truncation preserves every UTF-8 boundary", async () => {

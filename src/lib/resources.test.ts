@@ -115,6 +115,15 @@ function processExists(pid: number): boolean {
   }
 }
 
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function directorySnapshot(root: string): Array<readonly [string, "directory" | "file", number, string?]> {
   const snapshot: Array<readonly [string, "directory" | "file", number, string?]> = [];
   const visit = (directory: string, relative: string) => {
@@ -889,15 +898,87 @@ describe("resource recurring reads", () => {
       const startedAt = performance.now();
       const outcome = await workerTestReader({ workerLimits: { timeoutMs: 500, closeTimeoutMs: 25 } }).read(true);
       const elapsedMs = performance.now() - startedAt;
+      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+      const descendantPid = Number(readFileSync(path.join(directory, "descendant-pid"), "utf8"));
 
       expect(outcome).toMatchObject({ diagnostic: {
         degradedReason: "collector-crash",
         failure: { cause: "worker-exit" },
       } });
       expect(elapsedMs).toBeLessThan(250);
-      await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "pid"), "utf8")), "exited leader");
-      await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "descendant-pid"), "utf8")), "pipe-holding descendant");
+      expect(processGroupExists(workerPid)).toBeFalse();
+      expect(processExists(descendantPid)).toBeFalse();
+      await expectProcessAbsentAfterQuietInterval(workerPid, "exited leader");
+      await expectProcessAbsentAfterQuietInterval(descendantPid, "pipe-holding descendant");
     });
+  });
+
+  test("a successful read settles after a TERM-resistant redirected process group is absent", async () => {
+    await withResourceWorkerScript((directory) => {
+      const descendantPid = path.join(directory, "redirected-descendant-pid");
+      const ready = path.join(directory, "redirected-descendant-ready");
+      return [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        "trap 'exit 0' TERM INT",
+        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" </dev/null >/dev/null 2>&1 &`,
+        `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
+        `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        "while :; do sleep 0.01; done",
+      ];
+    }, async (directory) => {
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { timeoutMs: 500, closeTimeoutMs: 150 },
+      }).read(true);
+      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+      const descendantPid = Number(readFileSync(path.join(directory, "redirected-descendant-pid"), "utf8"));
+      const groupPresentAtSettlement = processGroupExists(workerPid);
+
+      if (groupPresentAtSettlement) process.kill(-workerPid, "SIGKILL");
+      expect(outcome.diagnostic.degradedReason).toBeUndefined();
+      expect(groupPresentAtSettlement).toBeFalse();
+      await expectProcessAbsentAfterQuietInterval(descendantPid, "redirected descendant");
+    });
+  });
+
+  test("success, failure, and timeout settle after redirected and inherited process groups are absent", async () => {
+    const fixtures = [
+      { name: "success", output: `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`, expected: { fresh: true, status: "complete" } },
+      { name: "failure", output: "printf '{invalid}\\n'", expected: { degradedReason: "collector-crash", failure: { cause: "worker-output-invalid" } } },
+      { name: "timeout", output: "", expected: { degradedReason: "timeout", failure: { cause: "worker-timeout" } } },
+    ] as const;
+
+    for (const pipes of ["redirected", "inherited"] as const) {
+      for (const fixture of fixtures) {
+        await withResourceWorkerScript((directory) => {
+          const descendantPid = path.join(directory, "matrix-descendant-pid");
+          const ready = path.join(directory, "matrix-descendant-ready");
+          const redirect = pipes === "redirected" ? " </dev/null >/dev/null 2>&1" : "";
+          return [
+            `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+            "trap 'exit 0' TERM INT",
+            `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}"${redirect} &`,
+            `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
+            fixture.output,
+            "while :; do sleep 0.01; done",
+          ];
+        }, async (directory) => {
+          const outcome = await workerTestReader({
+            initial: null,
+            workerLimits: { timeoutMs: 50, closeTimeoutMs: 50 },
+          }).read(true);
+          const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+          const descendantPid = Number(readFileSync(path.join(directory, "matrix-descendant-pid"), "utf8"));
+          const label = `${pipes} ${fixture.name}`;
+          const groupPresentAtSettlement = processGroupExists(workerPid);
+
+          if (groupPresentAtSettlement) process.kill(-workerPid, "SIGKILL");
+          expect(outcome.diagnostic, label).toMatchObject(fixture.expected);
+          expect(groupPresentAtSettlement, label).toBeFalse();
+          expect(processExists(descendantPid), label).toBeFalse();
+        });
+      }
+    }
   });
 
   test("a near-limit handoff to an immediately exiting worker keeps the parent alive and releases the worker", async () => {
@@ -1019,6 +1100,20 @@ describe("resource recurring reads", () => {
     });
   });
 
+  test("a keyed Authorization Bearer credential is fully redacted from worker stderr", async () => {
+    await withResourceWorkerScript([
+      "printf 'Authorization: Bearer tracer-secret-sentinel\\nsafe diagnostic suffix\\n' >&2",
+      "exit 7",
+    ], async () => {
+      const outcome = await workerTestReader({ initial: null }).read();
+      const stderr = outcome.diagnostic.failure?.stderr ?? "";
+
+      expect(stderr).toContain("Authorization=<redacted>");
+      expect(stderr).toContain("safe diagnostic suffix");
+      expect(stderr).not.toContain("tracer-secret-sentinel");
+    });
+  });
+
   test("a fresh worker crash attributes its durable cache and bounds redacted stderr", async () => {
     await withResourceWorkerScript([
       "yes 'safe stderr line' | head -c 4096 >&2",
@@ -1053,7 +1148,7 @@ describe("resource recurring reads", () => {
         chunks.push(Buffer.concat([encoded.subarray(split), Buffer.from("\n")]));
       }
     }
-    chunks.push(Buffer.from("API_TOKEN=split-secret\ncollector-tail-complete"));
+    chunks.push(Buffer.from("Authorization: Bearer split-secret\ncollector-tail-complete"));
     const rawOutputBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
 
     await withResourceWorkerChunks(chunks, async (directory) => {
@@ -1072,7 +1167,7 @@ describe("resource recurring reads", () => {
       expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
       expect(stderr).not.toContain("\uFFFD");
       for (const value of expected) expect(stderr).toContain(value);
-      expect(stderr).toContain("API_TOKEN=<redacted>");
+      expect(stderr).toContain("Authorization=<redacted>");
       expect(stderr).not.toContain("split-secret");
       expect(stderr.endsWith("collector-tail-complete")).toBeTrue();
       await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "pid"), "utf8")), "split stderr worker");
