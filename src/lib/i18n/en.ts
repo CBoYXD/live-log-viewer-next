@@ -1299,6 +1299,7 @@ export const en = {
   "task.finishedBadge": "finished",
   "task.stopFailed": "couldn't stop",
   "task.signalSent": "sent {signal} to PID {pid}",
+  "task.killRequested": "kill requested",
   "task.confirmKill": "Really kill PID {pid}?",
   "task.killPid": "Kill {pid}",
   "task.confirmKillYes": "Yes, kill",

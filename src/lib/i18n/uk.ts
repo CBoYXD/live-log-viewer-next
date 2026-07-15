@@ -1261,6 +1261,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "task.finishedBadge": "завершено",
   "task.stopFailed": "помилка зупинки",
   "task.signalSent": "надіслано {signal} PID {pid}",
+  "task.killRequested": "запит на зупинку надіслано",
   "task.confirmKill": "Точно вбити PID {pid}?",
   "task.killPid": "Вбити {pid}",
   "task.confirmKillYes": "Так, вбити",

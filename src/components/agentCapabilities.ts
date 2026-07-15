@@ -91,13 +91,21 @@ type HostResolution =
 
 function resolveHost(rv: RuntimeSessionView | null, opts: HostOptions): HostResolution {
   // Dead wins over structured: a structured host that went dead/unhosted still
-  // routes to the banner, never the structured strip.
+  // routes to the banner, never the structured strip. Both classifiers consult
+  // the structured-hosts rollback gate (below), so a flag-off session is never
+  // read as structured or dead here.
   if (isDeadHost(rv)) return { kind: "dead" };
   if (isStructuredHost(rv)) return { kind: "structured" };
   // Affirmative legacy-host evidence (a tmux-legacy projection) or the runtime
   // plane being off both make `file.proc` the authority. A bare `null` while the
   // plane is on is *unresolved*, never assumed-legacy.
   if (rv && rv.legacy) return { kind: "legacy" };
+  // Structured-hosts rollback gate (LLV_STRUCTURED_HOSTS off): a session that
+  // still carries structured registry state must resolve through *legacy*
+  // capabilities — file.proc is authoritative and no /api/runtime/* request may
+  // fire. `isDeadHost`/`isStructuredHost` already returned false above under the
+  // gate, so a non-legacy rv reaching here with the gate off is legacy evidence.
+  if (rv && !rv.structuredControlsEnabled) return { kind: "legacy" };
   if (!opts.runtimeEnabled) return { kind: "legacy" };
   return { kind: "unresolved" };
 }
@@ -124,16 +132,22 @@ const HIDDEN: Capability = { state: "hidden" };
 const disabled = (reason: MessageKey): Capability => ({ state: "disabled", reason });
 const enabledWithNote = (note: MessageKey): Capability => ({ state: "enabled", note });
 
-/** A structured (pane-less) host that is currently alive. */
+/** A structured (pane-less) host that is currently alive. Gated by the
+    structured-hosts rollback flag: with `structuredControlsEnabled` off no
+    session — however its registry state reads — counts as a structured host, so
+    every consumer falls back to the legacy path (issue #241 rollback). */
 function isStructuredHost(rv: RuntimeSessionView | null): boolean {
-  if (!rv || rv.legacy) return false;
+  if (!rv || rv.legacy || !rv.structuredControlsEnabled) return false;
   const kind = rv.session.hostKind;
   return kind === "codex-app-server" || kind === "claude-broker";
 }
 
-/** The host died or fell unhosted after a crash — recovery moves to the banner. */
+/** The host died or fell unhosted after a crash — recovery moves to the banner.
+    Also gated by the rollback flag: with structured controls off the dead-host
+    banner (a structured-plane concept) never claims a session — it resolves
+    through legacy capabilities like every other flag-off host. */
 function isDeadHost(rv: RuntimeSessionView | null): boolean {
-  if (!rv || rv.legacy) return false;
+  if (!rv || rv.legacy || !rv.structuredControlsEnabled) return false;
   return rv.session.host === "dead" || rv.session.host === "unhosted";
 }
 
@@ -190,10 +204,11 @@ export function surfaceFor(file: FileEntry, rv: RuntimeSessionView | null, opts:
 }
 
 /**
- * Resolve every control's capability for a conversation. The three ⚠ cells that
- * wait on backend work (#240 structured kill/compact/reconfigure, #239
- * structured images) are `disabled` with a tooltip today and flip to `enabled`
- * by editing exactly one row here when those merge.
+ * Resolve every control's capability for a conversation. The remaining ⚠ cells
+ * that wait on backend work (#240 structured compact/reconfigure, #239 structured
+ * images) are `disabled` with a tooltip today and flip to `enabled` by editing
+ * exactly one row here when those merge. Structured Kill already shipped (#242)
+ * and routes through the durable structured control channel.
  */
 export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, opts: HostOptions = {}): StripCapabilities {
   const surface = surfaceFor(file, rv, opts);
@@ -232,13 +247,14 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
         surface,
         controls: {
           // A structured root can't honor a tmux ESC or an /api/proc kill: Stop
-          // relays to the ROOT conversation's structured interrupt (the caller
-          // routes it), while Kill and images inherit the same structured
-          // restrictions as the root itself (#240/#239). The note names the root.
+          // relays to the ROOT conversation's structured interrupt and Kill
+          // enters the ROOT's durable structured control channel (both routed by
+          // the caller with the canonical root identity, #242). Images still
+          // inherit the structured #239 restriction. The note names the root.
           stop: enabledWithNote("strip.stopSubagent"),
           compact: disabled("strip.compactSubagent"),
           runtime: HIDDEN,
-          kill: disabled("strip.awaits240"),
+          kill: ENABLED,
           terminal: ENABLED,
           images: disabled("strip.imagesStructured"),
           send: ENABLED,
@@ -252,7 +268,10 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
           compact: disabled("strip.awaits240"),
           // Pickers stay visible; the strip disables Apply with the same reason.
           runtime: disabled("strip.awaits240"),
-          kill: disabled("strip.awaits240"),
+          // Kill shipped with #242: it enters the durable structured control
+          // channel (one structured request, never /api/proc). Compact and
+          // reconfigure still await #240.
+          kill: ENABLED,
           terminal: ENABLED,
           images: disabled("strip.imagesStructured"),
           send: ENABLED,

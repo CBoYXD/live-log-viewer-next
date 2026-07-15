@@ -39,7 +39,7 @@ Object.assign(globalThis, {
 });
 
 function rv(hostKind: HostKind, host: HostAxis, artifactPath?: string): RuntimeSessionView {
-  return { session: { hostKind, host, artifactPath } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: hostKind === "tmux-legacy", structuredControlsEnabled: true };
+  return { session: { hostKind, host, artifactPath, conversationId: "conversation_root" } as RuntimeSessionView["session"], uiState: {} as RuntimeSessionView["uiState"], attentions: [], receipts: [], legacy: hostKind === "tmux-legacy", structuredControlsEnabled: true };
 }
 
 function file(over: Partial<FileEntry> = {}): FileEntry {
@@ -125,19 +125,28 @@ test("a scanner-shaped subagent under a live TMUX root shows an enabled Kill tha
   await act(async () => root.unmount());
 });
 
-test("a scanner-shaped subagent under a live STRUCTURED root shows a DISABLED Kill and never posts (#240)", async () => {
+test("a scanner-shaped subagent under a live STRUCTURED root shows an ENABLED Kill routed to the ROOT's structured channel (#242) — zero /api/proc", async () => {
   planeEnabled = true;
   rootByArtifact = (path) => (path === "/root.jsonl" ? rv("claude-broker", "hosted", "/root.jsonl") : null);
-  const calls: string[] = [];
-  globalThis.fetch = ((url: string) => { calls.push(String(url)); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as unknown as Response); }) as typeof fetch;
+  const calls: { url: string; body: unknown }[] = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, structured: true, target: "conversation_root" }) } as unknown as Response);
+  }) as typeof fetch;
 
   const child = file({ path: "/child.jsonl", kind: "subagent", parent: "/root.jsonl", proc: null, pid: null });
   const { host, root } = await mount(child);
   const kill = killBtns(host)[0]!;
-  expect(kill.disabled).toBe(true);
-  expect(kill.getAttribute("aria-label")).toContain(translate("en", "strip.awaits240"));
+  expect(kill.disabled).toBe(false);
   await clickButton(kill);
-  expect(calls.some((u) => u.includes("/api/proc"))).toBe(false);
+  const confirm = Array.from(host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(translate("en", "task.confirmKillYes")))!;
+  await clickButton(confirm as HTMLButtonElement);
+  // exactly one structured request via /api/tmux, carrying the ROOT identity;
+  // never /api/proc for a structured host.
+  const tmuxCalls = calls.filter((c) => c.url.includes("/api/tmux"));
+  expect(tmuxCalls.length).toBe(1);
+  expect(tmuxCalls[0]!.body).toMatchObject({ action: "kill", conversationId: "conversation_root" });
+  expect(calls.some((c) => c.url.includes("/api/proc"))).toBe(false);
   await act(async () => root.unmount());
 });
 
@@ -150,18 +159,43 @@ test("a scanner-shaped subagent whose root is dead omits the Kill entirely", asy
   await act(async () => root.unmount());
 });
 
-test("a structured host shows a DISABLED Kill with the #240 reason and never posts", async () => {
+test("a structured host shows an ENABLED Kill routed to its structured channel (#242) — one request, zero /api/proc", async () => {
   currentRv = rv("codex-app-server", "hosted");
-  const calls: string[] = [];
-  globalThis.fetch = ((url: string) => { calls.push(String(url)); return Promise.resolve({ ok: true, json: () => Promise.resolve({}) } as unknown as Response); }) as typeof fetch;
+  const calls: { url: string; body: unknown }[] = [];
+  globalThis.fetch = ((url: string, init?: RequestInit) => {
+    calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, structured: true, target: "conversation_root" }) } as unknown as Response);
+  }) as typeof fetch;
 
   const { host, root } = await mount(file());
   const kill = killBtns(host)[0]!;
-  expect(kill.disabled).toBe(true);
-  expect(kill.getAttribute("aria-label")).toContain(translate("en", "strip.awaits240"));
-  // clicking a disabled control does nothing — no /api/proc, no capability bypass
+  expect(kill.disabled).toBe(false);
   await clickButton(kill);
-  expect(calls.length).toBe(0);
+  const confirm = Array.from(host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(translate("en", "task.confirmKillYes")))!;
+  await clickButton(confirm as HTMLButtonElement);
+  const tmuxCalls = calls.filter((c) => c.url.includes("/api/tmux"));
+  expect(tmuxCalls.length).toBe(1);
+  expect(tmuxCalls[0]!.body).toMatchObject({ action: "kill", conversationId: "conversation_root" });
+  expect(calls.some((c) => c.url.includes("/api/proc"))).toBe(false);
+  await act(async () => root.unmount());
+});
+
+test("with the structured-hosts gate OFF a structured host falls back to the legacy /api/proc Kill", async () => {
+  // Rollback (finding 1): the registry still reads structured, but the gate is
+  // off, so the header resolves through legacy capabilities and Kill hits /api/proc.
+  planeEnabled = true;
+  currentRv = { ...rv("codex-app-server", "hosted"), structuredControlsEnabled: false };
+  const calls: string[] = [];
+  globalThis.fetch = ((url: string) => { calls.push(String(url)); return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, pid: 77 }) } as unknown as Response); }) as typeof fetch;
+
+  const { host, root } = await mount(file());
+  const kill = killBtns(host)[0]!;
+  expect(kill.disabled).toBe(false);
+  await clickButton(kill);
+  const confirm = Array.from(host.querySelectorAll("button")).find((b) => (b.textContent ?? "").includes(translate("en", "task.confirmKillYes")))!;
+  await clickButton(confirm as HTMLButtonElement);
+  expect(calls.filter((u) => u.includes("/api/proc")).length).toBe(1);
+  expect(calls.some((u) => u.includes("/api/runtime"))).toBe(false);
   await act(async () => root.unmount());
 });
 

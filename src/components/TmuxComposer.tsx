@@ -300,7 +300,10 @@ export function TmuxComposer({
   // The structured session Stop/Send route through — the conversation's own
   // structured host, or the ROOT's for a structured-root subagent (finding 1),
   // so a claude-broker root's child sends via /api/runtime/send, never /api/tmux.
-  const { structuredSession } = useAgentCapabilities(file);
+  // `caps` also carries the Send capability: a *hidden* Send (a gated
+  // scanner-shaped subagent, a shell task) means this surface exposes no message
+  // path at all, so the whole composer stands down below (finding 2).
+  const { caps, structuredSession } = useAgentCapabilities(file);
   /* While a card is switching accounts its next send is held for the successor
      (Sol delivery fence): the composer shows the held affordance instead of
      pretending the text reached the live predecessor pane. */
@@ -388,6 +391,13 @@ export function TmuxComposer({
     return () => clearInterval(timer);
   }, [file.mtime, cardId]);
 
+  // A surface whose Send capability is hidden exposes NO message surface — no
+  // Send, quick-ack, mic, or image path, and fires zero requests. This gates the
+  // gated scanner-shaped subagent (inert row) that `canMessageWithoutPane` would
+  // otherwise treat as resumable and let POST /api/tmux (finding 2). Dead and
+  // unresolved hosts keep a *disabled* Send (not hidden), so their composer stays
+  // visible-but-blocked via `deadHost`/`sendBlockedReason`.
+  if (caps.controls.send.state === "hidden") return null;
   const resumable = canMessageWithoutPane(file);
   if (target === null && !resumable) return null;
   const spawnMode = target === null && !structuredSession;

@@ -54,6 +54,19 @@ test("a finished conversation surfaces as resume with an on-resume runtime slot"
   expect(strip(html)).toBe(true);
 });
 
+test("a gated scanner-shaped subagent (inert) mounts no composer — no Send/quick-ack/mic/image path", () => {
+  // proc:null/pid:null child with no live runtime root resolves to `inert`
+  // (Send hidden). The composer must not render at all, so nothing can POST to
+  // /api/tmux against a subagent whose host is unconfirmed (issue #241 finding 2).
+  const html = renderToStaticMarkup(
+    <BranchPane file={file({ kind: "subagent", parent: "/root.jsonl", proc: null, pid: null })} tasks={[]} isRoot={false} />,
+  );
+  // Every strip-own control is hidden on an inert subagent, so the strip itself
+  // stands down and the composer never mounts.
+  expect(strip(html)).toBe(false);
+  expect(hasComposer(html)).toBe(false);
+});
+
 test("the full-window overlay (expanded) mounts the strip the same way", () => {
   const html = renderToStaticMarkup(<BranchPane file={file()} tasks={[]} isRoot expanded />);
   expect(strip(html)).toBe(true);

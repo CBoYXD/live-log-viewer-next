@@ -4,7 +4,7 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import type { HostAxis, HostKind } from "@/components/runtime/runtimeModel";
 
-import { attachModeFor, capabilitiesFor, stripHasVisibleControls, surfaceFor, type ControlName, type StripSurface } from "./agentCapabilities";
+import { attachModeFor, capabilitiesFor, rootHostFrom, stripHasVisibleControls, surfaceFor, type ControlName, type StripSurface } from "./agentCapabilities";
 
 /**
  * Every cell of the design §4 capability matrix, asserted against the pure
@@ -33,6 +33,11 @@ function rv(hostKind: HostKind, host: HostAxis, legacy = false): RuntimeSessionV
     legacy,
     structuredControlsEnabled: true,
   };
+}
+
+/** Same view with the structured-hosts rollback flag OFF. */
+function rvGateOff(hostKind: HostKind, host: HostAxis): RuntimeSessionView {
+  return { ...rv(hostKind, host), structuredControlsEnabled: false };
 }
 
 const state = (name: ControlName, f: FileEntry, view: RuntimeSessionView | null) => capabilitiesFor(f, view).controls[name].state;
@@ -99,6 +104,40 @@ test("a finished (proc-null) conversation stays resume under the plane — not u
   expect(surfaceFor(finished, null, { runtimeEnabled: true })).toBe<StripSurface>("resume");
 });
 
+/* ------------------- finding 1: structured-hosts rollback gate ------------------- */
+
+test("with the gate OFF a structured host resolves through legacy — never the structured row", () => {
+  // The registry still carries structured state, but LLV_STRUCTURED_HOSTS is off:
+  // classification must fall back to file.proc, so a running pane reads as
+  // live-root and no structured control (or /api/runtime request) is offered.
+  const f = file({ proc: "running" });
+  expect(surfaceFor(f, rvGateOff("codex-app-server", "hosted"), { runtimeEnabled: true })).toBe<StripSurface>("live-root");
+  const caps = capabilitiesFor(f, rvGateOff("codex-app-server", "hosted"), { runtimeEnabled: true });
+  for (const c of ["stop", "compact", "runtime", "kill", "terminal", "images", "send"] as ControlName[]) {
+    expect(caps.controls[c].state).toBe("enabled"); // the full legacy live-root row
+  }
+});
+
+test("with the gate OFF a dead structured host resolves through legacy, not the dead banner", () => {
+  const f = file({ proc: "running" });
+  expect(surfaceFor(f, rvGateOff("claude-broker", "dead"), { runtimeEnabled: true })).toBe<StripSurface>("live-root");
+  // and a finished one is resume, never dead
+  expect(surfaceFor(file({ proc: null }), rvGateOff("claude-broker", "dead"), { runtimeEnabled: true })).toBe<StripSurface>("resume");
+});
+
+test("rootHostFrom honors the gate: a flag-off structured root reports structured=false (legacy routing)", () => {
+  expect(rootHostFrom(rv("claude-broker", "hosted"))).toEqual({ liveness: "live", structured: true });
+  expect(rootHostFrom(rvGateOff("claude-broker", "hosted"))).toEqual({ liveness: "live", structured: false });
+});
+
+test("with the gate OFF a scanner-shaped subagent under a structured root takes the legacy live-subagent row", () => {
+  // The hook derives the root host with the gate honored, so a flag-off structured
+  // root reads as a legacy root: its child gets tmux routing (Kill → /api/proc),
+  // never the structured-subagent row.
+  const c = file({ proc: null, pid: null, kind: "subagent", parent: "/root.jsonl" });
+  expect(surfaceFor(c, null, { runtimeEnabled: true, root: { liveness: "live", structured: false } })).toBe<StripSurface>("live-subagent");
+});
+
 /* ------------------- finding 2: scanner-shaped subagents ------------------- */
 
 const child = () => file({ proc: null, pid: null, kind: "subagent", parent: "/root.jsonl" });
@@ -120,9 +159,9 @@ test("a scanner-shaped subagent under a live STRUCTURED root gets structured-sub
   // Stop enabled with the root-agent note (relays to the root's structured interrupt)
   expect(caps.controls.stop.state).toBe("enabled");
   expect(caps.controls.stop.state === "enabled" && caps.controls.stop.note).toBe("strip.stopSubagent");
-  // Kill and images inherit the structured host's #240/#239 restrictions — no /api/proc, no image POST
-  expect(caps.controls.kill.state).toBe("disabled");
-  expect(caps.controls.kill.state === "disabled" && caps.controls.kill.reason).toBe("strip.awaits240");
+  // Kill is enabled (#242): routed through the ROOT's durable structured control
+  // channel, never /api/proc. Images still inherit the structured #239 restriction.
+  expect(caps.controls.kill.state).toBe("enabled");
   expect(caps.controls.images.state).toBe("disabled");
   expect(caps.controls.terminal.state).toBe("enabled");
 });
@@ -155,14 +194,15 @@ test("live-subagent: stop enabled (root-interrupt note), compact disabled, runti
   expect(state("images", f, null)).toBe("enabled");
 });
 
-test("structured: stop+terminal enabled, compact/runtime/kill await #240, images await #239", () => {
+test("structured: stop+terminal+kill enabled, compact/runtime await #240, images await #239", () => {
   const f = file({ proc: "running" });
   const view = rv("codex-app-server", "hosted");
   expect(state("stop", f, view)).toBe("enabled");
   expect(state("terminal", f, view)).toBe("enabled");
+  // Kill shipped with #242 — enabled and routed through the structured channel.
+  expect(state("kill", f, view)).toBe("enabled");
   expect(reason("compact", f, view)).toBe("strip.awaits240");
   expect(reason("runtime", f, view)).toBe("strip.awaits240");
-  expect(reason("kill", f, view)).toBe("strip.awaits240");
   expect(reason("images", f, view)).toBe("strip.imagesStructured");
   expect(state("send", f, view)).toBe("enabled");
 });

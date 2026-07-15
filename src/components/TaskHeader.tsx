@@ -48,12 +48,14 @@ export function ProcessStatusControls({
 
   /* Kill obeys the one capability matrix (issue #241 §4) — never a control that
      posts to `/api/proc` on a surface where the header PID isn't the thing to
-     kill. A structured host shows a *disabled* Kill with the #240 tooltip; a
+     kill. A structured host now shows an *enabled* Kill that enters the durable
+     structured control channel (#242, `structuredSession` present); a
      dead/finished/unresolved host omits it; only a live tmux root/subagent (or a
      shell task) invokes the SIGTERM/SIGKILL endpoint. A live subagent's own
      proc/pid is null (the root writes its transcript), so /api/proc resolves the
      kill to the canonical root pid server-side. */
-  const killCap = useAgentCapabilities(file).caps.controls.kill;
+  const { caps, structuredSession } = useAgentCapabilities(file);
+  const killCap = caps.controls.kill;
 
   useEffect(() => {
     if (!confirming) return;
@@ -66,6 +68,27 @@ export function ProcessStatusControls({
     setKilling(true);
     setMessage("");
     try {
+      if (structuredSession) {
+        /* Structured host (#242): Kill enters the durable structured control
+           channel keyed by the canonical ROOT conversation identity — a single
+           /api/tmux → dispatchStructuredControl request that never touches
+           /api/proc, and with no SIGTERM/SIGKILL escalation (the host manages
+           the process). For a structured-root subagent `structuredSession` is
+           the ROOT's session, so the kill addresses the root, not the child. */
+        const res = await fetch("/api/tmux", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "kill", conversationId: structuredSession.session.conversationId }),
+        });
+        const json = (await res.json()) as { ok?: boolean; error?: string };
+        if (!res.ok || !json.ok) {
+          setMessage(json.error ?? t("task.stopFailed"));
+          return;
+        }
+        setMessage(t("task.killRequested"));
+        setConfirming(false);
+        return;
+      }
       const res = await fetch("/api/proc", {
         method: "POST",
         headers: { "content-type": "application/json" },

@@ -413,7 +413,15 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
         // fetch itself succeeded and fresher state is live, so report success.
         if (myGen !== generation) return true;
         hasSnapshot = true;
-        setState({ store: installSnapshot(snapshot), lastEventAt: deps.now() });
+        // Refresh the structured-hosts rollback gate alongside the store — every
+        // other snapshot-install path (join/resume/fallback) does, so a manual
+        // dead-host Re-check must too, or a tab keeps a stale gate after a
+        // rollback flip (issue #241 finding 1).
+        setState({
+          store: installSnapshot(snapshot),
+          lastEventAt: deps.now(),
+          structuredHostsEnabled: snapshot.structuredHostsEnabled === true,
+        });
         return true;
       } catch {
         return false;

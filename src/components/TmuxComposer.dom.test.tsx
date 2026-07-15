@@ -286,11 +286,16 @@ test("an unresolved host blocks the send POST with a localized reason (finding 1
 /* ------------------------------ quick-ack gating (round-3 MEDIUM) ------------------------------ */
 
 const quickAckLabel = translate("en", "composer.quickAckLabel");
-/* A live Claude subagent relays into its root, so quick-ack applies. */
+/* A live Claude subagent relays into its root, so quick-ack applies. In
+   pure-legacy test mode (runtime plane off) a running proc makes this the
+   `live-subagent` surface — Send enabled, so the composer renders and the
+   quick-ack gating below is driven purely by the dead/unresolved props. A
+   proc-null child would resolve to `inert` (Send hidden → no composer at all,
+   finding 2), which is covered by the wrapper suites. */
 const relaySubagent = {
   path: "/child.jsonl", root: "claude-projects", name: "child.jsonl", project: "viewer", title: "child",
   engine: "claude", kind: "subagent", fmt: "claude", parent: "/root.jsonl", mtime: 1, size: 1, activity: "live",
-  proc: null, pid: null, conversationId: "conv-child", pendingQuestion: null, waitingInput: null,
+  proc: "running", pid: null, conversationId: "conv-child", pendingQuestion: null, waitingInput: null,
 } as FileEntry;
 
 const openSendMenu = async (host: HTMLElement) => {
