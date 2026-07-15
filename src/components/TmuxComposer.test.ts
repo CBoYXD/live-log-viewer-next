@@ -88,7 +88,7 @@ test("the production runtime receipt list exposes recovery actions for failures"
   expect(html).toContain("engine write failed");
   expect(html).toContain(">Retry<");
   expect(html).toContain("Edit &amp; resend");
-  expect(html.match(/min-h-11/g)?.length).toBe(2);
+  expect(html.match(/min-h-11/g)?.length).toBe(3);
 });
 
 test("a queued structured send renders as a quiet optimistic user message", () => {

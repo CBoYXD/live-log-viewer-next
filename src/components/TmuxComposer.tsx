@@ -21,7 +21,7 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
 import { ImagePickerButton } from "./imageAttachments";
-import { ReceiptChip } from "./runtime/ReceiptChip";
+import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import { mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
 
 /**
@@ -61,12 +61,39 @@ export function mergeRuntimeReceipts(
   runtimeReceipts: RuntimeReceipt[],
   immediateReceipts: RuntimeReceipt[],
 ): RuntimeReceipt[] {
-  const merged = new Map<string, RuntimeReceipt>();
-  for (const receipt of [...runtimeReceipts, ...immediateReceipts]) {
-    const current = merged.get(receipt.operationId);
-    if (!current || receipt.revision > current.revision) merged.set(receipt.operationId, receipt);
+  type RetryAwareReceipt = RuntimeReceipt & { retryOfOperationId?: string | null };
+  const retryParent = (receipt: RuntimeReceipt): string | null =>
+    (receipt as RetryAwareReceipt).retryOfOperationId ?? null;
+  const candidates = [...runtimeReceipts, ...immediateReceipts].sort((left, right) =>
+    Date.parse(right.at) - Date.parse(left.at)
+      || right.revision - left.revision
+      || left.operationId.localeCompare(right.operationId)
+      || left.idempotencyKey.localeCompare(right.idempotencyKey));
+  const operationIds = new Set<string>();
+  const idempotencyKeys = new Set<string>();
+  const attempts: RuntimeReceipt[] = [];
+  for (const receipt of candidates) {
+    if (operationIds.has(receipt.operationId) || idempotencyKeys.has(receipt.idempotencyKey)) continue;
+    operationIds.add(receipt.operationId);
+    idempotencyKeys.add(receipt.idempotencyKey);
+    attempts.push(receipt);
   }
-  return [...merged.values()];
+  const byOperationId = new Map(attempts.map((receipt) => [receipt.operationId, receipt]));
+  const superseded = new Set<string>();
+  const currentAttempts: RuntimeReceipt[] = [];
+  for (const receipt of attempts) {
+    if (superseded.has(receipt.operationId)) continue;
+    currentAttempts.push(receipt);
+    const lineage = new Set<string>();
+    let ancestor = retryParent(receipt);
+    while (ancestor && ancestor !== receipt.operationId && !lineage.has(ancestor)) {
+      lineage.add(ancestor);
+      superseded.add(ancestor);
+      const parent = byOperationId.get(ancestor);
+      ancestor = parent ? retryParent(parent) : null;
+    }
+  }
+  return currentAttempts;
 }
 
 export function RuntimeComposerReceipts({
@@ -82,6 +109,7 @@ export function RuntimeComposerReceipts({
 }) {
   const { t } = useLocale();
   const statusId = useId();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const isMessage = (receipt: RuntimeReceipt) => receipt.kind === "send" || receipt.kind === "steer";
   const editable = (receipt: RuntimeReceipt) => isMessage(receipt)
     && (receipt.status === "failed" || receipt.status === "rejected")
@@ -98,57 +126,102 @@ export function RuntimeComposerReceipts({
   const pendingReceipts = messageReceipts.filter((receipt) => !receiptIsTerminal(receipt.status));
   const problemReceipts = messageReceipts.filter((receipt) => receipt.status === "failed" || receipt.status === "rejected");
   const busyRetry = pendingReceipts.some((receipt) => typeof receipt.reason === "string" && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason));
+  const receiptSummaryLabel = t("runtime.receipt.summary", { count: messageReceipts.length });
+  const disclosureLabel = t(detailsOpen ? "runtime.receipt.hideDetails" : "runtime.receipt.showDetails");
 
   return (
     <>
       {messageReceipts.length ? (
-        <details
-          className="group w-full min-w-0 rounded-control border border-border bg-sunken/55 text-caption text-secondary"
-          data-runtime-receipt-stack
-        >
-          <summary
-            aria-describedby={statusId}
-            className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 rounded-control px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
+        <>
+          <details
+            className="group w-full min-w-0 rounded-control border border-border bg-sunken/55 text-caption text-secondary"
+            data-runtime-receipt-stack
+            onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
           >
-            <ChevronRight className="h-3 w-3 shrink-0 text-muted transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
-            <span className="shrink-0 font-semibold text-primary">
-              {t("runtime.receipt.summary", { count: messageReceipts.length })}
-            </span>
-            <span className="sr-only">
-              <span className="group-open:hidden" data-receipt-action="show">
-                {t("runtime.receipt.showDetails")}
-              </span>
-              <span className="hidden group-open:inline" data-receipt-action="hide">
-                {t("runtime.receipt.hideDetails")}
-              </span>
-            </span>
-            <span
-              className="min-w-0 flex-1 truncate text-right text-muted"
-              data-receipt-preview
-              title={messageReceipts[0]!.text ?? undefined}
+            <summary
+              aria-describedby={statusId}
+              aria-label={`${disclosureLabel}. ${receiptSummaryLabel}`}
+              className="flex min-h-11 max-h-11 cursor-pointer list-none items-center gap-1.5 overflow-hidden rounded-control px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 [&::-webkit-details-marker]:hidden"
             >
-              {messageReceipts[0]!.text}
-            </span>
-            {pendingReceipts.length ? (
-              <Badge
-                tone="warning"
-                className={busyRetry ? "max-w-[52%] overflow-hidden" : ""}
-                title={busyRetry
-                  ? `${t("runtime.receipt.pendingCount", { count: pendingReceipts.length })} · ${t("runtime.receipt.busyRetry")}`
-                  : undefined}
+              <ChevronRight className="h-3 w-3 shrink-0 text-muted transition-transform duration-150 group-open:rotate-90 motion-reduce:transition-none" aria-hidden />
+              <span className="shrink-0 font-semibold text-primary">
+                {receiptSummaryLabel}
+              </span>
+              <span
+                className="min-w-0 flex-1 truncate text-right text-muted"
+                data-receipt-preview
+                title={messageReceipts[0]!.text ?? undefined}
               >
-                <span className={busyRetry ? "truncate" : undefined}>
-                  {t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
-                  {busyRetry ? ` · ${t("runtime.receipt.busyRetry")}` : null}
-                </span>
-              </Badge>
-            ) : null}
-            {problemReceipts.length ? (
-              <Badge tone="danger">
-                {t("runtime.receipt.problemCount", { count: problemReceipts.length })}
-              </Badge>
-            ) : null}
-          </summary>
+                {messageReceipts[0]!.text}
+              </span>
+              {pendingReceipts.length ? (
+                <Badge
+                  tone="warning"
+                  className={busyRetry ? "max-w-[52%] overflow-hidden" : ""}
+                  title={busyRetry
+                    ? `${t("runtime.receipt.pendingCount", { count: pendingReceipts.length })} · ${t("runtime.receipt.busyRetry")}`
+                    : undefined}
+                >
+                  <span className={busyRetry ? "truncate" : undefined}>
+                    {t("runtime.receipt.pendingCount", { count: pendingReceipts.length })}
+                    {busyRetry ? ` · ${t("runtime.receipt.busyRetry")}` : null}
+                  </span>
+                </Badge>
+              ) : null}
+              {problemReceipts.length ? (
+                <Badge tone="danger">
+                  {t("runtime.receipt.problemCount", { count: problemReceipts.length })}
+                </Badge>
+              ) : null}
+            </summary>
+            <div
+              className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"
+              data-runtime-receipt-details
+            >
+              {messageReceipts.map((receipt) => {
+                const failed = receipt.status === "failed";
+                const pending = !receiptIsTerminal(receipt.status);
+                const retryingBusy = pending
+                  && typeof receipt.reason === "string"
+                  && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
+                return (
+                  <div
+                    key={receipt.operationId}
+                    className="flex min-w-0 items-start justify-end gap-1.5 rounded-control bg-card/70 px-2 py-1"
+                    {...(pending ? { "data-optimistic-message": "true" } : {})}
+                  >
+                    <span
+                      className="min-w-0 flex-1 whitespace-pre-wrap break-words text-right text-secondary"
+                      data-receipt-message
+                    >
+                      {receipt.text}
+                    </span>
+                    <ReceiptChip
+                      receipt={receipt}
+                      actionsDisabled={actionsDisabled}
+                      onRetry={failed ? () => onRetry(receipt) : undefined}
+                      onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
+                    />
+                    {receipt.status === "pending" ? (
+                      <span
+                        className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-muted motion-reduce:animate-none"
+                        aria-hidden
+                      />
+                    ) : null}
+                    {retryingBusy ? (
+                      <span
+                        className="min-w-0 max-w-[52%] truncate text-caption text-muted"
+                        data-runtime-receipt-busy
+                        title={t("runtime.receipt.busyRetry")}
+                      >
+                        {t("runtime.receipt.busyRetry")}
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </details>
           <span
             id={statusId}
             className="sr-only"
@@ -160,54 +233,10 @@ export function RuntimeComposerReceipts({
               pending: pendingReceipts.length,
               problems: problemReceipts.length,
             })}
+            {` ${messageReceipts.map((receipt) => runtimeReceiptStatusText(t, receipt)).join(". ")}.`}
             {busyRetry ? ` ${t("runtime.receipt.busyRetry")}` : null}
           </span>
-          <div
-            className="max-h-36 space-y-1 overflow-y-auto border-t border-border/70 p-1.5"
-            data-runtime-receipt-details
-          >
-            {messageReceipts.map((receipt) => {
-              const failed = receipt.status === "failed";
-              const pending = !receiptIsTerminal(receipt.status);
-              const retryingBusy = pending
-                && typeof receipt.reason === "string"
-                && RECOVERABLE_BUSY_RETRY_REASONS.has(receipt.reason);
-              const pendingLabel = t(retryingBusy ? "runtime.receipt.busyRetry" : "runtime.receipt.pending");
-              return (
-                <div
-                  key={receipt.operationId}
-                  className="flex min-w-0 items-start justify-end gap-1.5 rounded-control bg-card/70 px-2 py-1"
-                  {...(pending ? { "data-optimistic-message": "true" } : {})}
-                >
-                  <span
-                    className="min-w-0 flex-1 whitespace-pre-wrap break-words text-right text-secondary"
-                    data-receipt-message
-                  >
-                    {receipt.text}
-                  </span>
-                  {pending ? (
-                    <span
-                      className="inline-flex shrink-0 items-center gap-1.5 text-caption text-muted"
-                      role="status"
-                      aria-live="polite"
-                      data-operation={receipt.operationId}
-                    >
-                      <span className={retryingBusy ? undefined : "sr-only"}>{pendingLabel}</span>
-                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
-                    </span>
-                  ) : (
-                    <ReceiptChip
-                      receipt={receipt}
-                      actionsDisabled={actionsDisabled}
-                      onRetry={failed ? () => onRetry(receipt) : undefined}
-                      onEdit={editable(receipt) ? () => onEdit(receipt) : undefined}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </details>
+        </>
       ) : null}
       {standaloneReceipts.map((receipt) => {
         const failed = receipt.status === "failed";
