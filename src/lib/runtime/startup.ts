@@ -38,6 +38,15 @@ interface StructuredStartupSignals {
 
 const TRANSCRIPT_REFRESH_CONCURRENCY = 16;
 
+function persistedTurnState(
+  records: Record<string, unknown>[],
+  engine: "codex" | "claude",
+) {
+  return engine === "claude"
+    ? turnStateFromRecords(records, false)
+    : turnStateFromRecords(records, true, true);
+}
+
 async function refreshTerminalTranscriptState(registry: AgentRegistry): Promise<void> {
   const snapshot = registry.snapshot();
   const observedAt = new Date().toISOString();
@@ -58,7 +67,7 @@ async function refreshTerminalTranscriptState(registry: AgentRegistry): Promise<
         const { conversation, generation } = candidate;
         const tail = await readStableTailRecords(generation.path);
         if (tail.integrity !== "complete") continue;
-        const turn = turnStateFromRecords(tail.records, conversation.engine === "codex", true);
+        const turn = persistedTurnState(tail.records, conversation.engine);
         if (turn.state !== "terminal") continue;
         observations.push({
           engine: conversation.engine,

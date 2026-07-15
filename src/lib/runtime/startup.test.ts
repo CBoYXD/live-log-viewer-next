@@ -494,6 +494,14 @@ async function startupAdoptionAttempts(
   return attempts;
 }
 
+function claudeTerminalRecord() {
+  return {
+    type: "assistant",
+    timestamp: "2026-07-15T10:00:00.000Z",
+    message: { role: "assistant", content: [], stop_reason: "end_turn" },
+  };
+}
+
 test("startup adoption boots one live unfinished host across terminal history", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-adoption-gate-"));
   const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
@@ -541,7 +549,7 @@ test("startup adoption reads terminal transcripts before booting production-shap
         activeTurnRef: `stale-${engine}-${index}`,
         transcriptRecords: engine === "codex"
           ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-          : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+          : [claudeTerminalRecord()],
       });
     }
   }
@@ -567,7 +575,7 @@ test.each(["codex", "claude"] as const)(
       activeTurnRef: `stale-${engine}`,
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
     });
 
     expect(await startupAdoptionAttempts(registry)).toEqual([]);
@@ -578,6 +586,44 @@ test.each(["codex", "claude"] as const)(
     fs.rmSync(directory, { recursive: true, force: true });
   },
 );
+
+test("a production-shaped Claude broker transcript ending in end_turn stays retired across repeated startup", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-runtime-startup-repeat-broker-terminal-"));
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const sessionId = "10000000-0000-4000-8000-000000000002";
+  const { conversation } = addStructuredRestartConversation(registry, directory, {
+    engine: "claude",
+    sessionId,
+    status: "live",
+    turn: "busy",
+    activeTurnRef: "stale-claude-broker-turn",
+    transcriptRecords: [
+      {
+        type: "user",
+        uuid: "20000000-0000-4000-8000-000000000001",
+        parentUuid: null,
+        sessionId,
+        timestamp: "2026-07-15T10:00:00.000Z",
+        message: { role: "user", content: [] },
+      },
+      {
+        type: "assistant",
+        uuid: "20000000-0000-4000-8000-000000000002",
+        parentUuid: "20000000-0000-4000-8000-000000000001",
+        sessionId,
+        timestamp: "2026-07-15T10:00:01.000Z",
+        message: { role: "assistant", content: [], stop_reason: "end_turn" },
+      },
+    ],
+  });
+
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+  expect(await startupAdoptionAttempts(registry)).toEqual([]);
+  expect(registry.conversation(conversation.id)?.turn.state).toBe("terminal");
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
 
 test.each(["codex", "claude"] as const)(
   "a 128 KiB-aligned terminal %s transcript stays retired across repeated startup",
@@ -593,7 +639,7 @@ test.each(["codex", "claude"] as const)(
       activeTurnRef: `stale-${engine}`,
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
       alignFirstRecordToTailBoundary: true,
     });
 
@@ -620,7 +666,7 @@ test.each(["codex", "claude"] as const)(
       activeTurnRef: `active-${engine}`,
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
       transcriptSuffix: "\n{corrupt",
     });
 
@@ -644,7 +690,7 @@ test.each(["codex", "claude"] as const)(
       activeTurnRef: `active-${engine}`,
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
       transcriptSuffix: '\n{"next_turn":',
     });
 
@@ -668,7 +714,7 @@ test.each(["codex", "claude"] as const)(
       activeTurnRef: `active-${engine}`,
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
     });
     const realOpen = fs.promises.open.bind(fs.promises);
     const open = spyOn(fs.promises, "open").mockImplementation(async (...args) => {
@@ -715,7 +761,7 @@ test.each([
       activeTurnRef: `active-${engine}`,
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
     });
     if (condition === "missing") fs.rmSync(artifactPath);
     else fs.chmodSync(artifactPath, 0o000);
@@ -875,7 +921,7 @@ test.each(["codex", "claude"] as const)(
       activeTurnRef: "stale-terminal-turn",
       transcriptRecords: engine === "codex"
         ? [{ timestamp: "2026-07-15T10:00:00.000Z", payload: { type: "task_complete" } }]
-        : [{ type: "result", timestamp: "2026-07-15T10:00:00.000Z", subtype: "success" }],
+        : [claudeTerminalRecord()],
     });
     const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
     journal.append({
