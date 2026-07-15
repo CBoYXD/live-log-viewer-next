@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import type { TranscriptHost } from "@/lib/agent/transcriptHost";
-import type { FileEntry } from "@/lib/types";
+import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
-import { allowedKillTarget, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, noteSessionTargets, parseResourcesFixture } from "./resources";
+import { allowedKillTarget, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, noteSessionTargets, parseResourcesFixture } from "./resources";
 
 const PATHNAME = "/home/user/.codex/sessions/2026/07/10/rollout-2026-07-10-019f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
 
@@ -60,6 +60,16 @@ function ref(tmuxServerPid: number, panePid: number, paneId: string) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("resource observation", () => {
   test("builds host ownership and metadata from one shared transcript generation", async () => {
     let scans = 0;
@@ -110,6 +120,18 @@ describe("resource observation", () => {
       procCount: 3,
     }]);
     expect(allowedKillTarget("agents:4.0")).toEqual(ref(900, 100, "%1"));
+    expect(lastResourceBuildDiagnostic()).toEqual(expect.objectContaining({
+      fresh: true,
+      status: "complete",
+      phases: expect.objectContaining({
+        readFiles: expect.any(Number),
+        readHosts: expect.any(Number),
+        ppidMap: expect.any(Number),
+        processMemory: expect.any(Number),
+        attach: expect.any(Number),
+        serialization: expect.any(Number),
+      }),
+    }));
   });
 
   test("accepts a deterministic resource fixture", () => {
@@ -181,5 +203,62 @@ describe("kill-target allowlist", () => {
     consumeKillTarget("agents:1.0");
     expect(allowedKillTarget("agents:1.0")).toBeNull();
     expect(allowedKillTarget("agents:2.0")).toEqual(ref(900, 222, "%22"));
+  });
+});
+
+describe("resource recurring reads", () => {
+  test("expired ordinary reads return the cached snapshot while one rebuild runs, and fresh waits for a newer build", async () => {
+    let now = 0;
+    let builds = 0;
+    const ordinary = deferred<ResourcesPayload>();
+    const fresh = deferred<ResourcesPayload>();
+    const cached: ResourcesPayload = { system: null, sessions: [] };
+    const ordinaryResult: ResourcesPayload = { system: null, sessions: [{ target: "agents:2.0", panePid: 2, path: null, engine: "codex", hostConflict: false, title: null, project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 2, swapBytes: 0, procCount: 1 }] };
+    const freshResult: ResourcesPayload = { system: null, sessions: [{ target: "agents:3.0", panePid: 3, path: null, engine: "codex", hostConflict: false, title: null, project: null, activity: null, lastActiveAt: null, cwd: "/repo", rssBytes: 3, swapBytes: 0, procCount: 1 }] };
+    const reader = createResourcesReader(async (forceFresh) => {
+      builds += 1;
+      if (builds === 1) return cached;
+      return forceFresh ? fresh.promise : ordinary.promise;
+    }, () => null, () => now);
+
+    expect(await reader.read()).toEqual(cached);
+    now = 10_000;
+    expect(await reader.read()).toEqual(cached);
+    await Promise.resolve();
+    expect(builds).toBe(2);
+    expect(await reader.read()).toEqual(cached);
+    expect(builds).toBe(2);
+
+    const forced = reader.read(true);
+    ordinary.resolve(ordinaryResult);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(builds).toBe(3);
+    fresh.resolve(freshResult);
+    expect(await forced).toEqual(freshResult);
+  });
+
+  test("a failed ordinary rebuild leaves the cached snapshot available and later polls retry", async () => {
+    let now = 0;
+    let builds = 0;
+    const recovered = deferred<ResourcesPayload>();
+    const cached: ResourcesPayload = { system: null, sessions: [] };
+    const reader = createResourcesReader(async () => {
+      builds += 1;
+      if (builds === 1) return cached;
+      if (builds === 2) throw new Error("transient resource build failure");
+      return recovered.promise;
+    }, () => null, () => now);
+
+    await reader.read();
+    now = 10_000;
+    expect(await reader.read()).toEqual(cached);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await Promise.resolve();
+    expect(builds).toBe(2);
+    expect(await reader.read()).toEqual(cached);
+    await Promise.resolve();
+    expect(builds).toBe(3);
+    recovered.resolve(cached);
+    await Promise.resolve();
   });
 });

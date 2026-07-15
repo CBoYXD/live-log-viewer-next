@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { readResources } from "@/lib/resources";
+import { lastResourceBuildDiagnostic, noteResourceSerialization, readResources } from "@/lib/resources";
 import { rejectCrossOrigin } from "@/lib/sameOrigin";
 import type { ApiError, ResourcesPayload } from "@/lib/types";
 
@@ -13,5 +13,11 @@ export async function GET(req: NextRequest): Promise<NextResponse<ResourcesPaylo
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
   const fresh = req.nextUrl.searchParams.get("fresh") === "1";
-  return NextResponse.json(await readResources(fresh));
+  const payload = await readResources(fresh);
+  const serializationStartedAt = performance.now();
+  const response = NextResponse.json(payload);
+  noteResourceSerialization(performance.now() - serializationStartedAt);
+  const diagnostic = lastResourceBuildDiagnostic();
+  if (diagnostic) response.headers.set("x-llv-resource-phases", JSON.stringify(diagnostic));
+  return response;
 }

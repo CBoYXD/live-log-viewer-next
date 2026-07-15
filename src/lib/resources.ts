@@ -2,7 +2,7 @@ import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
 import { readFileSync } from "node:fs";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
-import { createFreshAwareCoalescer, type FreshAwareCoalescer } from "@/lib/asyncCoalescer";
+import { createFreshAwareCoalescer } from "@/lib/asyncCoalescer";
 import { descendantPids } from "@/lib/proc/memory";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { readTranscriptHosts, type TranscriptHost, type TranscriptHostSnapshot } from "@/lib/agent/transcriptHost";
@@ -19,6 +19,46 @@ import type { FileEntry, ResourceSession, ResourcesPayload } from "./types";
  */
 
 const CACHE_MS = 10_000;
+
+type ResourceBuildPhase = "systemMemory" | "readFiles" | "readHosts" | "ppidMap" | "processMemory" | "attach" | "serialization";
+type ResourceBuildPhases = Record<ResourceBuildPhase, number>;
+
+export type ResourceBuildDiagnostic = {
+  fresh: boolean;
+  status: "complete" | "failed";
+  durationMs: number;
+  phases: ResourceBuildPhases;
+};
+
+function emptyResourceBuildPhases(): ResourceBuildPhases {
+  return {
+    systemMemory: 0,
+    readFiles: 0,
+    readHosts: 0,
+    ppidMap: 0,
+    processMemory: 0,
+    attach: 0,
+    serialization: 0,
+  };
+}
+
+function measureResourcePhase<T>(phases: ResourceBuildPhases, phase: ResourceBuildPhase, work: () => T): T {
+  const startedAt = performance.now();
+  try {
+    return work();
+  } finally {
+    phases[phase] += performance.now() - startedAt;
+  }
+}
+
+async function measureResourcePhaseAsync<T>(phases: ResourceBuildPhases, phase: ResourceBuildPhase, work: () => Promise<T>): Promise<T> {
+  const startedAt = performance.now();
+  try {
+    return await work();
+  } finally {
+    phases[phase] += performance.now() - startedAt;
+  }
+}
 
 function finiteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -58,14 +98,22 @@ function captureSystemMemory(proc: Pick<ProcBackend, "systemMemory"> = procBacke
 export type KillTargetRef = TmuxAttachReference;
 
 const globalStore = globalThis as unknown as {
-  __llvResourcesCache?: { at: number; data: ResourcesPayload } | null;
-  __llvResourcesBuildCoordinator?: FreshAwareCoalescer<ResourcesPayload>;
+  __llvResourcesReader?: ResourcesReader;
   __llvResourceTargets?: Map<string, KillTargetRef>;
+  __llvLastResourceBuild?: ResourceBuildDiagnostic;
 };
 
-function resourceBuildCoordinator(): FreshAwareCoalescer<ResourcesPayload> {
-  globalStore.__llvResourcesBuildCoordinator ??= createFreshAwareCoalescer<ResourcesPayload>();
-  return globalStore.__llvResourcesBuildCoordinator;
+export function lastResourceBuildDiagnostic(): ResourceBuildDiagnostic | null {
+  const diagnostic = globalStore.__llvLastResourceBuild;
+  return diagnostic ? { ...diagnostic, phases: { ...diagnostic.phases } } : null;
+}
+
+/** Captures JSON response construction separately from the expensive resource
+    build phases, keeping response serialization visible in live diagnostics. */
+export function noteResourceSerialization(durationMs: number): void {
+  if (globalStore.__llvLastResourceBuild) {
+    globalStore.__llvLastResourceBuild.phases.serialization = durationMs;
+  }
 }
 
 /**
@@ -146,78 +194,126 @@ export async function buildResourceSnapshot(
   fresh: boolean,
   dependencies: ResourceSnapshotDependencies = resourceSnapshotDependencies,
 ): Promise<ResourcesPayload> {
-  const system = captureSystemMemory(dependencies.proc);
-
-  const files = await dependencies.readFiles(fresh);
-  const hosts = await dependencies.readHosts(fresh, files);
-  const sessions: ResourceSession[] = [];
-  if (hosts.hosts.length > 0) {
-    const ppids = dependencies.proc.ppidMap();
-    overlaySessionTitles(files);
-    const byPath = new Map(files.map((entry) => [entry.path, entry]));
-    const byPane = new Map<string, TranscriptHost[]>();
-    for (const host of hosts.hosts) {
-      const paneHosts = byPane.get(host.paneId);
-      if (paneHosts) paneHosts.push(host);
-      else byPane.set(host.paneId, [host]);
-    }
-
-    /* Trees first, memory second: one processMemory() batch over the union
-       keeps the portable backend at a single `ps` spawn for all panes. */
-    const paneTrees: Array<{ host: TranscriptHost; tree: number[]; paneHosts: TranscriptHost[] }> = [];
-    const treePids = new Set<number>();
-    for (const paneHosts of byPane.values()) {
-      const host = paneHosts[0]!;
-      const tree = descendantPids(host.panePid, ppids);
-      paneTrees.push({ host, tree, paneHosts });
-      for (const pid of tree) treePids.add(pid);
-    }
-    const memory = dependencies.proc.processMemory(treePids);
-
-    const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
-    for (const { host, tree, paneHosts } of paneTrees) {
-      let rssBytes = 0;
-      let swapBytes = 0;
-      for (const pid of tree) {
-        const mem = memory.get(pid);
-        if (!mem) continue;
-        rssBytes += mem.rssBytes;
-        swapBytes += mem.swapBytes;
+  const startedAt = performance.now();
+  const phases = emptyResourceBuildPhases();
+  try {
+    const system = measureResourcePhase(phases, "systemMemory", () => captureSystemMemory(dependencies.proc));
+    const files = await measureResourcePhaseAsync(phases, "readFiles", () => dependencies.readFiles(fresh));
+    const hosts = await measureResourcePhaseAsync(phases, "readHosts", () => dependencies.readHosts(fresh, files));
+    const sessions: ResourceSession[] = [];
+    if (hosts.hosts.length > 0) {
+      const ppids = measureResourcePhase(phases, "ppidMap", () => dependencies.proc.ppidMap());
+      overlaySessionTitles(files);
+      const byPath = new Map(files.map((entry) => [entry.path, entry]));
+      const byPane = new Map<string, TranscriptHost[]>();
+      for (const host of hosts.hosts) {
+        const paneHosts = byPane.get(host.paneId);
+        if (paneHosts) paneHosts.push(host);
+        else byPane.set(host.paneId, [host]);
       }
-      /* The resolver elects one canonical host for every transcript. A
-         duplicate pane stays visible for cleanup, though it carries no path
-         and cannot disagree with path-addressed delivery. */
-      const entry = canonicalResourceEntry(hosts, paneHosts, byPath);
-      sessions.push({
-        target: host.display,
-        panePid: host.panePid,
-        path: entry?.path ?? null,
-        engine: host.engine,
-        hostConflict: conflictingResourceHost(hosts, host),
-        title: entry?.title ?? null,
-        project: entry?.project || null,
-        activity: entry?.activity ?? null,
-        lastActiveAt: entry ? isoFromUnix(entry.mtime) : null,
-        cwd: host.cwd,
-        rssBytes,
-        swapBytes,
-        procCount: tree.length,
+
+      /* Trees first, memory second: one processMemory() batch over the union
+         keeps the portable backend at a single `ps` spawn for all panes. */
+      const paneTrees: Array<{ host: TranscriptHost; tree: number[]; paneHosts: TranscriptHost[] }> = [];
+      const treePids = new Set<number>();
+      for (const paneHosts of byPane.values()) {
+        const host = paneHosts[0]!;
+        const tree = descendantPids(host.panePid, ppids);
+        paneTrees.push({ host, tree, paneHosts });
+        for (const pid of tree) treePids.add(pid);
+      }
+      const memory = measureResourcePhase(phases, "processMemory", () => dependencies.proc.processMemory(treePids));
+
+      const killRefs: Array<{ target: string; ref: KillTargetRef }> = [];
+      measureResourcePhase(phases, "attach", () => {
+        for (const { host, tree, paneHosts } of paneTrees) {
+          let rssBytes = 0;
+          let swapBytes = 0;
+          for (const pid of tree) {
+            const mem = memory.get(pid);
+            if (!mem) continue;
+            rssBytes += mem.rssBytes;
+            swapBytes += mem.swapBytes;
+          }
+          /* The resolver elects one canonical host for every transcript. A
+             duplicate pane stays visible for cleanup, though it carries no path
+             and cannot disagree with path-addressed delivery. */
+          const entry = canonicalResourceEntry(hosts, paneHosts, byPath);
+          sessions.push({
+            target: host.display,
+            panePid: host.panePid,
+            path: entry?.path ?? null,
+            engine: host.engine,
+            hostConflict: conflictingResourceHost(hosts, host),
+            title: entry?.title ?? null,
+            project: entry?.project || null,
+            activity: entry?.activity ?? null,
+            lastActiveAt: entry ? isoFromUnix(entry.mtime) : null,
+            cwd: host.cwd,
+            rssBytes,
+            swapBytes,
+            procCount: tree.length,
+          });
+          killRefs.push({
+            target: host.display,
+            ref: dependencies.captureAttachReference({ tmuxServerPid: host.tmuxServerPid, panePid: host.panePid, paneId: host.paneId }),
+          });
+        }
       });
-      killRefs.push({
-        target: host.display,
-        ref: dependencies.captureAttachReference({ tmuxServerPid: host.tmuxServerPid, panePid: host.panePid, paneId: host.paneId }),
-      });
+      sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
+      noteSessionTargets(killRefs);
+    } else {
+      noteSessionTargets([]);
     }
-    sessions.sort((a, b) => b.rssBytes + b.swapBytes - (a.rssBytes + a.swapBytes));
-    noteSessionTargets(killRefs);
-  } else {
-    noteSessionTargets([]);
+
+    globalStore.__llvLastResourceBuild = { fresh, status: "complete", durationMs: performance.now() - startedAt, phases };
+    return { system, sessions };
+  } catch (error) {
+    globalStore.__llvLastResourceBuild = { fresh, status: "failed", durationMs: performance.now() - startedAt, phases };
+    throw error;
   }
+}
+
+export interface ResourcesReader {
+  read(fresh?: boolean): Promise<ResourcesPayload>;
+}
+
+export function createResourcesReader(
+  build: (fresh: boolean) => Promise<ResourcesPayload>,
+  captureSystem: () => ResourcesPayload["system"],
+  now: () => number = Date.now,
+): ResourcesReader {
+  let cached: { at: number; data: ResourcesPayload } | null = null;
+  const coordinator = createFreshAwareCoalescer<ResourcesPayload>();
+  const rebuild = async (fresh: boolean): Promise<ResourcesPayload> => {
+    const data = await build(fresh);
+    cached = { at: now(), data };
+    return data;
+  };
 
   return {
-    system,
-    sessions,
+    async read(fresh = false): Promise<ResourcesPayload> {
+      if (!fresh && cached) {
+        if (now() - cached.at >= CACHE_MS) {
+          /* A stale resource poll only starts the shared rebuild. The cached
+             session snapshot stays available while filesystem, process, and
+             tmux observations run off the request path. */
+          void coordinator.run(false, rebuild).catch(() => undefined);
+        }
+        return { ...cached.data, system: captureSystem() };
+      }
+      const data = await coordinator.run(fresh, rebuild);
+      return fresh ? data : { ...data, system: captureSystem() };
+    },
   };
+}
+
+function resourcesReader(): ResourcesReader {
+  globalStore.__llvResourcesReader ??= createResourcesReader(
+    buildResourceSnapshot,
+    () => captureSystemMemory(),
+  );
+  return globalStore.__llvResourcesReader;
 }
 
 /** Snapshot for GET /api/resources, cached briefly so UI polling stays cheap.
@@ -229,17 +325,5 @@ export async function readResources(fresh = false): Promise<ResourcesPayload> {
     noteSessionTargets([]);
     return parseResourcesFixture(readFileSync(fixturePath, "utf8"));
   }
-  const cached = globalStore.__llvResourcesCache;
-  /* Pane discovery is the expensive cached half. Host pressure comes from a
-     new /proc/meminfo snapshot on every request, so RAM and swap never inherit
-     the age of a pane/session snapshot. */
-  if (!fresh && cached && Date.now() - cached.at < CACHE_MS) {
-    return { ...cached.data, system: captureSystemMemory() };
-  }
-  const data = await resourceBuildCoordinator().run(fresh, async (forceFresh) => {
-    const built = await buildResourceSnapshot(forceFresh);
-    globalStore.__llvResourcesCache = { at: Date.now(), data: built };
-    return built;
-  });
-  return fresh ? data : { ...data, system: captureSystemMemory() };
+  return resourcesReader().read(fresh);
 }
