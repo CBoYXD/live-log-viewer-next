@@ -6,6 +6,8 @@ import { signalDetachedProcessGroup, signalProcessGroup, type ProcessSignal } fr
 import { headlessCodexThreadConfig } from "@/lib/codexHeadlessConfig";
 import { hardenedRedact } from "@/lib/view/compactText";
 import { decodeCodexStructuredUserText, encodeCodexStructuredUserText } from "./codexStructuredUserText";
+import { runtimeImageStore } from "./runtimeImageStore";
+import { STRUCTURED_IMAGE_CAPABILITY, type StructuredImageRef } from "./structuredContent";
 
 import type {
   DeliveryReceipt,
@@ -36,6 +38,7 @@ type PendingAnswer = {
 };
 type PendingDelivery = {
   text: string;
+  contentDigest: string;
   receipt: DeliveryReceipt;
   promise: Promise<DeliveryReceipt>;
   resolve(receipt: DeliveryReceipt): void;
@@ -74,8 +77,7 @@ export interface CodexAppServerHostOptions {
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
-  processIdentity?: (pid: number) => string | null;
-  pidAlive?: (pid: number) => boolean;
+  resolveImagePath?: (ref: StructuredImageRef) => string;
 }
 
 type ChildProcessOwnership = "owned" | "gone" | "recycled" | "unknown";
@@ -181,6 +183,16 @@ function terminalStatus(value: unknown): "completed" | "interrupted" | "error" {
   return value === "completed" ? "completed" : value === "interrupted" ? "interrupted" : "error";
 }
 
+function modelSupportsImageInput(value: unknown, requestedModel: string | undefined): boolean {
+  const models = record(value)?.data;
+  if (!Array.isArray(models)) return false;
+  const candidates = models.map(record).filter((model): model is JsonObject => model !== null);
+  const selected = requestedModel
+    ? candidates.find((model) => stringField(model, "id") === requestedModel)
+    : candidates.find((model) => model.isDefault === true);
+  return Array.isArray(selected?.inputModalities) && selected.inputModalities.includes("image");
+}
+
 function resumedTurns(value: unknown): JsonObject[] {
   const outer = record(value);
   const thread = record(outer?.thread) ?? outer;
@@ -247,15 +259,16 @@ export class CodexAppServerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
-  private readonly processIdentity: (pid: number) => string | null;
-  private readonly pidAlive: (pid: number) => boolean;
-  private readonly childStartIdentity: string | null;
-  private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
+  private readonly resolveImagePath: (ref: StructuredImageRef) => string;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
-  private readonly confirmedDeliveries = new Map<string, { receipt: DeliveryReceipt; text: string | null }>();
+  private readonly confirmedDeliveries = new Map<string, {
+    receipt: DeliveryReceipt;
+    text: string | null;
+    contentDigest: string | null;
+  }>();
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
@@ -273,6 +286,7 @@ export class CodexAppServerHost implements EngineHost {
   private account: HostState["account"] = null;
   private engineStatus: "active" | "idle" | "unhosted" | "dead" = "idle";
   private activeFlags: string[] = [];
+  private imageInputSupported = false;
   private releasing = false;
   private released = false;
   private dead = false;
@@ -297,10 +311,11 @@ export class CodexAppServerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
-    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
-    this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
-    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
-    this.onEventCursorRecovery = options.onEventCursorRecovery;
+    this.resolveImagePath = options.resolveImagePath ?? ((ref) => {
+      const store = runtimeImageStore();
+      store.read(ref);
+      return store.pathFor(ref);
+    });
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -358,6 +373,14 @@ export class CodexAppServerHost implements EngineHost {
       const accountType = stringField(account, "type");
       if (accountType !== "chatgpt") throw new Error("Codex app-server requires a ChatGPT subscription login");
       provisional.account = { type: accountType, planType: stringField(account, "planType") };
+      try {
+        provisional.imageInputSupported = modelSupportsImageInput(
+          await provisional.rpc("model/list", {}),
+          options.model,
+        );
+      } catch {
+        provisional.imageInputSupported = false;
+      }
       const config = headlessCodexThreadConfig(
         await provisional.rpc("config/read", { cwd: options.cwd, includeLayers: false }),
         options.allowSubagents === true,
@@ -435,21 +458,33 @@ export class CodexAppServerHost implements EngineHost {
       return { outcome: "rejected", reason: "dead-host" };
     }
     const normalized = normalizeQueueEntry(entry);
-    if (normalized.content.images.length) throw new Error("Codex structured image delivery is disabled until vertical 2.");
+    if (normalized.content.images.length && !this.imageInputSupported) {
+      throw new Error("The selected Codex model does not advertise image input through app-server.");
+    }
     entry = {
       id: normalized.id,
       text: normalized.content.text,
+      content: normalized.content,
       contentDigest: normalized.contentDigest,
       ...(normalized.expectedTurnId !== undefined ? { expectedTurnId: normalized.expectedTurnId } : {}),
     };
-    if (!entry.id || !entry.text) throw new Error("queue entry id and text are required");
+    if (!entry.id) throw new Error("queue entry id is required");
     const confirmed = await this.confirmedDelivery(entry);
     if (confirmed) return confirmed;
     const currentTurn = this.activeTurnId;
     if (entry.expectedTurnId !== undefined && entry.expectedTurnId !== currentTurn) {
       return { outcome: "rejected", reason: "stale-turn" };
     }
-    const input = [{ type: "text", text: encodeCodexStructuredUserText(entry.text) }];
+    const input = [
+      ...normalized.content.images.map((image) => ({ type: "localImage", path: this.resolveImagePath(image) })),
+      {
+        type: "text",
+        text: encodeCodexStructuredUserText(
+          normalized.content.text,
+          normalized.content.images.length > 0 ? normalized.contentDigest : undefined,
+        ),
+      },
+    ];
     if (currentTurn) {
       try {
         const result = await this.rpc("turn/steer", {
@@ -880,7 +915,9 @@ export class CodexAppServerHost implements EngineHost {
     }
     const existing = this.pendingDeliveries.get(entry.id);
     if (existing) {
-      if (existing.text !== entry.text) return Promise.reject(new Error("Codex queue entry id belongs to a different payload"));
+      if (existing.contentDigest !== entry.contentDigest) {
+        return Promise.reject(new Error("Codex queue entry id belongs to a different payload"));
+      }
       return existing.promise;
     }
     let resolveDelivery!: (confirmed: DeliveryReceipt) => void;
@@ -893,16 +930,27 @@ export class CodexAppServerHost implements EngineHost {
       if (this.pendingDeliveries.get(entry.id)?.promise !== promise) return;
       this.fail(new Error("Codex delivery confirmation timed out; outcome is uncertain"));
     }, this.requestTimeoutMs);
-    const pending = { text: entry.text!, receipt, promise, resolve: resolveDelivery, reject: rejectDelivery, timer };
+    const pending = {
+      text: entry.text ?? "",
+      contentDigest: entry.contentDigest!,
+      receipt,
+      promise,
+      resolve: resolveDelivery,
+      reject: rejectDelivery,
+      timer,
+    };
     this.pendingDeliveries.set(entry.id, pending);
     return promise;
   }
 
   private confirmedReceipt(
     entry: QueueEntry,
-    confirmed: { receipt: DeliveryReceipt; text: string | null },
+    confirmed: { receipt: DeliveryReceipt; text: string | null; contentDigest: string | null },
   ): DeliveryReceipt {
-    if (confirmed.text !== entry.text) {
+    const payloadMatches = confirmed.contentDigest
+      ? confirmed.contentDigest === entry.contentDigest
+      : confirmed.text === entry.text;
+    if (!payloadMatches) {
       throw new Error("Codex queue entry id belongs to a different payload");
     }
     return confirmed.receipt;
@@ -914,19 +962,26 @@ export class CodexAppServerHost implements EngineHost {
     const clientId = stringField(item, "clientId");
     if (!clientId) return;
     const wireText = userMessageText(item);
-    const text = wireText === null ? null : decodeCodexStructuredUserText(wireText).text;
+    const decoded = wireText === null ? null : decodeCodexStructuredUserText(wireText);
+    const text = decoded?.text ?? null;
+    const contentDigest = decoded?.contentDigest ?? null;
     const previous = this.confirmedDeliveries.get(clientId);
     const pending = this.pendingDeliveries.get(clientId);
     const confirmed = {
       receipt: previous?.receipt ?? pending?.receipt ?? { outcome: "turn-started" as const, turnId },
-      text: previous && previous.text !== text ? null : text,
+      text: previous && (previous.text !== text || previous.contentDigest !== contentDigest) ? null : text,
+      contentDigest: previous && (previous.text !== text || previous.contentDigest !== contentDigest) ? null : contentDigest,
     };
     this.confirmedDeliveries.set(clientId, confirmed);
     if (!pending) return;
     this.pendingDeliveries.delete(clientId);
     clearTimeout(pending.timer);
     try {
-      pending.resolve(this.confirmedReceipt({ id: clientId, text: pending.text }, confirmed));
+      pending.resolve(this.confirmedReceipt({
+        id: clientId,
+        text: pending.text,
+        contentDigest: pending.contentDigest,
+      }, confirmed));
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error(safeError(error)));
     }
@@ -1033,9 +1088,17 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   private setSessionStatus(status: "active" | "idle" | "unhosted" | "dead", activeFlags: string[]): void {
+    const advertisedFlags = activeFlags.filter((flag) => flag !== STRUCTURED_IMAGE_CAPABILITY);
+    if (this.imageInputSupported && status !== "unhosted" && status !== "dead") {
+      advertisedFlags.push(STRUCTURED_IMAGE_CAPABILITY);
+    }
     this.engineStatus = status;
-    this.activeFlags = [...activeFlags];
-    this.emit({ kind: "session-status", status, ...(activeFlags.length > 0 ? { activeFlags: [...activeFlags] } : {}) });
+    this.activeFlags = advertisedFlags;
+    this.emit({
+      kind: "session-status",
+      status,
+      ...(advertisedFlags.length > 0 ? { activeFlags: [...advertisedFlags] } : {}),
+    });
   }
 
   private emitThreadStatus(status: ThreadStatus): void {
