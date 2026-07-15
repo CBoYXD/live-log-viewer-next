@@ -1086,6 +1086,59 @@ describe("CodexAppServerHost", () => {
     await releasedRows[0]!.host.release();
   });
 
+  test("boot adoption starts only Codex rows admitted by its candidate filter", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-filtered-structured-adoption-"));
+    const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+    for (const sessionId of ["unfinished-thread", "terminal-thread"]) {
+      registry.upsert({
+        key: { engine: "codex", sessionId },
+        artifactPath: `/sessions/${sessionId}.jsonl`,
+        cwd: "/repo",
+        accountId: null,
+        status: "live",
+        host: null,
+        structuredHost: {
+          kind: "codex-app-server",
+          endpoint: "stdio:old",
+          process: null,
+          eventCursor: 2,
+          protocolVersion: "0.144.1",
+          writerClaimEpoch: 1,
+          activeTurnRef: `turn-${sessionId}`,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 1,
+        claimOwner: null,
+        pendingAction: null,
+      });
+    }
+    const starts: string[] = [];
+    const adopted = await adoptCodexRegistryHosts(
+      registry,
+      (entry) => {
+        starts.push(entry.key.sessionId);
+        return {
+          cwd: "/repo",
+          eventStore: new MemoryEventStore(),
+          spawnProcess: fakeSpawn(new FakeAppServer(entry.key.sessionId)),
+        };
+      },
+      { NODE_ENV: "test", LLV_STRUCTURED_HOSTS: "1" },
+      (entry) => entry.key.sessionId === "unfinished-thread",
+    );
+
+    expect(starts).toEqual(["unfinished-thread"]);
+    expect(adopted).toHaveLength(1);
+    expect(registry.snapshot().entries["codex:terminal-thread"]).toMatchObject({
+      status: "live",
+      claimEpoch: 1,
+      claimOwner: null,
+    });
+    await adopted[0]!.host.release();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
   test("failed restart adoption leaves a loud dead structured host", async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-failed-adoption-"));
     const registryPath = path.join(directory, "agent-registry.json");
