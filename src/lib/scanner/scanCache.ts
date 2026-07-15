@@ -407,6 +407,20 @@ export async function cachedFileScan(
   return completedScan(slot, undefined, targetGeneration);
 }
 
+/** Returns metadata from a completed current generation. Resource snapshots
+    use this path so host ownership can share the files-route scan while still
+    waiting for stale-while-revalidate work to finish. */
+export async function currentFileScan(now = Date.now()): Promise<CachedFileScan> {
+  const scan = await cachedFileScan(undefined, undefined, now);
+  if (scan.generation >= scan.targetGeneration) return scan;
+
+  const cached = fileScanCache().get("");
+  const slot = normalizeFileScanCacheSlot(cached);
+  fileScanCache().set("", slot);
+  await refreshThroughGeneration(slot, scan.targetGeneration);
+  return completedScan(slot, undefined, scan.targetGeneration);
+}
+
 export function resetFilesRouteCacheForTests(): void {
   fileScanCache().clear();
 }

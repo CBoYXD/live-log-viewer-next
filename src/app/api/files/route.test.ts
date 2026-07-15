@@ -100,7 +100,7 @@ afterAll(() => {
   for (const [name, real] of realModules) mock.module(name, () => real as Record<string, unknown>);
 });
 
-const { cachedFileScan, resetFilesRouteCacheForTests } = await import("./scanCache");
+const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
 const { GET } = await import("./route");
 
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
@@ -164,6 +164,37 @@ test("a restart serves the persisted completed snapshot while revalidating", asy
   await new Promise<void>((resolve) => setImmediate(resolve));
   const next = await cachedFileScan();
   expect(next.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/refreshed.jsonl"]);
+});
+
+test("a current scan joins restart revalidation before publishing transcript metadata", async () => {
+  fs.writeFileSync(path.join(stateDir, "files-scan-snapshot.json"), JSON.stringify({
+    version: 1,
+    snapshot: {
+      files: [file("/sessions/persisted-resource.jsonl")],
+      projectCatalog: [],
+      complete: true,
+    },
+  }));
+  resetFilesRouteCacheForTests();
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [file("/sessions/current-resource.jsonl")];
+
+  const stale = await cachedFileScan();
+  expect(stale.snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/persisted-resource.jsonl"]);
+
+  let settled = false;
+  const current = currentFileScan().then((scan) => {
+    settled = true;
+    return scan;
+  });
+
+  expect(scans).toBe(1);
+  expect(settled).toBeFalse();
+
+  release();
+  expect((await current).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/current-resource.jsonl"]);
+  expect(scans).toBe(1);
 });
 
 test("a client automatically converges from a persisted restart snapshot to its completed generation", async () => {
