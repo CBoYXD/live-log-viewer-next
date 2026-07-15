@@ -104,7 +104,7 @@ afterAll(() => {
 });
 
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
-const { allowedKillTarget, buildResourceSnapshot, noteSessionTargets } = await import("@/lib/resources");
+const { allowedKillTarget, buildResourceSnapshot, noteSessionTargets, readResourceFileSnapshot } = await import("@/lib/resources");
 const { GET } = await import("./route");
 
 test("repeated files reads reuse the pure read snapshot and retain ETag behavior", async () => {
@@ -208,6 +208,36 @@ test("a current scan joins restart revalidation before publishing transcript met
   release();
   expect((await current).snapshot.files.map((entry) => entry.path)).toEqual(["/sessions/current-resource.jsonl"]);
   expect(scans).toBe(1);
+});
+
+test("an ordinary resource snapshot reuses the completed scanner generation", async () => {
+  const before = file("/sessions/completed-resource.jsonl");
+  const after = file("/sessions/gated-resource-refresh.jsonl");
+  scannedFiles = [before];
+  await cachedFileScan();
+  const cacheStore = globalThis as typeof globalThis & {
+    __llvFilesRouteScans?: Map<string, { refreshedAt: number }>;
+  };
+  cacheStore.__llvFilesRouteScans!.get("")!.refreshedAt = 0;
+
+  let release!: () => void;
+  scanGates.push(new Promise<void>((resolve) => { release = resolve; }));
+  scannedFiles = [after];
+  let settled = false;
+  const resourceFiles = readResourceFileSnapshot(false).then((files) => {
+    settled = true;
+    return files;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const scansBeforeRelease = scans;
+  const settledBeforeRelease = settled;
+  release();
+  const files = await resourceFiles;
+
+  expect(scansBeforeRelease).toBe(1);
+  expect(settledBeforeRelease).toBeTrue();
+  expect(files.map((entry) => entry.path)).toEqual([before.path]);
 });
 
 test("concurrent fresh callers share one pending generation through failure and retry", async () => {
@@ -320,7 +350,7 @@ test("a fresh resource snapshot fences a pre-kill refresh before host election",
   const payloadPromise = buildResourceSnapshot(true, {
     readFiles: async (fresh) => {
       filesFresh = fresh;
-      return (await currentFileScan({ fresh, now })).snapshot.files;
+      return readResourceFileSnapshot(fresh);
     },
     readHosts: async (_fresh, entries) => {
       hostEntries = entries;

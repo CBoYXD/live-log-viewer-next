@@ -508,6 +508,21 @@ export async function cachedFileScan(
   return completedScan(slot, undefined, targetGeneration);
 }
 
+/** Returns the latest completed global generation. A missing snapshot joins
+    or starts the shared cold generation so every consumer receives a corpus. */
+export async function completedFileScan(): Promise<CachedFileScan> {
+  const slot = globalFileScanSlot();
+  slot.requestCount = (slot.requestCount ?? 0) + 1;
+  if (slot.snapshot) {
+    return completedScan(slot, undefined, slot.snapshotGeneration);
+  }
+
+  const targetGeneration = slot.refresh?.generation ?? nextGeneration(slot);
+  const refresh = slot.refresh ?? beginFileScanRefresh(slot, targetGeneration, "cold");
+  await refresh.promise;
+  return completedScan(slot, undefined, targetGeneration, "miss");
+}
+
 /** Returns metadata from a completed current generation. The first fresh
     caller reserves a generation beyond existing requests; concurrent fresh
     callers join that pending fence. Older work completes before the fence. */

@@ -1,7 +1,7 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
 import { readFileSync } from "node:fs";
-import { currentFileScan } from "@/lib/scanner/scanCache";
+import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
 import { createFreshAwareCoalescer, type FreshAwareCoalescer } from "@/lib/asyncCoalescer";
 import { descendantPids } from "@/lib/proc/memory";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
@@ -128,11 +128,16 @@ export interface ResourceSnapshotDependencies {
 }
 
 const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
-  readFiles: async (fresh) => (await currentFileScan({ fresh })).snapshot.files,
+  readFiles: readResourceFileSnapshot,
   readHosts: readTranscriptHosts,
   proc: procBackend,
   captureAttachReference: captureTmuxAttachReference,
 };
+
+export async function readResourceFileSnapshot(fresh: boolean): Promise<FileEntry[]> {
+  const scan = fresh ? await currentFileScan({ fresh: true }) : await completedFileScan();
+  return scan.snapshot.files;
+}
 
 /** `fresh` advances the shared file scan and skips the pane/agent-process
     memos. A rebuild triggered right after a kill must use one newer corpus for
