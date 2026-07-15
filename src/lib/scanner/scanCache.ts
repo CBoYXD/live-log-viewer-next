@@ -10,6 +10,13 @@ type FileScanRefresh = {
   generation: number;
   promise: Promise<FileScanSnapshot>;
 };
+type FileScanReason = "cold" | "ordinary" | "pinned" | "revision" | "generation" | "fresh" | "current";
+type FileScanDiagnostic = {
+  generation: number;
+  reason: FileScanReason;
+  status: "complete" | "failed";
+  durationMs: number;
+};
 type PinnedFileScanSnapshot = Pick<CachedFileScan, "snapshot" | "pinOverlayPaths"> & {
   generation: number;
   refreshedAt: number;
@@ -26,6 +33,9 @@ type FileScanCacheSlot = {
   refresh?: FileScanRefresh;
   pinnedSnapshots?: Map<string, PinnedFileScanSnapshot>;
   pinnedGenerations?: Map<string, number>;
+  requestCount?: number;
+  lastScan?: FileScanDiagnostic;
+  ordinaryRefreshRequestedAt?: number;
 };
 
 export type CachedFileScan = {
@@ -33,9 +43,15 @@ export type CachedFileScan = {
   pinOverlayPaths?: string[];
   generation: number;
   targetGeneration: number;
+  cacheStatus: "hit" | "stale" | "miss";
+  requestCount: number;
+  cloneDurationMs: number;
+  lastScan?: FileScanDiagnostic;
 };
 
 const FILE_SCAN_FRESH_MS = 1_000;
+/** Poll-driven attempts share the client's fallback cadence, including failures. */
+const FILE_SCAN_ORDINARY_REFRESH_MS = 10_000;
 const FILE_SCAN_PIN_CACHE_MAX = 8;
 const FILE_SCAN_CACHE_SCHEMA_VERSION = 4 as const;
 const FILE_SCAN_SNAPSHOT_VERSION = 1 as const;
@@ -179,14 +195,36 @@ function normalizeFileScanCacheSlot(value: unknown): FileScanCacheSlot {
   return slot;
 }
 
-function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
+async function instrumentFileScan(
+  slot: FileScanCacheSlot,
+  generation: number,
+  reason: FileScanReason,
+  task: () => Promise<FileScanSnapshot>,
+): Promise<FileScanSnapshot> {
+  const startedAt = performance.now();
+  try {
+    const snapshot = await task();
+    slot.lastScan = { generation, reason, status: "complete", durationMs: performance.now() - startedAt };
+    return snapshot;
+  } catch (error) {
+    slot.lastScan = { generation, reason, status: "failed", durationMs: performance.now() - startedAt };
+    throw error;
+  }
+}
+
+function fileScanRefreshPromise(
+  slot: FileScanCacheSlot,
+  generation: number,
+  reason: FileScanReason,
+): Promise<FileScanSnapshot> {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
-  const promise = listFilesWithProjectCatalog(undefined, {
-    persist: false,
-    persistIndex: true,
-    ...(fresh ? { fresh: true } : {}),
-  }).then((snapshot) => {
+  return instrumentFileScan(slot, generation, reason, async () => {
+    const snapshot = await listFilesWithProjectCatalog(undefined, {
+      persist: false,
+      persistIndex: true,
+      ...(fresh ? { fresh: true } : {}),
+    });
     if (!snapshot.complete) throw new Error("filesystem scan incomplete");
     writePersistedFileScanSnapshot(snapshot);
     slot.snapshot = snapshot;
@@ -198,13 +236,27 @@ function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number): File
     }
     return snapshot;
   });
+}
+
+function beginFileScanRefresh(slot: FileScanCacheSlot, generation: number, reason: FileScanReason): FileScanRefresh {
+  return installFileScanRefresh(slot, generation, fileScanRefreshPromise(slot, generation, reason));
+}
+
+function beginDeferredFileScanRefresh(slot: FileScanCacheSlot, generation: number): FileScanRefresh {
+  const promise = new Promise<void>((resolve) => setImmediate(resolve))
+    .then(() => fileScanRefreshPromise(slot, generation, "ordinary"));
   return installFileScanRefresh(slot, generation, promise);
 }
 
-function beginPinnedFileScanRefresh(slot: FileScanCacheSlot, generation: number, pinnedPath: string): FileScanRefresh {
+function beginPinnedFileScanRefresh(
+  slot: FileScanCacheSlot,
+  generation: number,
+  pinnedPath: string,
+  reason: FileScanReason,
+): FileScanRefresh {
   const fresh = slot.freshObservationGeneration !== undefined
     && generation >= slot.freshObservationGeneration;
-  const promise = (async () => {
+  const promise = instrumentFileScan(slot, generation, reason, async () => {
     const pinnedSnapshot = await listFilesWithProjectCatalog(undefined, {
       persist: false,
       persistIndex: true,
@@ -245,7 +297,7 @@ function beginPinnedFileScanRefresh(slot: FileScanCacheSlot, generation: number,
       slot.freshObservationGeneration = undefined;
     }
     return globalSnapshot;
-  })();
+  });
   return installFileScanRefresh(slot, generation, promise);
 }
 
@@ -253,6 +305,7 @@ async function refreshThroughGeneration(
   slot: FileScanCacheSlot,
   requestedGeneration: number,
   pinnedPath?: string,
+  reason: FileScanReason = "generation",
 ): Promise<FileScanSnapshot> {
   while (
     !slot.snapshot
@@ -260,8 +313,8 @@ async function refreshThroughGeneration(
     || (pinnedPath !== undefined && (slot.pinnedSnapshots?.get(pinnedPath)?.generation ?? -1) < requestedGeneration)
   ) {
     const refresh = slot.refresh ?? (pinnedPath
-      ? beginPinnedFileScanRefresh(slot, requestedGeneration, pinnedPath)
-      : beginFileScanRefresh(slot, requestedGeneration));
+      ? beginPinnedFileScanRefresh(slot, requestedGeneration, pinnedPath, reason)
+      : beginFileScanRefresh(slot, requestedGeneration, reason));
     await refresh.promise;
   }
   return slot.snapshot;
@@ -275,20 +328,38 @@ function cachedPinnedSnapshot(slot: FileScanCacheSlot, pinnedPath: string): Pinn
   return pinned;
 }
 
-function completedScan(slot: FileScanCacheSlot, pinnedPath: string | undefined, targetGeneration: number): CachedFileScan {
+function completedScan(
+  slot: FileScanCacheSlot,
+  pinnedPath: string | undefined,
+  targetGeneration: number,
+  cacheStatus?: CachedFileScan["cacheStatus"],
+): CachedFileScan {
+  const cloneStartedAt = performance.now();
   const pinned = pinnedPath ? cachedPinnedSnapshot(slot, pinnedPath) : undefined;
   if (pinned) {
-    return structuredClone({
+    const completed = structuredClone({
       snapshot: pinned.snapshot,
       pinOverlayPaths: pinned.pinOverlayPaths,
       generation: pinned.generation,
       targetGeneration,
     });
+    return {
+      ...completed,
+      cacheStatus: cacheStatus ?? (completed.generation < targetGeneration ? "stale" : "hit"),
+      requestCount: slot.requestCount ?? 0,
+      cloneDurationMs: performance.now() - cloneStartedAt,
+      ...(slot.lastScan ? { lastScan: { ...slot.lastScan } } : {}),
+    };
   }
+  const snapshot = structuredClone(slot.snapshot!);
   return {
-    snapshot: structuredClone(slot.snapshot!),
+    snapshot,
     generation: slot.snapshotGeneration,
     targetGeneration,
+    cacheStatus: cacheStatus ?? (slot.snapshotGeneration < targetGeneration ? "stale" : "hit"),
+    requestCount: slot.requestCount ?? 0,
+    cloneDurationMs: performance.now() - cloneStartedAt,
+    ...(slot.lastScan ? { lastScan: { ...slot.lastScan } } : {}),
   };
 }
 
@@ -353,6 +424,7 @@ export async function cachedFileScan(
   requiredGeneration?: number,
 ): Promise<CachedFileScan> {
   const slot = globalFileScanSlot();
+  slot.requestCount = (slot.requestCount ?? 0) + 1;
 
   let targetGeneration = requiredGeneration !== undefined && requiredGeneration <= slot.requestedGeneration
     ? requiredGeneration
@@ -374,7 +446,7 @@ export async function cachedFileScan(
     if (pinnedPath) {
       targetGeneration = rememberPinnedGeneration(slot, pinnedPath, requestedGeneration);
     }
-    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath);
+    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath, "revision");
     const clearForcedGeneration = () => {
       if (slot.forcedGeneration === requestedGeneration) {
         slot.forcedRevision = undefined;
@@ -384,7 +456,7 @@ export async function cachedFileScan(
     if (!slot.snapshot) {
       try {
         await refresh;
-        return completedScan(slot, pinnedPath, targetGeneration);
+        return completedScan(slot, pinnedPath, targetGeneration, "miss");
       } finally {
         clearForcedGeneration();
       }
@@ -393,10 +465,11 @@ export async function cachedFileScan(
   }
 
   if (targetGeneration !== undefined) {
-    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath);
-    if (!slot.snapshot) await refresh;
+    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath, "generation");
+    const missesSnapshot = !slot.snapshot;
+    if (missesSnapshot) await refresh;
     else continueRefreshInBackground(refresh);
-    return completedScan(slot, pinnedPath, targetGeneration);
+    return completedScan(slot, pinnedPath, targetGeneration, missesSnapshot ? "miss" : undefined);
   }
 
   /* A pin is an overlay on one global snapshot. The scanner marks every row
@@ -409,24 +482,26 @@ export async function cachedFileScan(
       return completedScan(slot, pinnedPath, pinned.generation);
     }
     targetGeneration = pinnedRefreshGeneration(slot, pinnedPath);
-    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath);
-    if (!slot.snapshot) await refresh;
+    const refresh = refreshThroughGeneration(slot, targetGeneration, pinnedPath, "pinned");
+    const missesSnapshot = !slot.snapshot;
+    if (missesSnapshot) await refresh;
     else continueRefreshInBackground(refresh);
-    return completedScan(slot, pinnedPath, targetGeneration);
+    return completedScan(slot, pinnedPath, targetGeneration, missesSnapshot ? "miss" : undefined);
   }
 
   if (!slot.snapshot) {
     targetGeneration = slot.refresh?.generation ?? nextGeneration(slot);
-    const refresh = slot.refresh ?? beginFileScanRefresh(slot, targetGeneration);
+    const refresh = slot.refresh ?? beginFileScanRefresh(slot, targetGeneration, "cold");
     await refresh.promise;
-    return completedScan(slot, undefined, targetGeneration);
+    return completedScan(slot, undefined, targetGeneration, "miss");
   }
 
   if (slot.refresh) {
     targetGeneration = slot.refresh.generation;
-  } else if (now - slot.refreshedAt >= FILE_SCAN_FRESH_MS) {
+  } else if (now - Math.max(slot.refreshedAt, slot.ordinaryRefreshRequestedAt ?? 0) >= FILE_SCAN_ORDINARY_REFRESH_MS) {
     targetGeneration = nextGeneration(slot);
-    beginFileScanRefresh(slot, targetGeneration);
+    slot.ordinaryRefreshRequestedAt = now;
+    beginDeferredFileScanRefresh(slot, targetGeneration);
   } else {
     targetGeneration = slot.snapshotGeneration;
   }
@@ -443,7 +518,7 @@ export async function currentFileScan(
     const slot = globalFileScanSlot();
     const targetGeneration = slot.freshObservationGeneration ?? nextGeneration(slot);
     slot.freshObservationGeneration = targetGeneration;
-    await refreshThroughGeneration(slot, targetGeneration);
+    await refreshThroughGeneration(slot, targetGeneration, undefined, "fresh");
     return completedScan(slot, undefined, targetGeneration);
   }
 
@@ -451,7 +526,7 @@ export async function currentFileScan(
   if (scan.generation >= scan.targetGeneration) return scan;
 
   const slot = globalFileScanSlot();
-  await refreshThroughGeneration(slot, scan.targetGeneration);
+  await refreshThroughGeneration(slot, scan.targetGeneration, undefined, "current");
   return completedScan(slot, undefined, scan.targetGeneration);
 }
 
