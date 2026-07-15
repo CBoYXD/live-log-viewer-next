@@ -8,8 +8,8 @@ import { StringDecoder } from "node:string_decoder";
 import { completedFileScan, currentFileScan } from "@/lib/scanner/scanCache";
 import {
   createResourceCollector,
+  createResourceDiagnosticTail,
   ResourceCollectorFailureError,
-  RESOURCE_FAILURE_STDERR_MAX_BYTES,
   type ResourceCollectorResult,
   type ResourceDegradedReason,
   type ResourceFailureCause,
@@ -387,9 +387,13 @@ export type CollectedResources = {
 };
 
 const RESOURCE_OBSERVE_TIMEOUT_MS = 30_000;
-const RESOURCE_WORKER_TIMEOUT_MS = 29_500;
-const RESOURCE_WORKER_CLOSE_TIMEOUT_MS = 1_000;
 const RESOURCE_FILE_HANDOFF_TIMEOUT_MS = 500;
+const RESOURCE_WORKER_CLOSE_TIMEOUT_MS = 1_000;
+const RESOURCE_OBSERVE_HEADROOM_MS = 500;
+const RESOURCE_WORKER_TIMEOUT_MS = RESOURCE_OBSERVE_TIMEOUT_MS
+  - RESOURCE_FILE_HANDOFF_TIMEOUT_MS
+  - RESOURCE_WORKER_CLOSE_TIMEOUT_MS
+  - RESOURCE_OBSERVE_HEADROOM_MS;
 const RESOURCE_WORKER_FRAME_HEADROOM_BYTES = 64 * 1_024;
 const RESOURCE_OBSERVATION_SCHEMA_VERSION = 1;
 const RESOURCE_OBSERVATION_FILE = "resources-observation.json";
@@ -400,9 +404,11 @@ const RESOURCE_OBSERVATION_MAX_TARGETS = 10_000;
 const RESOURCE_READER_VERSION = 2;
 
 type ResourceWorkerLimits = Partial<{
+  observeTimeoutMs: number;
   inputTimeoutMs: number;
   timeoutMs: number;
   closeTimeoutMs: number;
+  headroomMs: number;
   outputMaxBytes: number;
 }>;
 
@@ -660,6 +666,12 @@ async function collectResourcesInWorker(
   targetEpoch = globalStore.__llvResourceTargetEpoch ?? 0,
 ): Promise<CollectedResources> {
   const launch = resolveResourceWorkerLaunch();
+  const observeTimeoutMs = limits.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS;
+  const inputTimeoutMs = limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS;
+  const closeTimeoutMs = limits.closeTimeoutMs ?? RESOURCE_WORKER_CLOSE_TIMEOUT_MS;
+  const headroomMs = limits.headroomMs ?? RESOURCE_OBSERVE_HEADROOM_MS;
+  const workerBudgetMs = Math.max(0, observeTimeoutMs - inputTimeoutMs - closeTimeoutMs - headroomMs);
+  const timeoutMs = Math.min(limits.timeoutMs ?? RESOURCE_WORKER_TIMEOUT_MS, workerBudgetMs);
   const filesTask = readFiles(fresh);
   let inputTimer: ReturnType<typeof setTimeout> | undefined;
   const files = await Promise.race([
@@ -669,15 +681,13 @@ async function collectResourcesInWorker(
         "timeout",
         "file-handoff-timeout",
         "resource collector file handoff timed out",
-      )), limits.inputTimeoutMs ?? RESOURCE_FILE_HANDOFF_TIMEOUT_MS);
+      )), inputTimeoutMs);
     }),
   ]).finally(() => {
     if (inputTimer) clearTimeout(inputTimer);
   });
   const request = JSON.stringify({ type: "collect", fresh, files }) + "\n";
   const outputMaxBytes = limits.outputMaxBytes ?? RESOURCE_WORKER_OUTPUT_MAX_BYTES;
-  const timeoutMs = limits.timeoutMs ?? RESOURCE_WORKER_TIMEOUT_MS;
-  const closeTimeoutMs = limits.closeTimeoutMs ?? RESOURCE_WORKER_CLOSE_TIMEOUT_MS;
   if (Buffer.byteLength(request) > RESOURCE_WORKER_OUTPUT_MAX_BYTES) {
     throw new ResourceCollectorFailureError(
       "collector-crash",
@@ -695,25 +705,17 @@ async function collectResourcesInWorker(
     const expectedIdentity = typeof pid === "number" ? procBackend.processIdentity(pid) : null;
     let outcome: (() => void) | null = null;
     let outputBytes = 0;
-    let stderrTail = "";
+    const stderrTail = createResourceDiagnosticTail();
     const stderrDecoder = new StringDecoder("utf8");
     let closeTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupStarted = false;
     let leaderExited = false;
-    const appendStderr = (value: string) => {
-      stderrTail += value;
-      let start = stderrTail.length - (RESOURCE_FAILURE_STDERR_MAX_BYTES * 2);
-      if (start <= 0) return;
-      const first = stderrTail.charCodeAt(start);
-      if (first >= 0xdc00 && first <= 0xdfff) start += 1;
-      stderrTail = stderrTail.slice(start);
-    };
     const workerFailure = (
       reason: ResourceDegradedReason,
       cause: ResourceFailureCause,
       message: string,
       error?: unknown,
-    ) => new ResourceCollectorFailureError(reason, cause, message, { cause: error, stderr: stderrTail });
+    ) => new ResourceCollectorFailureError(reason, cause, message, { cause: error, stderr: stderrTail.value() });
     const sameWorker = () => typeof pid === "number"
       && (expectedIdentity === null || procBackend.processIdentity(pid) === expectedIdentity);
     const workerGroupExists = () => {
@@ -766,7 +768,7 @@ async function collectResourcesInWorker(
     });
     worker.once("close", (code, signal) => {
       clearTimeout(timeout);
-      appendStderr(stderrDecoder.end());
+      stderrTail.append(stderrDecoder.end());
       if (!outcome) {
         outcome = () => reject(workerFailure(
           "collector-crash",
@@ -838,7 +840,7 @@ async function collectResourcesInWorker(
     });
     worker.stderr.on("data", (chunk: Buffer) => {
       outputBytes += chunk.length;
-      appendStderr(stderrDecoder.write(chunk));
+      stderrTail.append(stderrDecoder.write(chunk));
       if (outputBytes > outputMaxBytes) {
         finish(() => reject(workerFailure(
           "collector-crash",
@@ -1009,7 +1011,11 @@ export function createResourcesReader(
       }, captureSystem, false, true);
     }
     const fence = fresh ? collector.fence() : -1;
-    const result = await collector.observe(fence, RESOURCE_OBSERVE_TIMEOUT_MS, fresh);
+    const result = await collector.observe(
+      fence,
+      options.workerLimits?.observeTimeoutMs ?? RESOURCE_OBSERVE_TIMEOUT_MS,
+      fresh,
+    );
     if (result.observation && !result.failure) persist(result.observation);
     return resourceReadFromResult(result, captureSystem, fresh);
   };

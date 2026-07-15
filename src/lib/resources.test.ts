@@ -822,6 +822,59 @@ describe("kill-target allowlist", () => {
 });
 
 describe("resource recurring reads", () => {
+  test("the full scaled deadline settles after maximum handoff and TERM-resistant group cleanup", async () => {
+    const scale = 0.04;
+    const observeTimeoutMs = 30_000 * scale;
+    const inputTimeoutMs = 500 * scale;
+    const timeoutMs = 29_500 * scale;
+    const closeTimeoutMs = 1_000 * scale;
+    const headroomMs = 500 * scale;
+
+    await withResourceWorkerScript((directory) => {
+      const descendantPid = path.join(directory, "deadline-descendant-pid");
+      const ready = path.join(directory, "deadline-descendant-ready");
+      return [
+        `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+        "trap 'exit 0' TERM INT",
+        `sh -c 'trap "" TERM INT; printf "%s" "$$" > "$1"; : > "$2"; while :; do sleep 1; done' sh "${descendantPid}" "${ready}" &`,
+        `while [ ! -e "${ready}" ]; do sleep 0.01; done`,
+        "while :; do sleep 0.01; done",
+      ];
+    }, async (directory) => {
+      const startedAt = performance.now();
+      const read = workerTestReader({
+        readFiles: async () => {
+          await new Promise((resolve) => setTimeout(resolve, inputTimeoutMs));
+          return [];
+        },
+        workerLimits: { observeTimeoutMs, inputTimeoutMs, timeoutMs, closeTimeoutMs, headroomMs },
+      }).read(true);
+      const outerDeadline = Symbol("outer-deadline");
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      const first = await Promise.race([
+        read,
+        new Promise<typeof outerDeadline>((resolve) => {
+          deadlineTimer = setTimeout(() => resolve(outerDeadline), observeTimeoutMs);
+        }),
+      ]);
+      const outcome = first === outerDeadline ? await read : first;
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      const elapsedMs = performance.now() - startedAt;
+      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
+      const descendantPid = Number(readFileSync(path.join(directory, "deadline-descendant-pid"), "utf8"));
+
+      expect(first === outerDeadline).toBeFalse();
+      expect(elapsedMs).toBeLessThan(observeTimeoutMs);
+      expect(outcome).toMatchObject({ diagnostic: {
+        degradedReason: "timeout",
+        failure: { cause: "worker-timeout" },
+      } });
+      expect(processExists(workerPid)).toBeFalse();
+      expect(processExists(descendantPid)).toBeFalse();
+      expect(() => process.kill(-workerPid, 0)).toThrow();
+    });
+  });
+
   test("an exited leader cleans up a TERM-resistant descendant that holds both output pipes", async () => {
     await withResourceWorkerScript((directory) => {
       const descendantPid = path.join(directory, "descendant-pid");
@@ -1023,6 +1076,74 @@ describe("resource recurring reads", () => {
       expect(stderr).not.toContain("split-secret");
       expect(stderr.endsWith("collector-tail-complete")).toBeTrue();
       await expectProcessAbsentAfterQuietInterval(Number(readFileSync(path.join(directory, "pid"), "utf8")), "split stderr worker");
+    });
+  });
+
+  test("a credential longer than the retained stderr window leaks no punctuated value bytes", async () => {
+    const secret = Array.from({ length: 1_000 }, (_, index) => `LEAK${index.toString().padStart(4, "0")}!`).join("");
+    const chunks = [
+      Buffer.from("API_TOKEN="),
+      Buffer.from(secret),
+      Buffer.from("\nsafe diagnostic suffix"),
+    ];
+    const rawOutputBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
+
+    await withResourceWorkerChunks(chunks, async () => {
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { outputMaxBytes: rawOutputBytes },
+      }).read();
+      const stderr = outcome.diagnostic.failure?.stderr ?? "";
+
+      expect(stderr).toContain("API_TOKEN=<redacted>");
+      expect(stderr).toContain("safe diagnostic suffix");
+      expect(stderr).not.toMatch(/LEAK\d{4}/);
+      expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+    });
+  });
+
+  test("split and evicted credential prefixes retain redaction state across stderr chunks", async () => {
+    const splitSecret = "SPLITLEAK!".repeat(700);
+    const evictedKey = `TOKEN${".A".repeat(300)}`;
+    const evictedSecret = "EVICTEDLEAK?".repeat(700);
+    const spacedSecret = "SPACEDLEAK;".repeat(700);
+    const bearerSecret = "BEARERLEAK:".repeat(700);
+    const quotedSecret = "QUOTEDLEAK; ".repeat(700);
+    const chunks = [
+      Buffer.from("AUTHORI"),
+      Buffer.from("ZATION = "),
+      Buffer.from(splitSecret),
+      Buffer.from("\n"),
+      Buffer.from(`${evictedKey}=`),
+      Buffer.from(evictedSecret),
+      Buffer.from("\nPASSWORD" + " ".repeat(600)),
+      Buffer.from("="),
+      Buffer.from(spacedSecret),
+      Buffer.from("\nBearer" + " ".repeat(600)),
+      Buffer.from(bearerSecret),
+      Buffer.from("\nCOOKIE=\""),
+      Buffer.from(quotedSecret),
+      Buffer.from("\""),
+      Buffer.from("\nsafe suffix after all credentials"),
+    ];
+    const rawOutputBytes = chunks.reduce((total, chunk) => total + chunk.length, 0);
+
+    await withResourceWorkerChunks(chunks, async () => {
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { outputMaxBytes: rawOutputBytes },
+      }).read();
+      const stderr = outcome.diagnostic.failure?.stderr ?? "";
+
+      expect(stderr).toContain("AUTHORIZATION=<redacted>");
+      expect(stderr).toContain("<redacted>");
+      expect(stderr).toContain("safe suffix after all credentials");
+      expect(stderr).not.toContain("SPLITLEAK");
+      expect(stderr).not.toContain("EVICTEDLEAK");
+      expect(stderr).not.toContain("SPACEDLEAK");
+      expect(stderr).not.toContain("BEARERLEAK");
+      expect(stderr).not.toContain("QUOTEDLEAK");
+      expect(Buffer.byteLength(stderr)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
     });
   });
 

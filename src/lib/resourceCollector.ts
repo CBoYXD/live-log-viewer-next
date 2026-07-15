@@ -70,6 +70,46 @@ const FAILURE_MESSAGE_MAX_BYTES = 512;
 export const RESOURCE_FAILURE_STDERR_MAX_BYTES = 2_048;
 const FAILURE_CAUSE_MAX_BYTES = 512;
 const FAILURE_CAUSE_MAX_DEPTH = 4;
+const DIAGNOSTIC_REDACTION_CONTEXT_CHARS = 256;
+
+type SensitiveTextMatch = {
+  index: number;
+  length: number;
+  replacement: string;
+  quote: "\"" | "'" | null;
+};
+
+function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
+  const keyed = /\b([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\s*[:=]\s*(?:(["'])|(?=[^"'\s]))/i.exec(value);
+  const bearer = /\b(Bearer)\s+(?=\S)/i.exec(value);
+  const standalone = /\b(?:(?:sk|ghp|github_pat|xox[baprs])[-_A-Za-z0-9]{16,}|[A-Za-z0-9+/_=-]{48,})/i.exec(value);
+  const matches: SensitiveTextMatch[] = [];
+  if (keyed) {
+    matches.push({
+      index: keyed.index,
+      length: keyed[0].length,
+      replacement: `${keyed[1]}=<redacted>`,
+      quote: keyed[2] === "\"" || keyed[2] === "'" ? keyed[2] : null,
+    });
+  }
+  if (bearer) {
+    matches.push({
+      index: bearer.index,
+      length: bearer[0].length,
+      replacement: `${bearer[1]} <redacted>`,
+      quote: null,
+    });
+  }
+  if (standalone) {
+    matches.push({
+      index: standalone.index,
+      length: standalone[0].length,
+      replacement: "<redacted>",
+      quote: null,
+    });
+  }
+  return matches.sort((left, right) => left.index - right.index)[0] ?? null;
+}
 
 function redactDiagnosticText(value: string): string {
   return value
@@ -93,6 +133,122 @@ function boundedDiagnosticText(value: string, maxBytes: number, tail = false): s
   let end = maxBytes;
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
   return bytes.subarray(0, end).toString("utf8");
+}
+
+export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_MAX_BYTES): {
+  append(value: string): void;
+  value(): string;
+} {
+  let sanitizedTail = "";
+  let pending = "";
+  let redacting: "unquoted" | "\"" | "'" | null = null;
+  let carriedCredential: "key" | "value" | null = null;
+  const appendSanitized = (value: string) => {
+    sanitizedTail += value;
+    let start = sanitizedTail.length - (maxBytes * 2);
+    if (start <= 0) return;
+    const first = sanitizedTail.charCodeAt(start);
+    if (first >= 0xdc00 && first <= 0xdfff) start += 1;
+    sanitizedTail = sanitizedTail.slice(start);
+  };
+  const sanitizePending = () => {
+    while (pending) {
+      if (carriedCredential === "value") {
+        const valueStart = pending.search(/\S/);
+        if (valueStart < 0) {
+          pending = "";
+          return;
+        }
+        const quote = pending[valueStart];
+        pending = pending.slice(valueStart + (quote === "\"" || quote === "'" ? 1 : 0));
+        redacting = quote === "\"" || quote === "'" ? quote : "unquoted";
+        carriedCredential = null;
+        continue;
+      }
+      if (carriedCredential === "key") {
+        const completedKey = /^[A-Z0-9_.-]*\s*[:=]\s*(?:(["'])|(?=[^"'\s]))/i.exec(pending);
+        if (completedKey) {
+          appendSanitized("<redacted>");
+          pending = pending.slice(completedKey[0].length);
+          redacting = completedKey[1] === "\"" || completedKey[1] === "'" ? completedKey[1] : "unquoted";
+          carriedCredential = null;
+          continue;
+        }
+        const delimiter = /^[A-Z0-9_.-]*\s*[:=]\s*$/i.exec(pending);
+        if (delimiter) {
+          appendSanitized("<redacted>");
+          pending = "";
+          carriedCredential = "value";
+          return;
+        }
+        if (/^[A-Z0-9_.-]*\s*$/i.test(pending)) {
+          pending = pending.slice(-DIAGNOSTIC_REDACTION_CONTEXT_CHARS);
+          return;
+        }
+        carriedCredential = null;
+      }
+      if (redacting) {
+        const end = redacting === "unquoted" ? pending.search(/\s/) : pending.indexOf(redacting);
+        if (end < 0) {
+          pending = "";
+          return;
+        }
+        pending = pending.slice(end + (redacting === "unquoted" ? 0 : 1));
+        redacting = null;
+        continue;
+      }
+      const match = sensitiveTextMatch(pending);
+      if (match) {
+        appendSanitized(pending.slice(0, match.index) + match.replacement);
+        pending = pending.slice(match.index + match.length);
+        redacting = match.quote ?? "unquoted";
+        continue;
+      }
+      if (pending.length <= DIAGNOSTIC_REDACTION_CONTEXT_CHARS) return;
+      const carriedBearer = /(?:^|[^A-Z0-9_])(Bearer)(\s+)$/i.exec(pending);
+      if (carriedBearer) {
+        const bearerStart = carriedBearer.index + carriedBearer[0].length
+          - carriedBearer[1].length - carriedBearer[2].length;
+        if (bearerStart < pending.length - DIAGNOSTIC_REDACTION_CONTEXT_CHARS) {
+          appendSanitized(pending.slice(0, bearerStart) + `${carriedBearer[1]} <redacted>`);
+          pending = "";
+          carriedCredential = "value";
+          return;
+        }
+      }
+      const carriedKey = /(?:^|[^A-Z0-9_.-])([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)(\s*)(?:([:=])(\s*))?$/i.exec(pending);
+      if (carriedKey) {
+        const keyStart = carriedKey.index + carriedKey[0].length
+          - carriedKey.slice(1).reduce((length, part) => length + (part?.length ?? 0), 0);
+        if (keyStart < pending.length - DIAGNOSTIC_REDACTION_CONTEXT_CHARS) {
+          appendSanitized(pending.slice(0, keyStart));
+          if (carriedKey[3]) {
+            appendSanitized("<redacted>");
+            pending = "";
+            carriedCredential = "value";
+          } else {
+            pending = (carriedKey[1] + carriedKey[2]).slice(-DIAGNOSTIC_REDACTION_CONTEXT_CHARS);
+            carriedCredential = "key";
+          }
+          return;
+        }
+      }
+      appendSanitized(pending.slice(0, -DIAGNOSTIC_REDACTION_CONTEXT_CHARS));
+      pending = pending.slice(-DIAGNOSTIC_REDACTION_CONTEXT_CHARS);
+      return;
+    }
+  };
+
+  return {
+    append(value) {
+      pending += value;
+      sanitizePending();
+    },
+    value() {
+      const suffix = redacting ? "" : pending;
+      return redactDiagnosticText(sanitizedTail + suffix);
+    },
+  };
 }
 
 function diagnosticCauses(error: unknown): string[] {
