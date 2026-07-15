@@ -5,7 +5,7 @@ import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
-import { translate } from "@/lib/i18n";
+import { setLocale, translate } from "@/lib/i18n";
 
 import { appendComposerDraft, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 
@@ -36,6 +36,7 @@ Object.assign(globalThis, {
 const realFetch = globalThis.fetch;
 
 afterEach(() => {
+  setLocale("en");
   globalThis.fetch = realFetch;
   document.body.replaceChildren();
   localStorage.clear();
@@ -180,6 +181,57 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);
+  // #258: the resent message surfaces as an optimistic in-flight bubble, not a
+  // "delivery queued" toast.
+  expect(host.textContent).not.toContain("Queued for durable delivery");
+  expect(host.querySelector('[data-optimistic-message="true"]')?.textContent).toContain("try this again");
+  await act(async () => root.unmount());
+});
+
+/** An in-flight message whose backend reason is an auto-retry (issue #258): the
+    bubble must show a visible busy note, never the raw transport reason. */
+async function renderInterruptAutoRetry(locale: "en" | "uk") {
+  setLocale(locale);
+  return renderInto(
+    <RuntimeComposerReceipts
+      receipts={[{
+        operationId: `op-interrupt-auto-retry-${locale}`,
+        idempotencyKey: `key-interrupt-auto-retry-${locale}`,
+        conversationId: "conv-one",
+        kind: "send",
+        status: "queued",
+        reason: "interrupt-auto-retry",
+        text: "keep going",
+        at: "2026-07-13T00:00:00.000Z",
+        revision: 3,
+      }]}
+      onRetry={() => {}}
+      onEdit={() => {}}
+    />,
+  );
+}
+
+function expectTransportDetailsHidden(host: HTMLElement) {
+  for (const transportText of ["thread/read", "interrupt-auto-retry", "delivery-auto-retry"]) {
+    expect(host.textContent).not.toContain(transportText);
+  }
+}
+
+test("interrupt automatic retry shows visible busy feedback in English", async () => {
+  const { host, root } = await renderInterruptAutoRetry("en");
+  const status = host.querySelector('[role="status"]');
+  expect(status?.textContent).toContain(translate("en", "runtime.receipt.busyRetry"));
+  expect(status?.querySelector(".sr-only")).toBeNull();
+  expectTransportDetailsHidden(host);
+  await act(async () => root.unmount());
+});
+
+test("interrupt automatic retry shows visible busy feedback in Ukrainian", async () => {
+  const { host, root } = await renderInterruptAutoRetry("uk");
+  const status = host.querySelector('[role="status"]');
+  expect(status?.textContent).toContain(translate("uk", "runtime.receipt.busyRetry"));
+  expect(status?.querySelector(".sr-only")).toBeNull();
+  expectTransportDetailsHidden(host);
   await act(async () => root.unmount());
 });
 

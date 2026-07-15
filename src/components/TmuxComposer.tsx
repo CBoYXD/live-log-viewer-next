@@ -22,7 +22,7 @@ import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import { ComposerBar } from "./ComposerBar";
 import { savedResumeProfile } from "./AgentRuntimeControls";
 import { ReceiptChip } from "./runtime/ReceiptChip";
-import { collapseReceipts, mintIdempotencyKey } from "./runtime/runtimeModel";
+import { collapseReceipts, mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
 
 /** The persisted "on resume" runtime profile as a POST body fragment (issue
     #241 §4). `fast` is a codex-only service-tier override. */
@@ -65,6 +65,9 @@ interface SentEntry {
 const SENT_LIMIT = 8;
 const SPAWN_TTL_MS = 90_000;
 const PANE_TTL_MS = 10 * 60_000;
+// Reasons (issue #258) where the backend is auto-retrying a busy agent: the
+// in-flight bubble surfaces a "we'll retry" note instead of a silent pulse.
+const RECOVERABLE_BUSY_RETRY_REASONS = new Set(["delivery-auto-retry", "interrupt-auto-retry"]);
 const sentKey = (id: string) => "llvSent:" + id;
 
 export function deliveryAttemptKey(current: string, stored?: string): string {
@@ -134,9 +137,35 @@ export function RuntimeComposerReceipts({
 }) {
   const { t } = useLocale();
   const { current, history } = collapseReceipts(receipts);
+
+  // #258 correctness fix, folded into the §7 collapse: an in-flight *message*
+  // receipt renders as an optimistic bubble — the user's text echoed at once
+  // with a pending pulse (and a busy-retry note when the backend is auto-retrying
+  // a busy agent) — which is what replaced the old "delivery queued" toast.
+  // Failures and successes still flow through the single collapsed row + history.
+  const currentIsInFlightMessage = Boolean(
+    current
+      && (current.receipt.kind === "send" || current.receipt.kind === "steer")
+      && !receiptIsTerminal(current.receipt.status)
+      && current.receipt.text,
+  );
+  const busyRetry = currentIsInFlightMessage
+    && typeof current!.receipt.reason === "string"
+    && RECOVERABLE_BUSY_RETRY_REASONS.has(current!.receipt.reason);
+
   return (
     <div className="flex w-full flex-col gap-1">
-      {current ? (
+      {current && currentIsInFlightMessage ? (
+        <div className="flex w-full justify-end" data-optimistic-message="true">
+          <div className="flex max-w-[85%] flex-col items-end gap-1 rounded-surface bg-accent/10 px-2.5 py-1.5 text-ui text-primary">
+            <span className="whitespace-pre-wrap break-words text-right">{current.receipt.text}</span>
+            <span className="inline-flex items-center gap-1.5 text-caption text-muted" role="status" aria-live="polite">
+              <span className={busyRetry ? undefined : "sr-only"}>{t(busyRetry ? "runtime.receipt.busyRetry" : "runtime.receipt.pending")}</span>
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-muted motion-reduce:animate-none" aria-hidden />
+            </span>
+          </div>
+        </div>
+      ) : current ? (
         <span className="inline-flex flex-wrap items-center gap-1.5">
           <ReceiptChip
             receipt={current.receipt}
@@ -408,7 +437,7 @@ export function TmuxComposer({
               conversationId: structuredSession.session.conversationId,
               text: payloadText.trim(),
               idempotencyKey: clientMessageId,
-              policy: "steer-if-active",
+              policy: "interrupt-active",
             }).then((result) => ({
               ok: result.ok,
               structured: true,
@@ -458,7 +487,8 @@ export function TmuxComposer({
         idempotencyKey.current = mintIdempotencyKey();
         setText("");
         attachments.clear();
-        setStatus({ kind: "info", text: t("composer.deliveryQueued") });
+        // The optimistic in-flight bubble now carries the "accepted" feedback
+        // (issue #258) — no redundant "delivery queued" toast.
         inputRef.current?.focus();
         return;
       }
@@ -515,7 +545,8 @@ export function TmuxComposer({
         body.receipt!,
         ...current.filter((candidate) => candidate.operationId !== body.receipt!.operationId),
       ].slice(0, 8));
-      setStatus({ kind: "info", text: t("composer.deliveryQueued") });
+      // The retried operation re-surfaces as an in-flight bubble (issue #258);
+      // no redundant "delivery queued" toast.
     } catch {
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
     } finally {
