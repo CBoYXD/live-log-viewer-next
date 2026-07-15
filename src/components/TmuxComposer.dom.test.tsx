@@ -1,13 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
-import { act } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 
 import { setLocale, translate } from "@/lib/i18n";
 import type { FileEntry } from "@/lib/types";
 
-import { appendComposerDraft, mergeRuntimeReceipts, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
+import { appendComposerDraft, RuntimeComposerReceipts, TmuxComposer } from "./TmuxComposer";
 
 const dom = new Window();
 Object.assign(globalThis, {
@@ -131,43 +130,6 @@ test("editing a rejected receipt does not submit the composer form", () => {
   flushSync(() => root.unmount());
 });
 
-test("a failed replacement exposes one retry action for the current attempt", () => {
-  const retried: string[] = [];
-  const original = {
-    operationId: "op-retry-original",
-    idempotencyKey: "key-retry-original",
-    conversationId: "conv-one",
-    kind: "send" as const,
-    status: "failed" as const,
-    reason: "dead-host",
-    text: "try this again",
-    at: "2026-07-13T00:00:00.000Z",
-    revision: 3,
-  };
-  const replacement = {
-    ...original,
-    operationId: "op-retry-replacement",
-    idempotencyKey: "key-retry-replacement",
-    retryOfOperationId: original.operationId,
-  };
-  const host = document.createElement("div");
-  document.body.append(host);
-  const root = createRoot(host);
-  flushSync(() => root.render(
-    <RuntimeComposerReceipts
-      receipts={mergeRuntimeReceipts([original, replacement], [])}
-      onRetry={(receipt) => { retried.push(receipt.operationId); }}
-      onEdit={() => {}}
-    />,
-  ));
-
-  const retryButtons = [...host.querySelectorAll("button")].filter((button) => button.textContent?.includes("Retry"));
-  expect(retryButtons).toHaveLength(1);
-  flushSync(() => retryButtons[0]!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  expect(retried).toEqual([replacement.operationId]);
-  flushSync(() => root.unmount());
-});
-
 test("editing and resending a rejected receipt uses a fresh delivery key", async () => {
   const sentKeys: string[] = [];
   globalThis.fetch = (async (input, init) => {
@@ -245,27 +207,16 @@ test("editing and resending a rejected receipt uses a fresh delivery key", async
   flushSync(() => root.render(<TmuxComposer file={file} />));
 
   const textarea = host.querySelector("textarea") as HTMLTextAreaElement;
-  const submitAndFlush = async () => {
-    const reactTestGlobals = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
-    const previousActEnvironment = reactTestGlobals.IS_REACT_ACT_ENVIRONMENT;
-    reactTestGlobals.IS_REACT_ACT_ENVIRONMENT = true;
-    try {
-      await act(async () => {
-        textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-    } finally {
-      reactTestGlobals.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
-    }
-  };
   expect(textarea.value).toBe("try this again");
-  await submitAndFlush();
+  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(sentKeys).toHaveLength(1);
   const edit = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Edit"));
   expect(edit).toBeDefined();
   flushSync(() => edit!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true }) as unknown as Event));
-  await submitAndFlush();
+  flushSync(() => textarea.closest("form")!.dispatchEvent(new dom.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   expect(sentKeys).toHaveLength(2);
   expect(sentKeys[1]).not.toBe(sentKeys[0]);

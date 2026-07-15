@@ -188,8 +188,6 @@ export interface RuntimeAttention {
 
 export interface RuntimeReceipt {
   operationId: string;
-  /** The terminal attempt this operation replaces, when it was created by Retry. */
-  retryOfOperationId?: string | null;
   idempotencyKey: string;
   conversationId: string;
   kind: OperationKind;
@@ -625,8 +623,8 @@ export function receiptIsTerminal(status: ReceiptStatus): boolean {
 }
 
 /**
- * Mint an idempotency key for a fresh message attempt. Queued and in-flight
- * delivery retains its key; terminal Retry and Edit-and-resend each mint one.
+ * Mint an idempotency key for a fresh message draft. Same key must be reused on
+ * Retry (never re-sends server-side) and replaced on Edit-and-resend.
  */
 export function mintIdempotencyKey(): string {
   try {

@@ -144,15 +144,7 @@ async function postCommand(url: string, body: unknown): Promise<CommandResult> {
       body: JSON.stringify(body),
     });
     const json = (await res.json().catch(() => ({}))) as { operationId?: string; receipt?: RuntimeReceipt; error?: string };
-    if (!res.ok) {
-      return {
-        ok: false,
-        status: res.status,
-        error: json.error,
-        operationId: json.operationId,
-        receipt: json.receipt,
-      };
-    }
+    if (!res.ok) return { ok: false, status: res.status, error: json.error };
     return { ok: true, operationId: json.operationId, receipt: json.receipt, status: res.status };
   } catch {
     return { ok: false, error: "network" };

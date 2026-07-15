@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 import type { RuntimeSessionView } from "@/hooks/useRuntime";
 import { translate } from "@/lib/i18n";
 
@@ -45,9 +44,8 @@ test("the composer follows structured-host gate transitions", () => {
   expect(structuredComposerSession(session)).toBeNull();
 });
 
-test("in-flight retry keeps its delivery key while an interrupted terminal attempt uses a fresh key", () => {
+test("a failed durable receipt retries with its original delivery key", () => {
   expect(deliveryAttemptKey("fresh-key", "held-key")).toBe("held-key");
-  expect(deliveryAttemptKey("after-interrupt", "before-interrupt", true)).toBe("after-interrupt");
   expect(deliveryAttemptKey("fresh-key")).toBe("fresh-key");
 });
 
@@ -66,98 +64,6 @@ test("an immediate retry receipt supersedes an older failed bus receipt", () => 
   const queued = { ...failed, status: "queued" as const, reason: null, revision: 4 };
 
   expect(mergeRuntimeReceipts([failed], [queued])).toEqual([queued]);
-});
-
-test("a persisted replacement receipt supersedes its failed ancestor after reload", () => {
-  const original: RuntimeReceipt = {
-    operationId: "op-original",
-    idempotencyKey: "key-original",
-    conversationId: "conv-one",
-    kind: "send",
-    status: "failed",
-    reason: "engine write failed",
-    text: "try this again",
-    at: "2026-07-13T00:00:00.000Z",
-    revision: 3,
-  };
-  const replacement: RuntimeReceipt = {
-    ...original,
-    operationId: "op-replacement",
-    idempotencyKey: "key-replacement",
-    status: "queued" as const,
-    reason: null,
-    at: "2026-07-13T00:00:01.000Z",
-    revision: 1,
-    retryOfOperationId: original.operationId,
-  };
-
-  expect(mergeRuntimeReceipts([original, replacement], [])).toEqual([replacement]);
-  expect(mergeRuntimeReceipts([original, { ...replacement, status: "delivered", revision: 3 }], []))
-    .toEqual([{ ...replacement, status: "delivered", revision: 3 }]);
-});
-
-test("a failed replacement is the sole retry target across a retry chain", () => {
-  const original: RuntimeReceipt = {
-    operationId: "op-original-chain",
-    idempotencyKey: "key-original-chain",
-    conversationId: "conv-one",
-    kind: "send",
-    status: "failed",
-    reason: "dead-host",
-    text: "keep this exact message",
-    at: "2026-07-13T00:00:00.000Z",
-    revision: 3,
-  };
-  const replacement: RuntimeReceipt = {
-    ...original,
-    operationId: "op-replacement-chain",
-    idempotencyKey: "key-replacement-chain",
-    retryOfOperationId: original.operationId,
-    at: "2026-07-13T00:00:01.000Z",
-  };
-  const receipts = mergeRuntimeReceipts([original, replacement], []);
-
-  const html = renderToStaticMarkup(createElement(RuntimeComposerReceipts, {
-    receipts,
-    onRetry: () => {},
-    onEdit: () => {},
-  }));
-
-  expect(receipts).toEqual([replacement]);
-  expect(html.match(/>Retry</g)?.length).toBe(1);
-
-  const current: RuntimeReceipt = {
-    ...replacement,
-    operationId: "op-current-chain",
-    idempotencyKey: "key-current-chain",
-    status: "queued",
-    reason: null,
-    retryOfOperationId: replacement.operationId,
-    at: "2026-07-13T00:00:02.000Z",
-    revision: 1,
-  };
-  expect(mergeRuntimeReceipts([original, replacement, current], [])).toEqual([current]);
-});
-
-test("unrelated failed operations with identical text stay independently actionable", () => {
-  const first: RuntimeReceipt = {
-    operationId: "op-same-text-one",
-    idempotencyKey: "key-same-text-one",
-    conversationId: "conv-one",
-    kind: "send",
-    status: "failed",
-    reason: "engine write failed",
-    text: "same text",
-    at: "2026-07-13T00:00:00.000Z",
-    revision: 3,
-  };
-  const second: RuntimeReceipt = {
-    ...first,
-    operationId: "op-same-text-two",
-    idempotencyKey: "key-same-text-two",
-  };
-
-  expect(mergeRuntimeReceipts([first, second], [])).toEqual([first, second]);
 });
 
 test("the production runtime receipt list exposes recovery actions for failures", () => {
