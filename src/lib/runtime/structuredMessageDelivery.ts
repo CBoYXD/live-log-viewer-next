@@ -158,10 +158,21 @@ export async function enqueueStructuredMessage(
   const registry = (dependencies.registry ?? agentRegistry)();
   let recoveredHost = false;
   if (session.host === "dead" || session.host === "unhosted") {
-    const recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
-      path: request.path || session.artifactPath || "",
-      conversationId: session.conversationId as ViewerConversationId,
-    }, { registry, client });
+    let recovered;
+    try {
+      recovered = await (dependencies.recover ?? recoverDeadStructuredConversation)({
+        path: request.path || session.artifactPath || "",
+        conversationId: session.conversationId as ViewerConversationId,
+      }, { registry, client });
+    } catch (error) {
+      return {
+        ok: false,
+        structured: true,
+        outcome: "failed",
+        error: error instanceof Error ? error.message : "structured host recovery failed",
+        status: 503,
+      };
+    }
     if (!recovered) return ownershipUnavailable();
     recoveredHost = recovered.spawned;
   }

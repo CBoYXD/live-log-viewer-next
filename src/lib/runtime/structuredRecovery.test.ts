@@ -25,6 +25,7 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const parentPath = path.join(cwd, "parent.jsonl");
   const parent = registry.ensureConversation("codex", parentPath, "retained-account");
+  const reviewed = registry.ensureConversation("codex", path.join(cwd, "reviewed.jsonl"), "retained-account");
   const profile = emptyLaunchProfile({
     cwd,
     model: "gpt-5.6-luna",
@@ -35,6 +36,19 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
     parentConversationId: parent.id,
   });
   const conversation = registry.ensureConversation("codex", artifactPath, "retained-account");
+  const original = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd,
+    accountId: "retained-account",
+    conversationId: conversation.id,
+    parentConversationId: parent.id,
+    parentSessionKey: { engine: "codex", sessionId: "parent-session" },
+    parentArtifactPath: parentPath,
+    role: "reviewer",
+    reviewsConversationId: reviewed.id,
+    launchProfile: profile,
+  });
+  if (original.kind !== "created") throw new Error("expected original lineage receipt");
   registry.upsert({
     key: { engine: "codex", sessionId },
     artifactPath,
@@ -120,7 +134,16 @@ test("dead Codex structured recovery retains ownership and starts a pane-less re
   const lineageEdges = Object.values(registry.snapshot().lineageEdges)
     .filter((edge) => edge.childConversationId === conversation.id);
   expect(lineageEdges).toHaveLength(1);
-  expect(lineageEdges[0]).toMatchObject({ parentConversationId: parent.id, source: "viewer-spawn" });
+  expect(lineageEdges[0]).toMatchObject({
+    parentConversationId: parent.id,
+    parentSessionKey: { engine: "codex", sessionId: "parent-session" },
+    parentArtifactPath: parentPath,
+    kind: "review",
+    role: "reviewer",
+    reviewsConversationId: reviewed.id,
+    source: "viewer-spawn",
+    evidence: { launchId: original.receipt.launchId },
+  });
 });
 
 test("dead Claude structured recovery retains ownership and starts a pane-less resume host", async () => {
@@ -132,6 +155,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
   const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
   const parentPath = path.join(cwd, "reviewed.jsonl");
   const reviewed = registry.ensureConversation("claude", parentPath, "retained-claude-account");
+  const parent = registry.ensureConversation("claude", path.join(cwd, "parent.jsonl"), "retained-claude-account");
   const profile = emptyLaunchProfile({
     cwd,
     model: "claude-opus-5-1",
@@ -141,6 +165,19 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
     parentConversationId: reviewed.id,
   });
   const conversation = registry.ensureConversation("claude", artifactPath, "retained-claude-account");
+  const original = registry.beginSpawnRequest({
+    engine: "claude",
+    cwd,
+    accountId: "retained-claude-account",
+    conversationId: conversation.id,
+    parentConversationId: parent.id,
+    parentSessionKey: { engine: "claude", sessionId: "parent-session" },
+    parentArtifactPath: path.join(cwd, "parent.jsonl"),
+    role: "reviewer",
+    reviewsConversationId: reviewed.id,
+    launchProfile: profile,
+  });
+  if (original.kind !== "created") throw new Error("expected original lineage receipt");
   registry.upsert({
     key: { engine: "claude", sessionId },
     artifactPath,
@@ -192,7 +229,7 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
       expect(structuredResumeSessionId(input)).toBe(sessionId);
       expect(input.receipt).toMatchObject({
         conversationId: conversation.id,
-        parentConversationId: reviewed.id,
+        parentConversationId: parent.id,
         purpose: "resume-successor",
         transport: "structured",
         accountId: "retained-claude-account",
@@ -226,7 +263,108 @@ test("dead Claude structured recovery retains ownership and starts a pane-less r
   const lineageEdges = Object.values(registry.snapshot().lineageEdges)
     .filter((edge) => edge.childConversationId === conversation.id);
   expect(lineageEdges).toHaveLength(1);
-  expect(lineageEdges[0]).toMatchObject({ parentConversationId: reviewed.id, source: "viewer-spawn" });
+  expect(lineageEdges[0]).toMatchObject({
+    parentConversationId: parent.id,
+    parentSessionKey: { engine: "claude", sessionId: "parent-session" },
+    parentArtifactPath: path.join(cwd, "parent.jsonl"),
+    kind: "review",
+    role: "reviewer",
+    reviewsConversationId: reviewed.id,
+    source: "viewer-spawn",
+    evidence: { launchId: original.receipt.launchId },
+  });
+});
+
+test("Codex and Claude worker and root recovery retain their original lineage shape", async () => {
+  for (const engine of ["codex", "claude"] as const) {
+    for (const role of ["worker", "root"] as const) {
+      const sessionId = crypto.randomUUID();
+      const cwd = path.join(sandbox, `${engine}-${role}-${sessionId}`);
+      const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+      fs.mkdirSync(cwd, { recursive: true });
+      fs.writeFileSync(artifactPath, "");
+      const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+      const parentPath = path.join(cwd, "parent.jsonl");
+      const parent = registry.ensureConversation(engine, parentPath, `${engine}-account`);
+      const profile = emptyLaunchProfile({ cwd, parentConversationId: role === "worker" ? parent.id : null, role });
+      const conversation = registry.ensureConversation(engine, artifactPath, `${engine}-account`);
+      if (role === "worker") {
+        const original = registry.beginSpawnRequest({
+          engine,
+          cwd,
+          accountId: `${engine}-account`,
+          conversationId: conversation.id,
+          parentConversationId: parent.id,
+          parentSessionKey: { engine, sessionId: "parent-session" },
+          parentArtifactPath: parentPath,
+          role,
+          launchProfile: profile,
+        });
+        if (original.kind !== "created") throw new Error("expected original worker lineage receipt");
+      }
+      registry.upsert({
+        key: { engine, sessionId },
+        artifactPath,
+        cwd,
+        accountId: `${engine}-account`,
+        launchProfile: profile,
+        status: "dead",
+        host: null,
+        structuredHost: {
+          kind: engine === "codex" ? "codex-app-server" : "claude-broker",
+          endpoint: "stdio:released",
+          process: null,
+          eventCursor: 0,
+          protocolVersion: "v2",
+          writerClaimEpoch: 1,
+          activeTurnRef: null,
+          pendingAttention: [],
+          activeFlags: [],
+        },
+        claimEpoch: 1,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      const account: AccountContext = {
+        engine,
+        accountId: `${engine}-account`,
+        kind: "managed",
+        home: path.join(cwd, "account"),
+        transcriptRoot: cwd,
+        env: { NODE_ENV: "test" },
+      };
+
+      await recoverDeadStructuredConversation({ path: artifactPath, conversationId: conversation.id }, {
+        registry,
+        client: {} as RuntimeHostClient,
+        transport: () => "structured",
+        resolveAccount: () => account,
+        spawn: async (input) => ({
+          ok: true,
+          target: null,
+          path: artifactPath,
+          launchId: input.receipt.launchId,
+          conversationId: conversation.id,
+          launched: true,
+          retrySafe: false,
+          state: "settled",
+        }),
+      });
+
+      const lineage = registry.snapshot().lineageEdges[conversation.id];
+      if (role === "worker") {
+        expect(lineage).toMatchObject({
+          parentConversationId: parent.id,
+          parentSessionKey: { engine, sessionId: "parent-session" },
+          parentArtifactPath: parentPath,
+          kind: "spawn",
+          role: "worker",
+        });
+      } else {
+        expect(lineage).toBeUndefined();
+      }
+    }
+  }
 });
 
 test("live structured ownership prevents a duplicate recovery host", async () => {
