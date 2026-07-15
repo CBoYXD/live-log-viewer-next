@@ -121,29 +121,29 @@ function isoFromUnix(seconds: number): string {
 }
 
 export interface ResourceSnapshotDependencies {
-  readFiles(): Promise<FileEntry[]>;
+  readFiles(fresh: boolean): Promise<FileEntry[]>;
   readHosts(fresh: boolean, entries: FileEntry[]): Promise<TranscriptHostSnapshot>;
   proc: Pick<ProcBackend, "systemMemory" | "ppidMap" | "processMemory">;
   captureAttachReference: typeof captureTmuxAttachReference;
 }
 
 const resourceSnapshotDependencies: ResourceSnapshotDependencies = {
-  readFiles: async () => (await currentFileScan()).snapshot.files,
+  readFiles: async (fresh) => (await currentFileScan({ fresh })).snapshot.files,
   readHosts: readTranscriptHosts,
   proc: procBackend,
   captureAttachReference: captureTmuxAttachReference,
 };
 
-/** `fresh` skips the pane/agent-process memos too, all the way down: a
-    rebuild triggered right after a kill would otherwise read 5s-old caches
-    and re-list (and re-allowlist) the session that was just killed. */
+/** `fresh` advances the shared file scan and skips the pane/agent-process
+    memos. A rebuild triggered right after a kill must use one newer corpus for
+    host ownership, metadata, and the kill allowlist. */
 export async function buildResourceSnapshot(
   fresh: boolean,
   dependencies: ResourceSnapshotDependencies = resourceSnapshotDependencies,
 ): Promise<ResourcesPayload> {
   const system = captureSystemMemory(dependencies.proc);
 
-  const files = await dependencies.readFiles();
+  const files = await dependencies.readFiles(fresh);
   const hosts = await dependencies.readHosts(fresh, files);
   const sessions: ResourceSession[] = [];
   if (hosts.hosts.length > 0) {

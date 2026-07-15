@@ -301,6 +301,28 @@ function pinnedRefreshGeneration(slot: FileScanCacheSlot, pinnedPath: string): n
   return rememberPinnedGeneration(slot, pinnedPath, nextGeneration(slot));
 }
 
+function globalFileScanSlot(): FileScanCacheSlot {
+  const key = "";
+  const cache = fileScanCache();
+  const cachedSlot = cache.get(key);
+  if (cachedSlot === undefined) {
+    const slot: FileScanCacheSlot = {
+      schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
+      snapshot: readPersistedFileScanSnapshot(),
+      snapshotGeneration: 0,
+      requestedGeneration: 0,
+      refreshedAt: 0,
+    };
+    cache.set(key, slot);
+    return slot;
+  }
+
+  const slot = normalizeFileScanCacheSlot(cachedSlot);
+  cache.delete(key);
+  cache.set(key, slot);
+  return slot;
+}
+
 export async function cachedFileScan(
   _selectedProject?: string,
   pinnedPath?: string,
@@ -308,25 +330,7 @@ export async function cachedFileScan(
   requiredRevision?: number,
   requiredGeneration?: number,
 ): Promise<CachedFileScan> {
-  const key = "";
-  const cache = fileScanCache();
-  const cachedSlot = cache.get(key);
-  let slot: FileScanCacheSlot;
-  if (cachedSlot === undefined) {
-    const persisted = readPersistedFileScanSnapshot();
-    slot = {
-      schemaVersion: FILE_SCAN_CACHE_SCHEMA_VERSION,
-      snapshot: persisted,
-      snapshotGeneration: 0,
-      requestedGeneration: 0,
-      refreshedAt: 0,
-    };
-    cache.set(key, slot);
-  } else {
-    slot = normalizeFileScanCacheSlot(cachedSlot);
-    cache.delete(key);
-    cache.set(key, slot);
-  }
+  const slot = globalFileScanSlot();
 
   let targetGeneration = requiredGeneration !== undefined && requiredGeneration <= slot.requestedGeneration
     ? requiredGeneration
@@ -407,16 +411,23 @@ export async function cachedFileScan(
   return completedScan(slot, undefined, targetGeneration);
 }
 
-/** Returns metadata from a completed current generation. Resource snapshots
-    use this path so host ownership can share the files-route scan while still
-    waiting for stale-while-revalidate work to finish. */
-export async function currentFileScan(now = Date.now()): Promise<CachedFileScan> {
+/** Returns metadata from a completed current generation. Fresh resource
+    snapshots reserve a generation beyond every request visible at entry. The
+    shared refresh loop completes older work before satisfying that fence. */
+export async function currentFileScan(
+  { fresh = false, now = Date.now() }: { fresh?: boolean; now?: number } = {},
+): Promise<CachedFileScan> {
+  if (fresh) {
+    const slot = globalFileScanSlot();
+    const targetGeneration = nextGeneration(slot);
+    await refreshThroughGeneration(slot, targetGeneration);
+    return completedScan(slot, undefined, targetGeneration);
+  }
+
   const scan = await cachedFileScan(undefined, undefined, now);
   if (scan.generation >= scan.targetGeneration) return scan;
 
-  const cached = fileScanCache().get("");
-  const slot = normalizeFileScanCacheSlot(cached);
-  fileScanCache().set("", slot);
+  const slot = globalFileScanSlot();
   await refreshThroughGeneration(slot, scan.targetGeneration);
   return completedScan(slot, undefined, scan.targetGeneration);
 }
