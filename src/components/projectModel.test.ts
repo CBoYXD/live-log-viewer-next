@@ -144,6 +144,58 @@ describe("draftWorkingDirectory", () => {
 });
 
 describe("buildBranchGroups", () => {
+  test("keeps a foreign-parent lineage on each conversation's own project board", () => {
+    const foreignRoot = entry({ path: "/latand-root", project: "latand", activity: "live" });
+    const viewerBuilder = entry({
+      path: "/viewer-builder",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: foreignRoot.path,
+      activity: "live",
+    });
+    const viewerReviewer = entry({
+      path: "/viewer-reviewer",
+      project: "viewer",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: viewerBuilder.path,
+      activity: "recent",
+    });
+    const latandFollowup = entry({
+      path: "/latand-followup",
+      project: "latand",
+      root: "codex-sessions",
+      engine: "codex",
+      fmt: "codex",
+      parent: viewerBuilder.path,
+      activity: "live",
+    });
+    const files = [foreignRoot, viewerBuilder, viewerReviewer, latandFollowup];
+
+    const viewerGroups = buildBranchGroups(files, "viewer");
+    expect(viewerGroups).toHaveLength(1);
+    expect(viewerGroups[0]!.key).toBe(viewerBuilder.path);
+    expect(viewerGroups[0]!.columns.map((column) => column.file.path)).toEqual([
+      viewerBuilder.path,
+      viewerReviewer.path,
+    ]);
+
+    const latandGroups = buildBranchGroups(files, "latand");
+    expect(latandGroups.map((group) => group.key).sort()).toEqual([
+      foreignRoot.path,
+      latandFollowup.path,
+    ].sort());
+    expect(latandGroups.find((group) => group.key === foreignRoot.path)!.columns.map((column) => column.file.path)).toEqual([
+      foreignRoot.path,
+    ]);
+    expect(latandGroups.find((group) => group.key === latandFollowup.path)!.columns.map((column) => column.file.path)).toEqual([
+      latandFollowup.path,
+    ]);
+  });
+
   test("a live root promotes its live-owned subagents to connected columns", () => {
     const groups = buildBranchGroups(TREE, "demo");
     expect(groups).toHaveLength(1);

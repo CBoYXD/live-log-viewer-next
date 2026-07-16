@@ -209,6 +209,12 @@ function rootOf(file: FileEntry, byPath: Map<string, FileEntry>): FileEntry {
     seen.add(cur.path);
     const parent = byPath.get(cur.parent);
     if (!parent) break;
+    /* Lineage can deliberately cross project ownership (for example, an LLV
+       builder spawned by a home-root orchestrator). Each project board owns
+       its own visual root; following the foreign parent would duplicate the
+       complete tree on both boards. The durable parent pointer remains on the
+       file for explicit cross-project navigation. */
+    if (projectKey(parent) !== projectKey(file)) break;
     cur = parent;
   }
   return cur;
@@ -233,6 +239,23 @@ export function subtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEn
     const node = stack.pop()!;
     if (seen.has(node.path)) continue;
     seen.add(node.path);
+    out.push(node);
+    stack.push(...(kids.get(node.path) ?? []));
+  }
+  return out;
+}
+
+/** Descendants reachable without crossing the root's project boundary. */
+function projectSubtree(root: FileEntry, kids: Map<string, FileEntry[]>): FileEntry[] {
+  const out: FileEntry[] = [];
+  const stack = [...(kids.get(root.path) ?? [])];
+  const seen = new Set<string>([root.path]);
+  const project = projectKey(root);
+  while (stack.length) {
+    const node = stack.pop()!;
+    if (seen.has(node.path)) continue;
+    seen.add(node.path);
+    if (projectKey(node) !== project) continue;
     out.push(node);
     stack.push(...(kids.get(node.path) ?? []));
   }
@@ -267,7 +290,9 @@ function assembleGroup(
   kids: Map<string, FileEntry[]>,
   expandedConversationPaths?: ReadonlySet<string>,
 ): BranchGroup {
-  const descendants = subtree(root, kids);
+  /* Stop traversal at the first foreign owner so a later same-project node
+     cannot leak through that foreign branch and appear twice. */
+  const descendants = projectSubtree(root, kids);
   const liveRank = (file: FileEntry) => (file.activity === "live" ? 0 : 1);
   /* Every child conversation in an active group renders as a connected node
      below its parent — a claude subagent, a codex child session, a reviewer
