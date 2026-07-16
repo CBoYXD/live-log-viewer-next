@@ -14,8 +14,14 @@ import type {
   QueueEntry,
   RuntimeEvent,
 } from "./engineHost";
-import { RuntimeReplayGapError } from "./engineHost";
-import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import { RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  FileRuntimeEventStore,
+  nextRuntimeEventSequence,
+  reconcileRuntimeEventCursor,
+  type RuntimeEventCursorRecoveryReporter,
+  type RuntimeEventStore,
+} from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {
@@ -70,10 +76,16 @@ export interface CodexAppServerHostOptions {
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
   initialEventCursor?: number;
+  onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
   eventStore?: RuntimeEventStore;
   signalProcess?: ProcessSignal;
+  processIdentity?: (pid: number) => string | null;
+  pidAlive?: (pid: number) => boolean;
 }
+
+type ChildProcessOwnership = "owned" | "gone" | "recycled" | "unknown";
+type TerminationSignalResult = "attempted" | "unsafe";
 
 export interface CodexThreadIdentity {
   threadId: string;
@@ -112,6 +124,8 @@ const MIN_LATE_THREAD_READ_RESPONSE_TTL_MS = 1_000;
 const MAX_LATE_THREAD_READ_RESPONSES = 32;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const MAX_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_PRE_RESTORE_FRAMES = 256;
+const MAX_PRE_RESTORE_BYTES = 4 * 1024 * 1024;
 const MUTATING_RPC_METHODS = new Set(["thread/start", "thread/resume", "turn/start", "turn/steer", "turn/interrupt"]);
 
 function record(value: unknown): JsonObject | null {
@@ -192,6 +206,14 @@ function itemReplayKey(value: unknown): string {
   return `json:${JSON.stringify(value)}`;
 }
 
+function bufferedNotificationReplayKey(event: UnsequencedEvent | RuntimeEvent): string | null {
+  if (event.kind === "delta") return JSON.stringify([event.kind, event.turnId, event.text]);
+  if (event.kind === "attention") {
+    return JSON.stringify([event.kind, event.id, event.method, event.attention]);
+  }
+  return null;
+}
+
 function userMessageText(value: JsonObject): string | null {
   const direct = stringField(value, "text");
   if (direct !== null) return direct;
@@ -231,6 +253,10 @@ export class CodexAppServerHost implements EngineHost {
   private readonly eventStore: RuntimeEventStore;
   private readonly effort: string | undefined;
   private readonly signalProcess: ProcessSignal;
+  private readonly processIdentity: (pid: number) => string | null;
+  private readonly pidAlive: (pid: number) => boolean;
+  private readonly childStartIdentity: string | null;
+  private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
   private readonly pending = new Map<number, PendingRpc>();
   private readonly lateThreadReadResponses = new Map<number, number>();
   private readonly subscribers = new Set<Subscriber>();
@@ -239,9 +265,14 @@ export class CodexAppServerHost implements EngineHost {
   private readonly pendingDeliveries = new Map<string, PendingDelivery>();
   private readonly attentions = new Map<string, PendingAttention>();
   private readonly stateListeners = new Set<(state: HostState) => void>();
-  private readonly preIdentityEvents: UnsequencedEvent[] = [];
+  private readonly preRestoreEvents: UnsequencedEvent[] = [];
+  private readonly preRestoreMessages: Array<{ message: JsonObject; bytes: number }> = [];
+  private readonly bufferedTerminalTurnIds = new Set<string>();
+  private bufferedNotificationOverlap: string[] = [];
   private nextRpcId = 1;
   private stdoutBuffer = "";
+  private preRestoreBytes = 0;
+  private eventLedgerRestored = false;
   private cursor: number;
   private activeTurnId: string | null = null;
   private protocolVersion: string | null = null;
@@ -254,6 +285,9 @@ export class CodexAppServerHost implements EngineHost {
   private reaped = false;
   private terminationStarted = false;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
+  private terminationPromise: Promise<void> | null = null;
+  private resolveTermination: (() => void) | null = null;
+  private failureCleanupTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
   private writerFence: (() => boolean) | null = null;
   private ledgerFailed = false;
@@ -269,6 +303,10 @@ export class CodexAppServerHost implements EngineHost {
     this.eventStore = options.eventStore ?? new FileRuntimeEventStore();
     this.effort = options.effort;
     this.signalProcess = options.signalProcess ?? process.kill;
+    this.processIdentity = options.processIdentity ?? ((pid) => procBackend.processIdentity(pid));
+    this.pidAlive = options.pidAlive ?? ((pid) => procBackend.pidAlive(pid));
+    this.childStartIdentity = child.pid ? this.processIdentity(child.pid) : null;
+    this.onEventCursorRecovery = options.onEventCursorRecovery;
     this.cursor = options.initialEventCursor ?? 0;
     this.reapedPromise = new Promise((resolve) => { this.resolveReaped = resolve; });
     child.stdout.on("data", (chunk: Buffer | string) => this.acceptStdout(String(chunk)));
@@ -279,8 +317,11 @@ export class CodexAppServerHost implements EngineHost {
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
+      this.completeGroupCleanupAfterReap();
       this.resolveReaped();
-      if (!this.releasing && !this.released) {
+      if (this.releasing) {
+        this.startFailureCleanup();
+      } else if (!this.released) {
         if (this.dead) this.notifyStateListeners();
         else this.fail(new Error("Codex app-server child exited"));
       }
@@ -344,12 +385,19 @@ export class CodexAppServerHost implements EngineHost {
       provisional.identity.path = identity.path;
       provisional.rememberConfirmedDeliveries(result);
       provisional.restoreEvents();
+      provisional.beginBufferedNotificationReconciliation();
+      provisional.flushPreRestoreEvents();
+      provisional.flushPreRestoreMessages(threadId ? result : null);
       if (threadId) provisional.reconcileThreadHistory(result);
-      provisional.flushPreIdentityEvents();
       provisional.reconcileAfterOpen(threadStatus(result), resumedActiveTurnId(result));
+      provisional.endBufferedNotificationReconciliation();
       return provisional;
     } catch (error) {
-      await provisional.release();
+      try {
+        await provisional.release();
+      } catch (cleanupError) {
+        throw new StructuredHostAdoptionCleanupError(safeError(error), provisional, { cause: cleanupError });
+      }
       throw new Error(safeError(error));
     }
   }
@@ -479,7 +527,9 @@ export class CodexAppServerHost implements EngineHost {
 
   private currentState(): HostState {
     const pid = this.reaped || this.released ? null : this.child.pid ?? null;
-    const processStartIdentity = pid ? procBackend.processIdentity(pid) : null;
+    const processStartIdentity = pid && this.childProcessOwnership() === "owned"
+      ? this.childStartIdentity
+      : null;
     const status: HostState["status"] = this.dead ? "dead"
       : this.released ? "unhosted"
       : this.attentions.size > 0 ? "attention"
@@ -501,7 +551,14 @@ export class CodexAppServerHost implements EngineHost {
   }
 
   async release(): Promise<void> {
-    this.releasePromise ??= this.releaseAndReap();
+    if (this.released) return;
+    if (!this.releasePromise) {
+      const attempt = this.releaseAndReap();
+      this.releasePromise = attempt;
+      void attempt.catch(() => {
+        if (this.releasePromise === attempt) this.releasePromise = null;
+      });
+    }
     return this.releasePromise;
   }
 
@@ -514,34 +571,123 @@ export class CodexAppServerHost implements EngineHost {
       request.reject(new Error("Codex app-server host released"));
     }
     this.pending.clear();
-    this.startTermination();
+    let terminationStarted = this.startTermination();
+    const initialOwnership = this.childProcessOwnership();
+    if (!this.reaped && (initialOwnership === "gone" || initialOwnership === "recycled")) {
+      await this.finishReleaseAfterGroupCleanup();
+      return;
+    }
+    if (!this.reaped && initialOwnership === "owned" && !terminationStarted) {
+      terminationStarted = this.startTermination();
+    }
+    if (!this.reaped && !terminationStarted) {
+      throw new Error("Codex app-server child ownership is unknown");
+    }
     if (!await this.waitForReap(this.shutdownGraceMs)) {
-      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
-      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      const ownership = this.childProcessOwnership();
+      if (!this.reaped && (ownership === "gone" || ownership === "recycled")) {
+        await this.finishReleaseAfterGroupCleanup();
+        return;
+      }
+      if (!this.reaped && ownership === "unknown") {
+        throw new Error("Codex app-server child ownership is unknown");
+      }
+      this.signalTermination("SIGKILL");
       if (!await this.waitForReap(this.shutdownGraceMs)) {
+        const escalatedOwnership = this.childProcessOwnership();
+        if (!this.reaped && (escalatedOwnership === "gone" || escalatedOwnership === "recycled")) {
+          await this.finishReleaseAfterGroupCleanup();
+          return;
+        }
+        if (!this.reaped && escalatedOwnership === "unknown") {
+          throw new Error("Codex app-server child ownership is unknown");
+        }
         throw new Error("Codex app-server child could not be reaped");
       }
+    }
+    await this.finishReleaseAfterGroupCleanup();
+  }
+
+  private async finishReleaseAfterGroupCleanup(): Promise<void> {
+    await this.terminationPromise;
+    this.finishRelease();
+  }
+
+  private finishRelease(): void {
+    if (this.released) return;
+    if (this.failureCleanupTimer) {
+      clearTimeout(this.failureCleanupTimer);
+      this.failureCleanupTimer = null;
     }
     this.released = true;
     this.releasing = false;
     this.activeTurnId = null;
     this.attentions.clear();
     this.setSessionStatus("unhosted", []);
-    if (this.ledgerFailed) this.notifyStateListeners();
+    if (this.ledgerFailed || !this.eventLedgerRestored) this.notifyStateListeners();
     this.closeSubscribers();
   }
 
-  private startTermination(): void {
-    if (this.terminationStarted) return;
-    this.terminationStarted = true;
+  private completeGroupCleanupAfterReap(): void {
+    if (!this.terminationStarted || !this.resolveTermination) return;
+    if (this.terminationTimer) {
+      clearTimeout(this.terminationTimer);
+      this.terminationTimer = null;
+    }
+    try {
+      if (this.childProcessOwnership() === "gone") {
+        signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      }
+    } finally {
+      this.resolveTermination();
+      this.resolveTermination = null;
+    }
+  }
+
+  private startTermination(): boolean {
+    if (this.terminationStarted) return true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    if (this.reaped) signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
-    else signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
+    const ownership = this.childProcessOwnership();
+    if (ownership === "gone") {
+      signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
+      signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      this.terminationStarted = true;
+      this.terminationPromise = Promise.resolve();
+      return true;
+    }
+    if (ownership !== "owned") return false;
+    if (this.signalTermination("SIGTERM") === "unsafe") return false;
+    this.terminationStarted = true;
+    this.terminationPromise = new Promise((resolve) => { this.resolveTermination = resolve; });
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
-      if (this.reaped) signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
-      else signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
+      try {
+        this.signalTermination("SIGKILL");
+      } finally {
+        this.resolveTermination?.();
+        this.resolveTermination = null;
+      }
     }, this.shutdownGraceMs);
+    return true;
+  }
+
+  private childProcessOwnership(): ChildProcessOwnership {
+    const pid = this.child.pid;
+    if (!pid || !Number.isInteger(pid) || pid <= 0 || !this.pidAlive(pid)) return "gone";
+    const observedIdentity = this.processIdentity(pid);
+    if (this.childStartIdentity === null || observedIdentity === null) return "unknown";
+    return observedIdentity === this.childStartIdentity ? "owned" : "recycled";
+  }
+
+  private signalTermination(signal: NodeJS.Signals): TerminationSignalResult {
+    const ownership = this.childProcessOwnership();
+    if (ownership === "gone") {
+      signalProcessGroup(this.child.pid, signal, this.signalProcess);
+      return "attempted";
+    }
+    if (this.reaped || ownership !== "owned") return "unsafe";
+    signalDetachedProcessGroup(this.child, signal, this.signalProcess);
+    return "attempted";
   }
 
   private async waitForReap(timeoutMs: number): Promise<boolean> {
@@ -559,11 +705,25 @@ export class CodexAppServerHost implements EngineHost {
 
   private emit(event: UnsequencedEvent): void {
     if (this.ledgerFailed) return;
-    if (this.identity.threadId === "pending") {
-      this.preIdentityEvents.push(event);
+    if (!this.eventLedgerRestored) {
+      if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES) {
+        this.ledgerFailed = true;
+        this.failWithoutLedger(new Error("Codex app-server pre-restore event buffer exceeded its bounded capacity"));
+        return;
+      }
+      this.preRestoreEvents.push(event);
       return;
     }
-    const sequenced = { ...event, seq: ++this.cursor } as RuntimeEvent;
+    let nextCursor: number;
+    try {
+      nextCursor = nextRuntimeEventSequence(this.cursor);
+    } catch (error) {
+      this.ledgerFailed = true;
+      this.failWithoutLedger(new Error(safeError(error)));
+      return;
+    }
+    this.cursor = nextCursor;
+    const sequenced = { ...event, seq: nextCursor } as RuntimeEvent;
     try {
       this.eventStore.append(this.identity.threadId, sequenced);
     } catch (error) {
@@ -585,7 +745,12 @@ export class CodexAppServerHost implements EngineHost {
     const currentAttentions = new Map([...this.attentions].filter(([, attention]) => attention.origin === "current"));
     this.attentions.clear();
     this.events.splice(0, this.events.length, ...stored);
-    this.cursor = Math.max(this.cursor, stored.at(-1)?.seq ?? 0);
+    this.cursor = reconcileRuntimeEventCursor(
+      this.identity.threadId,
+      stored.at(-1)?.seq ?? 0,
+      this.cursor,
+      this.onEventCursorRecovery,
+    );
     for (const event of stored) {
       if (event.kind === "turn-started") this.activeTurnId = event.turnId;
       if (event.kind === "turn-ended" && event.turnId === this.activeTurnId) this.activeTurnId = null;
@@ -603,6 +768,7 @@ export class CodexAppServerHost implements EngineHost {
       }
     }
     for (const [id, attention] of currentAttentions) this.attentions.set(id, attention);
+    this.eventLedgerRestored = true;
     return stored.length;
   }
 
@@ -611,7 +777,9 @@ export class CodexAppServerHost implements EngineHost {
     if (resumedStatus.type === "active" && !resumedTurnId) {
       throw new Error("thread/resume returned active status without an active turn id");
     }
-    if (resumedStatus.type === "active" && resumedTurnId && this.activeTurnId !== resumedTurnId) {
+    const resumedTurnTerminalized = resumedTurnId !== null && this.bufferedTerminalTurnIds.has(resumedTurnId);
+    if (resumedStatus.type === "active" && resumedTurnId && !resumedTurnTerminalized
+      && this.activeTurnId !== resumedTurnId) {
       if (this.activeTurnId) this.emit({ kind: "turn-ended", turnId: this.activeTurnId, status: "error" });
       this.activeTurnId = resumedTurnId;
       this.emit({ kind: "turn-started", turnId: resumedTurnId });
@@ -626,45 +794,50 @@ export class CodexAppServerHost implements EngineHost {
       this.attentions.delete(attentionId);
       this.emit({ kind: "attention-resolved", id: attentionId, resolution: "host-restarted" });
     }
-    this.emitThreadStatus(resumedStatus);
+    this.emitThreadStatus(resumedTurnTerminalized && !this.activeTurnId
+      ? { type: "idle", activeFlags: [] }
+      : resumedStatus);
   }
 
   private reconcileThreadHistory(result: unknown): void {
-    for (const turn of resumedTurns(result)) {
-      const turnId = stringField(turn, "id");
-      if (!turnId) continue;
-      const turnEvents = this.events.filter((event) => "turnId" in event && event.turnId === turnId);
-      const status = stringField(turn, "status");
-      const hasStarted = turnEvents.some((event) => event.kind === "turn-started");
-      if (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId)) {
-        this.activeTurnId = turnId;
-        this.emit({ kind: "turn-started", turnId });
-      }
-      const completedItems = new Map<string, number>();
-      for (const event of turnEvents) {
-        if (event.kind !== "item" || event.phase !== "completed") continue;
-        const key = itemReplayKey(event.item);
-        completedItems.set(key, (completedItems.get(key) ?? 0) + 1);
-      }
-      if (Array.isArray(turn.items)) {
-        for (const item of turn.items) {
-          const key = itemReplayKey(item);
-          const recorded = completedItems.get(key) ?? 0;
-          if (recorded > 0) {
-            completedItems.set(key, recorded - 1);
-            continue;
-          }
-          this.emit({ kind: "item", turnId, item, phase: "completed" });
+    for (const turn of resumedTurns(result)) this.reconcileTurnHistory(turn);
+  }
+
+  private reconcileTurnHistory(turn: JsonObject): void {
+    const turnId = stringField(turn, "id");
+    if (!turnId) return;
+    const turnEvents = this.events.filter((event) => "turnId" in event && event.turnId === turnId);
+    const status = stringField(turn, "status");
+    const hasStarted = turnEvents.some((event) => event.kind === "turn-started");
+    if (!this.bufferedTerminalTurnIds.has(turnId)
+      && (!hasStarted || (status === "inProgress" && this.activeTurnId !== turnId))) {
+      this.activeTurnId = turnId;
+      this.emit({ kind: "turn-started", turnId });
+    }
+    const completedItems = new Map<string, number>();
+    for (const event of turnEvents) {
+      if (event.kind !== "item" || event.phase !== "completed") continue;
+      const key = itemReplayKey(event.item);
+      completedItems.set(key, (completedItems.get(key) ?? 0) + 1);
+    }
+    if (Array.isArray(turn.items)) {
+      for (const item of turn.items) {
+        const key = itemReplayKey(item);
+        const recorded = completedItems.get(key) ?? 0;
+        if (recorded > 0) {
+          completedItems.set(key, recorded - 1);
+          continue;
         }
+        this.emit({ kind: "item", turnId, item, phase: "completed" });
       }
-      if (status === "completed" || status === "interrupted" || status === "failed" || status === "error") {
-        const authoritativeStatus = terminalStatus(status);
-        const recordedTerminal = turnEvents.findLast((event) => event.kind === "turn-ended");
-        if (recordedTerminal?.kind !== "turn-ended" || recordedTerminal.status !== authoritativeStatus) {
-          this.emit({ kind: "turn-ended", turnId, status: authoritativeStatus });
-        }
-        if (this.activeTurnId === turnId) this.activeTurnId = null;
+    }
+    if (status === "completed" || status === "interrupted" || status === "failed" || status === "error") {
+      const authoritativeStatus = terminalStatus(status);
+      const recordedTerminal = turnEvents.findLast((event) => event.kind === "turn-ended");
+      if (recordedTerminal?.kind !== "turn-ended" || recordedTerminal.status !== authoritativeStatus) {
+        this.emit({ kind: "turn-ended", turnId, status: authoritativeStatus });
       }
+      if (this.activeTurnId === turnId) this.activeTurnId = null;
     }
   }
 
@@ -757,8 +930,91 @@ export class CodexAppServerHost implements EngineHost {
     }
   }
 
-  private flushPreIdentityEvents(): void {
-    for (const event of this.preIdentityEvents.splice(0)) this.emit(event);
+  private flushPreRestoreEvents(): void {
+    for (const event of this.preRestoreEvents.splice(0)) this.emit(event);
+  }
+
+  private beginBufferedNotificationReconciliation(): void {
+    this.bufferedTerminalTurnIds.clear();
+    const durableKeys: string[] = [];
+    for (const event of this.events) {
+      if (event.kind === "attention" && !this.attentions.has(event.id)) continue;
+      const key = bufferedNotificationReplayKey(event);
+      if (key) durableKeys.push(key);
+    }
+    const bufferedKeys: string[] = [];
+    let activeTurnId = this.activeTurnId;
+    for (const { message } of this.preRestoreMessages) {
+      const method = typeof message.method === "string" ? message.method : null;
+      if (!method) continue;
+      const params = record(message.params) ?? {};
+      const id = message.id;
+      if (typeof id === "number" || typeof id === "string") {
+        const key = bufferedNotificationReplayKey({
+          kind: "attention",
+          id: `${method}:${String(id)}`,
+          method,
+          attention: params,
+        });
+        if (key) bufferedKeys.push(key);
+        continue;
+      }
+      const turnId = turnIdFromParams(params);
+      if (method === "turn/started" && turnId) activeTurnId = turnId;
+      if (method === "item/agentMessage/delta") {
+        const key = bufferedNotificationReplayKey({
+          kind: "delta",
+          turnId: turnId ?? activeTurnId ?? "unknown",
+          text: stringField(params, "delta") ?? "",
+        });
+        if (key) bufferedKeys.push(key);
+      }
+      if (method === "turn/completed" && turnId === activeTurnId) activeTurnId = null;
+    }
+    const maximum = Math.min(durableKeys.length, bufferedKeys.length);
+    let overlap = 0;
+    for (let length = maximum; length > 0; length -= 1) {
+      const durableStart = durableKeys.length - length;
+      if (bufferedKeys.slice(0, length).every((key, index) => key === durableKeys[durableStart + index])) {
+        overlap = length;
+        break;
+      }
+    }
+    this.bufferedNotificationOverlap = bufferedKeys.slice(0, overlap);
+  }
+
+  private consumeBufferedNotification(event: UnsequencedEvent): boolean {
+    const key = bufferedNotificationReplayKey(event);
+    if (!key || this.bufferedNotificationOverlap[0] !== key) {
+      this.bufferedNotificationOverlap = [];
+      return false;
+    }
+    this.bufferedNotificationOverlap.shift();
+    return true;
+  }
+
+  private endBufferedNotificationReconciliation(): void {
+    this.bufferedNotificationOverlap = [];
+    this.bufferedTerminalTurnIds.clear();
+  }
+
+  private flushPreRestoreMessages(resumeResult: unknown | null): void {
+    const turns = new Map(resumedTurns(resumeResult).flatMap((turn) => {
+      const turnId = stringField(turn, "id");
+      return turnId ? [[turnId, turn] as const] : [];
+    }));
+    for (const { message, bytes } of this.preRestoreMessages.splice(0)) {
+      this.preRestoreBytes -= bytes;
+      if (message.method === "turn/completed") {
+        const params = record(message.params) ?? {};
+        const turnId = turnIdFromParams(params);
+        const turn = turnId ? turns.get(turnId) : null;
+        if (turn) this.reconcileTurnHistory(turn);
+      }
+      this.acceptParsedMessage(message, true);
+      if (this.dead || this.releasing || this.released) break;
+    }
+    this.preRestoreBytes = 0;
   }
 
   private notifyStateListeners(): void {
@@ -863,6 +1119,21 @@ export class CodexAppServerHost implements EngineHost {
       this.fail(new Error("Codex app-server emitted malformed JSON-RPC"));
       return;
     }
+    if (typeof message.method === "string" && !this.eventLedgerRestored) {
+      const bytes = Buffer.byteLength(line);
+      if (this.preRestoreEvents.length + this.preRestoreMessages.length >= MAX_PRE_RESTORE_FRAMES
+        || this.preRestoreBytes + bytes > MAX_PRE_RESTORE_BYTES) {
+        this.fail(new Error("Codex app-server pre-restore notification buffer exceeded its bounded capacity"));
+        return;
+      }
+      this.preRestoreMessages.push({ message, bytes });
+      this.preRestoreBytes += bytes;
+      return;
+    }
+    this.acceptParsedMessage(message);
+  }
+
+  private acceptParsedMessage(message: JsonObject, reconcileBufferedLifecycle = false): void {
     const id = message.id;
     const method = typeof message.method === "string" ? message.method : null;
     if ((typeof id === "number" || typeof id === "string") && !method) {
@@ -882,13 +1153,14 @@ export class CodexAppServerHost implements EngineHost {
     if (typeof id === "number" || typeof id === "string") {
       const attentionId = `${method}:${String(id)}`;
       this.attentions.set(attentionId, { rpcId: id, method, origin: "current" });
-      this.emit({ kind: "attention", id: attentionId, method, attention: params });
+      const event = { kind: "attention" as const, id: attentionId, method, attention: params };
+      if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;
     }
-    this.acceptNotification(method, params);
+    this.acceptNotification(method, params, reconcileBufferedLifecycle);
   }
 
-  private acceptNotification(method: string, params: JsonObject): void {
+  private acceptNotification(method: string, params: JsonObject, reconcileBufferedLifecycle = false): void {
     const turnId = turnIdFromParams(params);
     if (method === "serverRequest/resolved") {
       const requestId = params.requestId;
@@ -906,23 +1178,58 @@ export class CodexAppServerHost implements EngineHost {
       return;
     }
     if (method === "turn/started" && turnId) {
+      if (reconcileBufferedLifecycle) {
+        const historicalStart = this.events.some((event) => event.kind === "turn-started" && event.turnId === turnId);
+        const historicalTerminal = this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId);
+        if (historicalStart && (historicalTerminal || this.activeTurnId !== null)) return;
+      }
       this.activeTurnId = turnId;
       this.emit({ kind: "turn-started", turnId });
       return;
     }
     if (method === "item/agentMessage/delta") {
-      this.emit({ kind: "delta", turnId: turnId ?? this.activeTurnId ?? "unknown", text: stringField(params, "delta") ?? "" });
+      const event = {
+        kind: "delta" as const,
+        turnId: turnId ?? this.activeTurnId ?? "unknown",
+        text: stringField(params, "delta") ?? "",
+      };
+      if (!reconcileBufferedLifecycle || !this.consumeBufferedNotification(event)) this.emit(event);
       return;
     }
     if ((method === "item/started" || method === "item/completed") && "item" in params) {
       if (method === "item/completed" && turnId) this.rememberConfirmedDelivery(turnId, params.item);
-      this.emit({ kind: "item", turnId: turnId ?? this.activeTurnId, item: params.item, phase: method === "item/started" ? "started" : "completed" });
+      const eventTurnId = turnId ?? this.activeTurnId;
+      const phase = method === "item/started" ? "started" : "completed";
+      if (reconcileBufferedLifecycle && eventTurnId) {
+        const terminal = this.events.some((event) => event.kind === "turn-ended" && event.turnId === eventTurnId);
+        if (terminal) return;
+        const replayKey = itemReplayKey(params.item);
+        const duplicate = this.events.some((event) => event.kind === "item"
+          && event.turnId === eventTurnId
+          && event.phase === phase
+          && itemReplayKey(event.item) === replayKey);
+        if (duplicate) return;
+        const started = this.events.some((event) => event.kind === "turn-started" && event.turnId === eventTurnId);
+        if (!started) {
+          this.activeTurnId = eventTurnId;
+          this.emit({ kind: "turn-started", turnId: eventTurnId });
+        }
+      }
+      this.emit({ kind: "item", turnId: eventTurnId, item: params.item, phase });
       return;
     }
     if (method === "turn/completed" && turnId) {
-      this.activeTurnId = null;
       const turn = record(params.turn);
-      this.emit({ kind: "turn-ended", turnId, status: terminalStatus(turn?.status) });
+      const status = terminalStatus(turn?.status);
+      if (reconcileBufferedLifecycle) this.bufferedTerminalTurnIds.add(turnId);
+      if (reconcileBufferedLifecycle
+        && this.events.some((event) => event.kind === "turn-ended" && event.turnId === turnId)) return;
+      if (this.activeTurnId === turnId) this.activeTurnId = null;
+      if (reconcileBufferedLifecycle
+        && !this.events.some((event) => event.kind === "turn-started" && event.turnId === turnId)) {
+        this.emit({ kind: "turn-started", turnId });
+      }
+      this.emit({ kind: "turn-ended", turnId, status });
       return;
     }
     if (method === "account/rateLimits/updated") {
@@ -950,7 +1257,7 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.setSessionStatus("dead", activeFlags);
     this.closeSubscribers();
-    this.startTermination();
+    this.startFailureCleanup();
   }
 
   private failWithoutLedger(error: Error): void {
@@ -970,7 +1277,17 @@ export class CodexAppServerHost implements EngineHost {
     this.pending.clear();
     this.notifyStateListeners();
     this.closeSubscribers();
-    this.startTermination();
+    this.startFailureCleanup();
+  }
+
+  private startFailureCleanup(): void {
+    void this.release().catch(() => {
+      if (this.released || this.failureCleanupTimer) return;
+      this.failureCleanupTimer = setTimeout(() => {
+        this.failureCleanupTimer = null;
+        this.startFailureCleanup();
+      }, this.shutdownGraceMs);
+    });
   }
 
   private rejectPendingAnswers(error: Error): void {

@@ -5,8 +5,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { withSpawnCapability, type ResumeSpec } from "@/lib/agent/cli";
-import { AgentRegistry } from "@/lib/agent/registry";
-import { beginRegistryResume, createTranscriptHostResolver, type TranscriptHost } from "@/lib/agent/transcriptHost";
+import { AgentRegistry, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { beginRegistryResume, createTranscriptHostResolver, reconcileObservedTranscriptHosts, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { TmuxDeliveryUncertainError } from "@/lib/tmux";
 import type { AgentProcess } from "@/lib/scanner/process";
 import type { PaneRef, SpawnedPane } from "@/lib/tmux";
@@ -45,6 +45,96 @@ const spec: ResumeSpec = {
   windowName: "codex-resume",
   engine: "codex",
 };
+
+test("stable tmux host reconciliation reads one snapshot without registry mutations", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-host-reconcile-read-"));
+  class CountingRegistry extends AgentRegistry {
+    snapshotCalls = 0;
+    upsertCalls = 0;
+    markUnhostedCalls = 0;
+    reconcileSpawnReceiptCalls = 0;
+
+    override snapshot() {
+      this.snapshotCalls += 1;
+      return super.snapshot();
+    }
+
+    override readOnlySnapshot() {
+      this.snapshotCalls += 1;
+      return super.readOnlySnapshot();
+    }
+
+    override upsert(value: Parameters<AgentRegistry["upsert"]>[0]) {
+      this.upsertCalls += 1;
+      return super.upsert(value);
+    }
+
+    override markUnhosted(value: Parameters<AgentRegistry["markUnhosted"]>[0]) {
+      this.markUnhostedCalls += 1;
+      return super.markUnhosted(value);
+    }
+
+    override reconcileSpawnReceipts(value: Parameters<AgentRegistry["reconcileSpawnReceipts"]>[0]) {
+      this.reconcileSpawnReceiptCalls += 1;
+      return super.reconcileSpawnReceipts(value);
+    }
+
+    resetCounts() {
+      this.snapshotCalls = 0;
+      this.upsertCalls = 0;
+      this.markUnhostedCalls = 0;
+      this.reconcileSpawnReceiptCalls = 0;
+    }
+  }
+  const registry = new CountingRegistry(path.join(directory, "registry.json"));
+  const host: TranscriptHost = {
+    tmuxServerPid: 900,
+    paneId: "%1",
+    panePid: 100,
+    agentPid: 200,
+    display: "agents:4.0",
+    windowName: "codex-resume",
+    engine: "codex",
+    cwd: "/repo",
+    agentArgv: ["codex", "resume", SESSION],
+    agentIdentity: "200:one",
+    launchId: null,
+    claimedPaths: [PATHNAME],
+    primaryPath: PATHNAME,
+  };
+  const evidence: TmuxHostEvidence = {
+    kind: "tmux",
+    endpoint: "/run/user/1000/agent-log-viewer",
+    server: { pid: 900, startIdentity: "900:one" },
+    paneId: "%1",
+    panePid: { pid: 100, startIdentity: "100:one" },
+    windowName: "codex-resume",
+    agent: { pid: 200, startIdentity: "200:one" },
+    argv: host.agentArgv,
+  };
+  registry.upsert({
+    key: { engine: "codex", sessionId: SESSION },
+    artifactPath: PATHNAME,
+    cwd: "/repo",
+    accountId: null,
+    status: "live",
+    host: evidence,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  registry.resetCounts();
+
+  reconcileObservedTranscriptHosts([host], { registry, evidenceForHost: () => evidence });
+
+  expect({
+    snapshot: registry.snapshotCalls,
+    upsert: registry.upsertCalls,
+    markUnhosted: registry.markUnhostedCalls,
+    reconcileSpawnReceipts: registry.reconcileSpawnReceiptCalls,
+  }).toEqual({ snapshot: 1, upsert: 0, markUnhosted: 0, reconcileSpawnReceipts: 0 });
+  fs.rmSync(directory, { recursive: true, force: true });
+});
 
 test("registry resume receives one conversation-bound capability at central actuation", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-resume-capability-"));
@@ -215,6 +305,43 @@ describe("transcript host resolver", () => {
     expect(snapshot.canonicalFor(PATHNAME)?.display).toBe("agents:4.0");
     expect(snapshot.conflicts).toEqual([]);
     expect(state.listFileReads).toBe(0);
+  });
+
+  test("keeps the native child canonical when a launcher wrapper shares its session", async () => {
+    const reconciled: number[][] = [];
+    const { resolver, state } = fakeHost(true, (hosts) => {
+      reconciled.push(hosts.map((host) => host.agentPid));
+      return { quarantinedPaneIds: [] };
+    });
+    state.agents = [
+      { pid: 200, engine: "codex", argv: ["node", "/home/user/.bun/bin/codex", "resume", SESSION], cwd: "/repo", tty: 1 },
+      { pid: 201, engine: "codex", argv: ["/vendor/codex", "resume", SESSION], cwd: "/repo", tty: 1 },
+    ];
+    state.ppids = new Map([[200, 100], [201, 200]]);
+    state.identities = new Map([[200, "200:wrapper"], [201, "201:native"]]);
+    state.entry = { ...state.entry, pid: 200 };
+
+    const wrapperAttributed = await resolver.readTranscriptHosts(true);
+    state.entry = { ...state.entry, pid: 201 };
+    state.agents.reverse();
+    const nativeAttributed = await resolver.readTranscriptHosts(true);
+
+    expect(wrapperAttributed.hosts.map((host) => host.agentPid)).toEqual([201]);
+    expect(wrapperAttributed.canonicalFor(PATHNAME)?.agentPid).toBe(201);
+    expect(nativeAttributed.hosts.map((host) => host.agentPid)).toEqual([201]);
+    expect(nativeAttributed.canonicalFor(PATHNAME)?.agentPid).toBe(201);
+    expect(reconciled).toEqual([[201], [201]]);
+  });
+
+  test("keeps parallel same-session processes visible when neither wraps the other", async () => {
+    const { resolver, state } = fakeHost();
+    state.agents.push({ pid: 201, engine: "codex", argv: ["/vendor/codex", "resume", SESSION], cwd: "/repo", tty: 1 });
+    state.ppids.set(201, 100);
+    state.identities.set(201, "201:parallel");
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+
+    expect(snapshot.hosts.map((host) => host.agentPid)).toEqual([200, 201]);
   });
 
   test("carries the pane launch marker into observation reconciliation", async () => {
@@ -422,6 +549,24 @@ describe("transcript host resolver", () => {
       status: 409,
     });
     expect(state.spawnCalls).toBe(0);
+  });
+
+  test("a recycled scanner pid stays orphaned while current argv ownership remains canonical", async () => {
+    const { resolver, state } = fakeHost();
+    state.agents[0] = {
+      ...state.agents[0]!,
+      argv: ["codex", "resume", "00000000-0000-0000-0000-000000000000"],
+    };
+    state.panes.set(101, { paneId: "%2", target: "agents:6.0" });
+    state.agents.push({ pid: 201, engine: "codex", argv: ["codex", "resume", SESSION], cwd: "/repo", tty: 1 });
+    state.ppids.set(201, 101);
+    state.identities.set(201, "201:one");
+
+    const snapshot = await resolver.readTranscriptHosts(true);
+
+    expect(snapshot.hosts.find((host) => host.agentPid === 200)?.primaryPath).toBeNull();
+    expect(snapshot.canonicalFor(PATHNAME)?.agentPid).toBe(201);
+    expect(snapshot.conflicts).toEqual([]);
   });
 
   test("reports resumed to a joined sender that owns recovery after the live host exits", async () => {

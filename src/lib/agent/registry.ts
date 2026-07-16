@@ -102,6 +102,7 @@ export interface AgentRegistryEntry {
   claimEpoch: number;
   claimOwner: string | null;
   pendingAction: "spawn" | "resume" | "handoff" | null;
+  structuredHostOperationId?: string | null;
   updatedAt: string;
 }
 
@@ -711,6 +712,10 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
   if (!value || typeof value !== "object") return null;
   const host = value as Partial<StructuredHostColumns>;
   if (host.kind !== "codex-app-server" && host.kind !== "claude-broker") return null;
+  const eventCursor = (value as Record<string, unknown>).eventCursor;
+  if (eventCursor !== undefined && (!Number.isSafeInteger(eventCursor) || (eventCursor as number) < 0)) {
+    throw new Error("structured host event cursor is invalid");
+  }
   const processIdentity = host.process && typeof host.process === "object"
     && typeof host.process.pid === "number"
     ? { pid: host.process.pid, startIdentity: typeof host.process.startIdentity === "string" ? host.process.startIdentity : null }
@@ -719,7 +724,7 @@ function normalizeStructuredHost(value: unknown): StructuredHostColumns | null {
     kind: host.kind,
     endpoint: typeof host.endpoint === "string" ? host.endpoint : "",
     process: processIdentity,
-    eventCursor: Number.isSafeInteger(host.eventCursor) && (host.eventCursor ?? -1) >= 0 ? host.eventCursor! : 0,
+    eventCursor: eventCursor === undefined ? 0 : eventCursor as number,
     protocolVersion: typeof host.protocolVersion === "string" ? host.protocolVersion : null,
     writerClaimEpoch: Number.isSafeInteger(host.writerClaimEpoch) && (host.writerClaimEpoch ?? -1) >= 0 ? host.writerClaimEpoch! : 0,
     activeTurnRef: typeof host.activeTurnRef === "string" ? host.activeTurnRef : null,
@@ -1259,13 +1264,28 @@ export function normalizeRegistry(value: unknown): RegistryFile {
   };
 }
 
-function readFile(filename: string): RegistryFile {
+function readFileWithPayload(filename: string): { file: RegistryFile; payload: string | null } {
   try {
-    return normalizeRegistry(JSON.parse(fs.readFileSync(filename, "utf8")));
+    const payload = fs.readFileSync(filename, "utf8");
+    return { file: normalizeRegistry(JSON.parse(payload)), payload };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return clone(EMPTY);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { file: clone(EMPTY), payload: null };
     if (error instanceof RegistryReadError) throw error;
     throw new RegistryReadError(`agent registry cannot be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function readFile(filename: string): RegistryFile {
+  return readFileWithPayload(filename).file;
+}
+
+function registryFileSignature(filename: string): string {
+  try {
+    const stat = fs.statSync(filename, { bigint: true });
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw new RegistryReadError(`agent registry cannot be stated: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -1303,10 +1323,9 @@ function serializeRegistry(value: RegistryFile, sqliteRevision?: number): string
   return JSON.stringify(storage) + "\n";
 }
 
-function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
+function writeAtomicPayload(filename: string, payload: string): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const payload = serializeRegistry(value, sqliteRevision);
   let fd: number | null = null;
   try {
     fd = fs.openSync(temp, "w", 0o600);
@@ -1321,6 +1340,10 @@ function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: num
     if (fd !== null) fs.closeSync(fd);
     try { fs.unlinkSync(temp); } catch { /* rename completed */ }
   }
+}
+
+function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
+  writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision));
 }
 
 export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
@@ -1371,6 +1394,7 @@ export class AgentRegistry {
   private readonly sqliteMode: AgentRegistrySqliteMode;
   private readonly sqliteStore: SqliteAgentRegistryStore | null;
   private readonly beforeDualWriteMutationReplace: (() => void) | undefined;
+  private readOnlyCache: { signature: string; snapshot: RegistryFile } | null = null;
 
   constructor(
     readonly filename = statePath("agent-registry.json"),
@@ -1858,10 +1882,14 @@ export class AgentRegistry {
         }
         this.assertSqliteParity(sqlite);
       }
-      const file = readFile(this.filename);
+      const original = readFileWithPayload(this.filename);
+      const file = original.file;
       const result = fn(file);
-      writeAtomic(this.filename, file);
-      if (sqlite) {
+      const payload = serializeRegistry(file);
+      const changed = original.payload !== payload;
+      if (changed) writeAtomicPayload(this.filename, payload);
+      if (sqlite && !changed) this.assertSqliteParity();
+      if (sqlite && changed) {
         this.beforeDualWriteMutationReplace?.();
         const replacement = this.sqliteStore!.replace(file, sqlite.revision);
         if (!replacement.replaced) {
@@ -1884,9 +1912,26 @@ export class AgentRegistry {
       : readFile(this.filename);
   }
 
+  /** Shared process-local snapshot for projections that never mutate registry
+      objects. Atomic writers change the inode/signature, including writers in
+      the runtime-host process, so the next reader reparses immediately. */
+  readOnlySnapshot(): RegistryFile {
+    if (this.sqliteMode === "read" || this.sqliteMode === "sqlite") return this.sqliteStore!.snapshot().file;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = registryFileSignature(this.filename);
+      if (this.readOnlyCache?.signature === before) return this.readOnlyCache.snapshot;
+      const snapshot = readFile(this.filename);
+      const after = registryFileSignature(this.filename);
+      if (before !== after) continue;
+      this.readOnlyCache = { signature: after, snapshot };
+      return snapshot;
+    }
+    return readFile(this.filename);
+  }
+
   conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {
     if (!/^[0-9a-f]{64}$/.test(digest)) return null;
-    const file = this.snapshot();
+    const file = this.readOnlySnapshot();
     const receipt = Object.values(file.receipts).find((candidate) => candidate.spawnCapabilityDigest === digest);
     return receipt ? resolveConversationAlias(file, receipt.conversationId) : null;
   }
@@ -2377,7 +2422,10 @@ export class AgentRegistry {
     return this.mutate((file) => {
       const paths = new Set([entry.artifactPath]);
       const signature = migrationReadinessSignature(file, entry.key.engine, paths);
-      const staged = this.settleSpawnInFile(file, launchId, entry, "route-completed", false);
+      const staged = this.settleSpawnInFile(file, launchId, {
+        ...entry,
+        structuredHostOperationId: launchId,
+      }, "route-completed", false);
       advanceMigrationScopeRevision(file, entry.key.engine, signature, paths);
       return staged;
     });
@@ -2393,6 +2441,12 @@ export class AgentRegistry {
       if (!receipt.key || !receipt.artifactPath) throw new Error("structured spawn identity is incomplete");
       const entry = file.entries[sessionKeyId(receipt.key)];
       const conversation = file.conversations[receipt.conversationId];
+      if (entry && typeof entry.structuredHostOperationId === "string"
+        && entry.structuredHostOperationId !== launchId) {
+        receipt.state = "conflicted";
+        receipt.error = "spawn_identity_conflict";
+        return { kind: "conflict", receipt: clone(receipt), code: "spawn_identity_conflict" };
+      }
       if (!entry || !conversation
         || entry.artifactPath !== receipt.artifactPath
         || !entry.structuredHost?.process
@@ -2487,17 +2541,30 @@ export class AgentRegistry {
       if (!receipt.key || !receipt.artifactPath) return;
       const entry = file.entries[sessionKeyId(receipt.key)];
       if (!entry || entry.artifactPath !== receipt.artifactPath) return;
+      if (typeof entry.structuredHostOperationId === "string"
+        && entry.structuredHostOperationId !== launchId) return;
+      const preservesResumeCursor = receipt.purpose === "resume-successor"
+        && receipt.resumeSourcePath === receipt.artifactPath
+        && (entry.structuredHost?.eventCursor ?? 0) > 0;
+      const terminalStructuredHost = preservesResumeCursor && entry.structuredHost ? {
+        ...entry.structuredHost,
+        endpoint: "stdio:released",
+        process: null,
+        activeTurnRef: null,
+        pendingAttention: [],
+        activeFlags: [],
+      } : null;
       const changedHostPaths = activeHostPathsChangedByEntry(file, sessionKeyId(receipt.key), {
         ...entry,
         host: null,
-        structuredHost: null,
+        structuredHost: terminalStructuredHost,
         status: "dead",
         claimOwner: null,
         pendingAction: null,
       });
       const readinessBefore = migrationReadinessSignature(file, receipt.key.engine, changedHostPaths);
       entry.host = null;
-      entry.structuredHost = null;
+      entry.structuredHost = terminalStructuredHost;
       entry.status = "dead";
       entry.claimOwner = null;
       entry.pendingAction = null;
@@ -2585,14 +2652,16 @@ export class AgentRegistry {
       const conversation = file.conversations[conversationId];
       const keyId = sessionKeyId(key);
       const entry = file.entries[keyId];
+      const structuredProcess = entry?.structuredHost?.process ?? null;
+      const staleStructuredWrapper = structuredProcess !== null && !this.ownerAlive(structuredProcess);
       if (!conversation
         || conversation.engine !== key.engine
         || !conversation.generations.some((generation) => generation.id === key.sessionId)
         || !entry
         || entry.host
-        || entry.structuredHost?.process
-        || entry.claimOwner
-        || (entry.status !== "dead" && entry.status !== "unhosted")) return false;
+        || (structuredProcess !== null && !staleStructuredWrapper)
+        || (entry.claimOwner && !staleStructuredWrapper)
+        || (!staleStructuredWrapper && entry.status !== "dead" && entry.status !== "unhosted")) return false;
       const replacement = {
         ...entry,
         host: null,
@@ -2745,8 +2814,10 @@ export class AgentRegistry {
   }
 
   resumePanes(serverPid: number): Map<string, ResumePaneRecord> {
-    const saved = this.snapshot().legacyResumePanes;
-    return saved.serverPid === serverPid ? new Map(Object.entries(saved.panes)) : new Map();
+    const saved = this.readOnlySnapshot().legacyResumePanes;
+    return saved.serverPid === serverPid
+      ? new Map(Object.entries(saved.panes).map(([pathname, record]) => [pathname, clone(record)]))
+      : new Map();
   }
 
   rememberResumePane(serverPid: number, pathname: string, record: ResumePaneRecord): void {
@@ -3015,20 +3086,23 @@ export class AgentRegistry {
   }
 
   conversationForPath(artifactPath: string): RegistryConversation | null {
-    return Object.values(this.snapshot().conversations).find((conversation) => conversationOwnsPath(conversation, artifactPath)) ?? null;
+    const conversation = Object.values(this.readOnlySnapshot().conversations)
+      .find((candidate) => conversationOwnsPath(candidate, artifactPath));
+    return conversation ? clone(conversation) : null;
   }
 
   canonicalConversationId(id: ViewerConversationId): ViewerConversationId {
-    return resolveConversationAlias(this.snapshot(), id);
+    return resolveConversationAlias(this.readOnlySnapshot(), id);
   }
 
   conversation(id: ViewerConversationId): RegistryConversation | null {
-    const snapshot = this.snapshot();
-    return snapshot.conversations[resolveConversationAlias(snapshot, id)] ?? null;
+    const snapshot = this.readOnlySnapshot();
+    const conversation = snapshot.conversations[resolveConversationAlias(snapshot, id)];
+    return conversation ? clone(conversation) : null;
   }
 
   launchProfileForPath(artifactPath: string): LaunchProfile | null {
-    const snapshot = this.snapshot();
+    const snapshot = this.readOnlySnapshot();
     for (const conversation of Object.values(snapshot.conversations)) {
       const generation = conversation.generations.find((item) => item.path === artifactPath);
       if (generation) return clone(generation.launchProfile);
@@ -3056,11 +3130,11 @@ export class AgentRegistry {
   }
 
   engineRouting(engine: Extract<AgentEngine, "claude" | "codex">): { activeAccountId: string | null; revision: number } {
-    return clone(this.snapshot().engineRouting[engine]);
+    return clone(this.readOnlySnapshot().engineRouting[engine]);
   }
 
   migrationScope(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string): MigrationScopeCounts {
-    return migrationScopeCounts(this.snapshot(), engine, targetId);
+    return migrationScopeCounts(this.readOnlySnapshot(), engine, targetId);
   }
 
   retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
@@ -3506,11 +3580,11 @@ export class AgentRegistry {
   }
 
   autoBalancePolicy(engine: Extract<AgentEngine, "claude" | "codex">): AutoBalancePolicy {
-    return clone(this.snapshot().autoBalance[engine]);
+    return clone(this.readOnlySnapshot().autoBalance[engine]);
   }
 
   quotaObservations(engine: Extract<AgentEngine, "claude" | "codex">): DurableQuotaObservation[] {
-    return clone(Object.values(this.snapshot().quotaObservations[engine]));
+    return clone(Object.values(this.readOnlySnapshot().quotaObservations[engine]));
   }
 
   recordQuotaEvaluation(input: {
@@ -3646,11 +3720,11 @@ export class AgentRegistry {
   }
 
   pendingDeliveries(conversationId: ViewerConversationId): HeldDelivery[] {
-    const snapshot = this.snapshot();
+    const snapshot = this.readOnlySnapshot();
     const canonicalId = resolveConversationAlias(snapshot, conversationId);
-    return Object.values(snapshot.heldDeliveries)
+    return clone(Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)));
   }
 
   compactDeliveryReservations(): number {

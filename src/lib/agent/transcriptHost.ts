@@ -1,10 +1,12 @@
+import { isDeepStrictEqual } from "node:util";
+
 import type { ResumeSpec } from "@/lib/agent/cli";
-import { agentRegistry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
+import { agentRegistry, type AgentRegistry, type AgentRegistryEntry, type SpawnReceipt, type TmuxHostEvidence } from "@/lib/agent/registry";
 import { sessionKeyFromTranscript } from "@/lib/agent/sessionKey";
 import { procBackend } from "@/lib/proc";
 import { descendantPids } from "@/lib/proc/memory";
 import { listFiles } from "@/lib/scanner";
-import { agentProcesses, argvEngine, pidAlive, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
+import { agentProcesses, argvEngine, pidAlive, pidHoldsPath, readArgv, readPpid, type AgentProcess } from "@/lib/scanner/process";
 import {
   panePidMap,
   panePidOf,
@@ -82,7 +84,7 @@ export type HostDeliveryOutcome =
   | { ok: false; outcome: "failed"; error: string; status: number; actuation?: "started" };
 
 export interface TranscriptHostResolver {
-  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[]): Promise<TranscriptHostSnapshot>;
+  readTranscriptHosts(fresh?: boolean, entries?: FileEntry[], ppids?: Map<number, number>): Promise<TranscriptHostSnapshot>;
   deliverToTranscriptHost(input: { entry: FileEntry; spec: ResumeSpec; payload: string }): Promise<HostDeliveryOutcome>;
 }
 
@@ -90,32 +92,48 @@ const globalStore = globalThis as unknown as {
   __llvTranscriptHostDecisions?: Map<string, Promise<Decision>>;
 };
 
-interface HostDependencies {
+export interface TranscriptHostObservationDependencies {
   listFiles: () => Promise<FileEntry[]>;
   panes: (fresh: boolean) => Promise<PaneObservation>;
   ppidMap: () => Map<number, number>;
   agents: (fresh: boolean) => AgentProcess[];
   serverPid: () => Promise<number | null>;
   resumeRecords: () => ReturnType<typeof resumePaneRecords>;
+  identity: (pid: number) => string | null;
+  holdsPath?: (pid: number, pathname: string) => boolean;
+  launchId?: (paneId: string) => Promise<string | null>;
+  conversationIdForPath?: (pathname: string) => string | null;
+  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
+}
+
+interface HostDependencies extends TranscriptHostObservationDependencies {
   panePid: (paneId: string) => Promise<number | null>;
   paneWindowName?: (paneId: string) => Promise<string | null>;
   alive: (pid: number) => boolean;
   argv: (pid: number) => string[];
   parentPid: (pid: number) => number | null;
-  identity: (pid: number) => string | null;
   spawn: (spec: ResumeSpec, text: string, receipt?: SpawnReceipt) => Promise<SpawnedPane>;
   beginResume?: (entry: FileEntry, spec: ResumeSpec) => { receipt: SpawnReceipt; spec: ResumeSpec } | null;
   remember: (pathname: string, spec: ResumeSpec, pane: SpawnedPane) => Promise<void>;
   deliver: (paneId: string, text: string) => Promise<void>;
   confirmAlive?: (host: TranscriptHost) => void | Promise<void>;
-  launchId?: (paneId: string) => Promise<string | null>;
-  conversationIdForPath?: (pathname: string) => string | null;
-  reconcile?: (hosts: TranscriptHost[]) => HostReconciliation | void | Promise<HostReconciliation | void>;
   serializeDelivery?: (entry: FileEntry, task: () => Promise<HostDeliveryOutcome>) => Promise<HostDeliveryOutcome>;
 }
 
 interface HostReconciliation {
   quarantinedPaneIds: string[];
+}
+
+export interface TranscriptHostRegistryReconciliationDependencies {
+  registry: Pick<AgentRegistry,
+    | "snapshot"
+    | "readOnlySnapshot"
+    | "confirmSpawnPaneAlive"
+    | "completeObservedSpawn"
+    | "upsert"
+    | "markUnhosted"
+    | "reconcileSpawnReceipts">;
+  evidenceForHost: (host: TranscriptHost) => TmuxHostEvidence;
 }
 
 interface HostClaim {
@@ -177,10 +195,18 @@ function claimsForAgent(
   entriesByPid: Map<number, FileEntry>,
   entriesByUuid: Map<string, FileEntry>,
   records: Awaited<ReturnType<typeof resumePaneRecords>>,
+  holdsPath: (pid: number, pathname: string) => boolean,
 ): HostClaim[] {
   const claims: HostClaim[] = [];
   const direct = entriesByPid.get(agent.pid);
-  if (direct?.engine === agent.engine) claims.push({ pathname: direct.path, source: "scanner" });
+  const argvUuid = argvSessionUuid(agent.argv);
+  const directUuid = direct ? sessionUuid(direct.path) : null;
+  if (direct?.engine === agent.engine && (
+    (argvUuid !== null && directUuid !== null && argvUuid === directUuid)
+    || holdsPath(agent.pid, direct.path)
+  )) {
+    claims.push({ pathname: direct.path, source: "scanner" });
+  }
 
   if (records) {
     for (const [pathname, record] of records.records) {
@@ -194,14 +220,56 @@ function claimsForAgent(
     }
   }
 
-  const byArgv = argvSessionUuid(agent.argv);
-  const matched = byArgv ? entriesByUuid.get(byArgv) : undefined;
+  const matched = argvUuid ? entriesByUuid.get(argvUuid) : undefined;
   if (matched?.engine === agent.engine) claims.push({ pathname: matched.path, source: "argv" });
   return claims;
 }
 
 function primaryClaim(claims: HostClaim[]): HostClaim | null {
   return [...claims].sort((left, right) => CLAIM_RANK[right.source] - CLAIM_RANK[left.source] || left.pathname.localeCompare(right.pathname))[0] ?? null;
+}
+
+function ancestryDepth(pid: number, ancestor: number, ppids: Map<number, number>): number {
+  const seen = new Set<number>();
+  let cursor: number | null = pid;
+  for (let depth = 0; cursor !== null && depth < MAX_ANCESTRY_HOPS; depth += 1) {
+    if (cursor === ancestor) return depth;
+    if (seen.has(cursor)) return -1;
+    seen.add(cursor);
+    cursor = ppids.get(cursor) ?? null;
+  }
+  return -1;
+}
+
+function collapseSameSessionWrappers(hosts: ObservedHost[], ppids: Map<number, number>): ObservedHost[] {
+  const groups = new Map<string, { firstIndex: number; hosts: ObservedHost[] }>();
+  hosts.forEach((host, index) => {
+    const sessionId = argvSessionUuid(host.agentArgv);
+    const key = sessionId
+      ? `${host.paneId}:${host.engine}:${sessionId}`
+      : `${host.paneId}:${host.engine}:pid:${host.agentPid}`;
+    const group = groups.get(key) ?? { firstIndex: index, hosts: [] };
+    group.hosts.push(host);
+    groups.set(key, group);
+  });
+  return [...groups.values()]
+    .sort((left, right) => left.firstIndex - right.firstIndex)
+    .flatMap((group) => {
+      if (group.hosts.length === 1) return group.hosts;
+      const selected = [...group.hosts].sort((left, right) =>
+        ancestryDepth(right.agentPid, right.panePid, ppids) - ancestryDepth(left.agentPid, left.panePid, ppids)
+        || right.agentPid - left.agentPid)[0]!;
+      if (!group.hosts.every((host) => ancestryDepth(selected.agentPid, host.agentPid, ppids) >= 0)) return group.hosts;
+      const claims = [...new Map(group.hosts.flatMap((host) => host.claims)
+        .map((claim) => [`${claim.source}:${claim.pathname}`, claim])).values()];
+      const primary = primaryClaim(claims);
+      return [{
+        ...selected,
+        claims,
+        claimedPaths: [...new Set(claims.map((claim) => claim.pathname))],
+        primaryPath: primary?.pathname ?? null,
+      }];
+    });
 }
 
 function canonicalFrom(hosts: ObservedHost[], pathname: string): TranscriptHost | null {
@@ -278,17 +346,12 @@ function failure(error: unknown, status = 500, actuation?: "started"): HostDeliv
   return { ok: false, outcome: "failed", error: error instanceof Error ? error.message : String(error), status: resolvedStatus, ...(actuation ? { actuation } : {}) };
 }
 
-/**
- * Creates the deep transcript-host module. The optional dependencies form a
- * test seam; production callers use the singleton below and only learn the
- * two operational methods exported at the end of this file.
- */
-export function createTranscriptHostResolver(
-  dependencies: HostDependencies,
-  decisions = new Map<string, Promise<Decision>>(),
-): TranscriptHostResolver {
-
-  async function observe(fresh: boolean, suppliedEntries?: FileEntry[]): Promise<TranscriptHostSnapshot> {
+export function createTranscriptHostObserver(dependencies: TranscriptHostObservationDependencies) {
+  return async function observe(
+    fresh: boolean,
+    suppliedEntries?: FileEntry[],
+    suppliedPpids?: Map<number, number>,
+  ): Promise<TranscriptHostSnapshot> {
     const conversationIdForPath = dependencies.conversationIdForPath ?? (() => null);
     const [entries, paneObservation, records] = await Promise.all([
       suppliedEntries ?? dependencies.listFiles(),
@@ -309,7 +372,7 @@ export function createTranscriptHostResolver(
     }
     const { panes } = paneObservation;
 
-    const ppids = dependencies.ppidMap();
+    const ppids = suppliedPpids ?? dependencies.ppidMap();
     const agents = dependencies.agents(fresh);
     const byPid = rootEntryByPid(entries);
     const byUuid = rootEntryByUuid(entries);
@@ -319,7 +382,7 @@ export function createTranscriptHostResolver(
       const tree = new Set(descendantPids(panePid, ppids));
       for (const agent of agents) {
         if (!tree.has(agent.pid)) continue;
-        const claims = claimsForAgent(agent, pane, panePid, byPid, byUuid, records);
+        const claims = claimsForAgent(agent, pane, panePid, byPid, byUuid, records, dependencies.holdsPath ?? (() => false));
         const primary = primaryClaim(claims);
         hosts.push({
           tmuxServerPid: serverPid,
@@ -340,19 +403,32 @@ export function createTranscriptHostResolver(
       }
     }
 
-    const reconciliation = await dependencies.reconcile?.(hosts);
+    const stableHosts = collapseSameSessionWrappers(hosts, ppids);
+    const reconciliation = await dependencies.reconcile?.(stableHosts);
     const quarantinedPaneIds = new Set(reconciliation?.quarantinedPaneIds ?? []);
-    const eligibleHosts = hosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
+    const eligibleHosts = stableHosts.filter((host) => !quarantinedPaneIds.has(host.paneId));
 
-    const conflicts = hostConflicts(hosts, conversationIdForPath, quarantinedPaneIds);
+    const conflicts = hostConflicts(stableHosts, conversationIdForPath, quarantinedPaneIds);
     const snapshot: TranscriptHostSnapshot = {
-      hosts,
+      hosts: stableHosts,
       observation: "available",
       conflicts,
       canonicalFor: (pathname: string) => conflictForPath(snapshot, pathname, conversationIdForPath) ? null : canonicalFrom(eligibleHosts, pathname),
     };
     return snapshot;
-  }
+  };
+}
+
+/**
+ * Creates the deep transcript-host module. The optional dependencies form a
+ * test seam; production callers use the singleton below and only learn the
+ * two operational methods exported at the end of this file.
+ */
+export function createTranscriptHostResolver(
+  dependencies: HostDependencies,
+  decisions = new Map<string, Promise<Decision>>(),
+): TranscriptHostResolver {
+  const observe = createTranscriptHostObserver(dependencies);
 
   async function revalidate(host: TranscriptHost, entry: FileEntry): Promise<boolean> {
     if (host.engine !== entry.engine || (await dependencies.serverPid()) !== host.tmuxServerPid) return false;
@@ -505,13 +581,54 @@ function confirmRegistryHostAlive(host: TranscriptHost): void {
   }
 }
 
-async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconciliation> {
-  const registry = agentRegistry();
+function upsertChangesEntry(
+  existing: AgentRegistryEntry | undefined,
+  entry: Omit<AgentRegistryEntry, "updatedAt">,
+): boolean {
+  if (!existing) return true;
+  const replacement = entry.structuredHost === undefined && existing.structuredHost !== undefined
+    ? { ...entry, structuredHost: existing.structuredHost }
+    : entry;
+  const current = { ...existing } as Partial<AgentRegistryEntry>;
+  delete current.updatedAt;
+  return !isDeepStrictEqual(current, replacement);
+}
+
+function spawnReceiptReconciliationNeeded(
+  snapshot: ReturnType<AgentRegistry["snapshot"]>,
+  liveIds: Set<string>,
+): boolean {
+  const liveArtifactPaths = new Set<string>();
+  for (const id of liveIds) {
+    const entry = snapshot.entries[id];
+    if (!entry) continue;
+    if (entry.pendingAction !== null) return true;
+    liveArtifactPaths.add(entry.artifactPath);
+  }
+  return Object.values(snapshot.receipts).some((receipt) =>
+    receipt.state === "starting"
+    && receipt.artifactPath !== null
+    && liveArtifactPaths.has(receipt.artifactPath));
+}
+
+export function reconcileObservedTranscriptHosts(
+  hosts: TranscriptHost[],
+  dependencies: TranscriptHostRegistryReconciliationDependencies = {
+    registry: agentRegistry(),
+    evidenceForHost: tmuxEvidenceForHost,
+  },
+): HostReconciliation {
+  const { registry, evidenceForHost } = dependencies;
+  let snapshot = registry.readOnlySnapshot();
+  let mutated = false;
   const seen = new Set<string>();
   const quarantinedPaneIds = new Set<string>();
   for (const host of hosts) {
-    const evidence = tmuxEvidenceForHost(host);
-    if (host.launchId) registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
+    const evidence = evidenceForHost(host);
+    if (host.launchId) {
+      registry.confirmSpawnPaneAlive(host.launchId, evidence, { engine: host.engine, cwd: host.cwd });
+      mutated = true;
+    }
     if (!host.primaryPath) continue;
     const key = sessionKeyFromTranscript(host.engine, host.primaryPath);
     if (!key) continue;
@@ -527,6 +644,7 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconcili
         claimOwner: null,
         pendingAction: null,
       });
+      mutated = true;
       /* A mismatched pane/artifact remains quarantined. It must never fall
          through into the generic upsert and overwrite the real receipt. */
       if (settled.kind === "settled") {
@@ -536,8 +654,9 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconcili
       quarantinedPaneIds.add(host.paneId);
       continue;
     }
-    const existing = registry.snapshot().entries[`${key.engine}:${key.sessionId}`];
-    registry.upsert({
+    const id = `${key.engine}:${key.sessionId}`;
+    const existing = snapshot.entries[id];
+    const entry = {
       key,
       artifactPath: host.primaryPath,
       cwd: host.cwd,
@@ -547,16 +666,23 @@ async function reconcileRegistry(hosts: TranscriptHost[]): Promise<HostReconcili
       claimEpoch: existing?.claimEpoch ?? 0,
       claimOwner: existing?.claimOwner ?? null,
       pendingAction: null,
-    });
-    seen.add(`${key.engine}:${key.sessionId}`);
+    } satisfies Omit<AgentRegistryEntry, "updatedAt">;
+    if (upsertChangesEntry(existing, entry)) {
+      registry.upsert(entry);
+      mutated = true;
+    }
+    seen.add(id);
   }
-  for (const [id, entry] of Object.entries(registry.snapshot().entries)) {
+  if (mutated) snapshot = registry.snapshot();
+  for (const [id, entry] of Object.entries(snapshot.entries)) {
     if (entry.host?.kind === "tmux" && !seen.has(id)) registry.markUnhosted(entry.key);
   }
-  registry.reconcileSpawnReceipts([...seen].map((id) => {
-    const [engine, sessionId] = id.split(":");
-    return { engine: engine as "claude" | "codex", sessionId };
-  }));
+  if (spawnReceiptReconciliationNeeded(snapshot, seen)) {
+    registry.reconcileSpawnReceipts([...seen].map((id) => {
+      const [engine, sessionId] = id.split(":");
+      return { engine: engine as "claude" | "codex", sessionId };
+    }));
+  }
   return { quarantinedPaneIds: [...quarantinedPaneIds] };
 }
 
@@ -564,12 +690,22 @@ async function registryResumeRecords(): ReturnType<typeof resumePaneRecords> {
   const serverPid = await tmuxServerPid();
   if (serverPid === null) return null;
   const registry = agentRegistry();
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   if (!snapshot.importedResumePanes) {
     const legacy = await resumePaneRecords();
-    if (legacy) registry.importResumePanes(legacy.serverPid, legacy.records);
+    if (legacy) {
+      registry.importResumePanes(legacy.serverPid, legacy.records);
+      return {
+        serverPid,
+        records: legacy.serverPid === serverPid ? new Map(legacy.records) : new Map(),
+      };
+    }
   }
-  return { serverPid, records: registry.resumePanes(serverPid) };
+  const saved = snapshot.legacyResumePanes;
+  return {
+    serverPid,
+    records: saved.serverPid === serverPid ? new Map(Object.entries(saved.panes)) : new Map(),
+  };
 }
 
 async function rememberRegistryResume(pathname: string, spec: ResumeSpec, pane: SpawnedPane): Promise<void> {
@@ -624,6 +760,7 @@ const runtimeResolver = createTranscriptHostResolver({
   argv: readArgv,
   parentPid: readPpid,
   identity: procBackend.processIdentity,
+  holdsPath: pidHoldsPath,
   launchId: paneLaunchId,
   conversationIdForPath: (pathname) => agentRegistry().conversationForPath(pathname)?.id ?? null,
   beginResume: beginRegistryResume,
@@ -631,7 +768,7 @@ const runtimeResolver = createTranscriptHostResolver({
   remember: rememberRegistryResume,
   deliver: sendText,
   confirmAlive: confirmRegistryHostAlive,
-  reconcile: reconcileRegistry,
+  reconcile: reconcileObservedTranscriptHosts,
   serializeDelivery: serializeRegistryDelivery,
 }, globalStore.__llvTranscriptHostDecisions ??= new Map());
 

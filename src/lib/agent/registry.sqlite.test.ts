@@ -116,6 +116,38 @@ test("dual-write keeps JSON authoritative and SQLite reads require parity", () =
   expect(() => new AgentRegistry(filename, undefined, undefined, { sqliteMode: "read" })).toThrow(RegistryParityError);
 });
 
+test("dual-write leaves both backends unchanged after a no-op mutation", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-noop-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const sqliteFilename = path.join(directory, "agent-registry.sqlite");
+  let replaceCalls = 0;
+  const dual = new AgentRegistry(filename, undefined, undefined, {
+    sqliteMode: "dual-write",
+    beforeDualWriteMutationReplace: () => { replaceCalls += 1; },
+  });
+  dual.setEngineRouting("codex", "work");
+  expect(replaceCalls).toBe(1);
+  const before = fs.statSync(filename);
+  const db = new Database(sqliteFilename);
+  const revision = () => Number(db.query<{ value: string }, [string]>(
+    "SELECT value FROM registry_meta WHERE key = ?",
+  ).get("revision")?.value ?? -1);
+  const beforeRevision = revision();
+
+  expect(dual.releaseStructuredHostClaim(
+    { engine: "codex", sessionId: "missing-session" },
+    "missing-owner",
+    99,
+  )).toBeFalse();
+
+  const after = fs.statSync(filename);
+  expect(after.ino).toBe(before.ino);
+  expect(after.mtimeMs).toBe(before.mtimeMs);
+  expect(revision()).toBe(beforeRevision);
+  expect(replaceCalls).toBe(1);
+  db.close();
+});
+
 test("dual-write fails closed when SQLite is ahead of its JSON mirror", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-registry-sqlite-transition-"));
   const filename = path.join(directory, "agent-registry.json");
