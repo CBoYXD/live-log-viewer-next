@@ -32,6 +32,59 @@ function registryWithConversation(accountId = "default") {
   return { registry, conversation };
 }
 
+function recordStructuredOwner(registry: AgentRegistry, conversation: ReturnType<typeof registryWithConversation>["conversation"]): void {
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:deployment-window",
+      process: { pid: 101, startIdentity: "runtime-before-restart" },
+      eventCursor: 17,
+      protocolVersion: "v2",
+      writerClaimEpoch: 4,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 4,
+    claimOwner: "structured-host:runtime-before-restart",
+    pendingAction: null,
+  });
+}
+
+function recordLegacyOwner(registry: AgentRegistry, conversation: ReturnType<typeof registryWithConversation>["conversation"]): void {
+  const generation = conversation.generations.at(-1)!;
+  registry.upsert({
+    key: { engine: conversation.engine, sessionId: generation.id },
+    artifactPath: generation.path,
+    cwd: generation.launchProfile.cwd,
+    accountId: generation.accountId,
+    launchProfile: generation.launchProfile,
+    status: "idle",
+    host: {
+      kind: "tmux",
+      endpoint: "/run/user/1000/tmux/default",
+      server: { pid: 201, startIdentity: "tmux-server" },
+      paneId: "%21",
+      panePid: { pid: 202, startIdentity: "tmux-pane" },
+      windowName: "legacy-root",
+      agent: { pid: 203, startIdentity: "legacy-agent" },
+      argv: ["codex", "resume", generation.id],
+    },
+    structuredHost: null,
+    claimEpoch: 2,
+    claimOwner: null,
+    pendingAction: null,
+  });
+}
+
 function snapshot(ownedConversationId = conversationId): RuntimeSnapshot {
   return {
     schemaVersion: 1,
@@ -86,13 +139,14 @@ test("structured message routing is inert while its gate is disabled", async () 
   expect(called).toBe(false);
 });
 
-test("structured message routing falls through after startup adoption leaves no runtime client", async () => {
+test("structured message routing fences failed startup when no persisted owner exists", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   const result = await enqueueStructuredMessage(
     { path: artifactPath, text: "hello", hasImages: false },
-    { enabled: () => true, client: () => null, startupFailed: () => true },
+    { enabled: () => true, client: () => null, registry: () => registry, startupFailed: () => true },
   );
 
-  expect(result).toBeNull();
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
 });
 
 test("structured message routing fences a missing runtime client without startup failure evidence", async () => {
@@ -104,30 +158,177 @@ test("structured message routing fences a missing runtime client without startup
   expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
 });
 
-test("structured message routing falls through when the snapshot has no owner for the session", async () => {
+test("a persisted structured current generation holds the exact send while the runtime client is absent", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  let migrationTicks = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "deployment-window-message",
+    text: "continue through runtime synchronization",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+    startupFailed: () => false,
+  });
+
+  expect(result).toMatchObject({
+    ok: true,
+    structured: true,
+    target: conversation.id,
+    outcome: "held",
+  });
+  expect(migrationTicks).toBe(1);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "deployment-window-message",
+    text: "continue through runtime synchronization",
+    state: "assigned",
+    generationId: conversation.generations.at(-1)!.id,
+  }]);
+});
+
+test("a persisted tmux current generation falls through during runtime client absence", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  let migrationTicks = 0;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "legacy-deployment-window-message",
+    text: "continue through the legacy pane",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+    startupFailed: () => false,
+  });
+
+  expect(result).toBeNull();
+  expect(migrationTicks).toBe(0);
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("conflicting persisted ownership stays fenced during runtime client absence", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  const generation = conversation.generations.at(-1)!;
+  registry.setStructuredHost({ engine: conversation.engine, sessionId: generation.id }, {
+    kind: "codex-app-server",
+    endpoint: "stdio:conflicting-owner",
+    process: null,
+    eventCursor: 9,
+    protocolVersion: "v2",
+    writerClaimEpoch: 2,
+    activeTurnRef: null,
+    pendingAttention: [],
+    activeFlags: [],
+  });
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "ambiguous-deployment-window-message",
+    text: "keep conflicting ownership fenced",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+  });
+
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("structured runtime synchronization keeps images and oversized text request-local", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  const dependencies = {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+  };
+
+  const image = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "runtime-window-image",
+    text: "image caption",
+    hasImages: true,
+  }, dependencies);
+  const oversized = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "runtime-window-oversized",
+    text: "x".repeat(32_001),
+    hasImages: false,
+  }, dependencies);
+
+  expect(image).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
+  expect(oversized).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("legacy runtime synchronization leaves request-local payloads for the legacy ladder", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  const dependencies = {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+  };
+
+  expect(await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "legacy-runtime-window-image",
+    text: "image caption",
+    hasImages: true,
+  }, dependencies)).toBeNull();
+  expect(await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "legacy-runtime-window-oversized",
+    text: "x".repeat(32_001),
+    hasImages: false,
+  }, dependencies)).toBeNull();
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
+});
+
+test("structured message routing fences when the snapshot and registry have no current owner", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   const client = {
     snapshot: async () => ({ ...snapshot(), sessions: [] }),
   } as unknown as RuntimeHostClient;
 
   const result = await enqueueStructuredMessage(
     { path: artifactPath, text: "hello", hasImages: false },
-    { enabled: () => true, client: () => client },
+    { enabled: () => true, client: () => client, registry: () => registry },
   );
 
-  expect(result).toBeNull();
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
 });
 
-test("structured message routing falls through when failed startup adoption leaves the snapshot unavailable", async () => {
+test("structured message routing fences a failed startup snapshot without persisted ownership", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   const client = {
     snapshot: async () => { throw new Error("startup adoption failed"); },
   } as unknown as RuntimeHostClient;
 
   const result = await enqueueStructuredMessage(
     { path: artifactPath, text: "hello", hasImages: false },
-    { enabled: () => true, client: () => client, startupFailed: () => true },
+    { enabled: () => true, client: () => client, registry: () => registry, startupFailed: () => true },
   );
 
-  expect(result).toBeNull();
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
 });
 
 test("structured message routing fences a transient snapshot failure", async () => {
@@ -146,6 +347,61 @@ test("structured message routing fences a transient snapshot failure", async () 
     outcome: "failed",
     status: 503,
   });
+});
+
+test("a persisted structured current generation holds the send after a runtime snapshot failure", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+  let migrationTicks = 0;
+  const client = {
+    snapshot: async () => { throw new Error("runtime host is unavailable"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "snapshot-window-message",
+    text: "retain this snapshot-window send",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    requestMigrationTick: () => { migrationTicks += 1; },
+    startupFailed: () => false,
+  });
+
+  expect(result).toMatchObject({ ok: true, structured: true, target: conversation.id, outcome: "held" });
+  expect(migrationTicks).toBe(1);
+  expect(registry.pendingDeliveries(conversation.id)).toMatchObject([{
+    clientMessageId: "snapshot-window-message",
+    text: "retain this snapshot-window send",
+    state: "assigned",
+  }]);
+});
+
+test("a persisted tmux current generation falls through after a runtime snapshot failure", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+  const client = {
+    snapshot: async () => { throw new Error("runtime host is unavailable"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "legacy-snapshot-window-message",
+    text: "deliver through the legacy pane",
+    hasImages: false,
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    startupFailed: () => false,
+  });
+
+  expect(result).toBeNull();
+  expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 
 test("structured ownership recovery revokes startup-failure fallback authorization", async () => {
@@ -339,7 +595,7 @@ test("structured ownership stays fenced while its registry projection is missing
   expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
 });
 
-test("structured message routing falls through for an unhosted owner", async () => {
+test("structured message routing fences an unhosted runtime projection", async () => {
   const unhostedSnapshot = snapshot();
   unhostedSnapshot.sessions[0] = { ...unhostedSnapshot.sessions[0]!, hostKind: "unhosted" };
   const client = { snapshot: async () => unhostedSnapshot } as unknown as RuntimeHostClient;
@@ -349,7 +605,7 @@ test("structured message routing falls through for an unhosted owner", async () 
     { enabled: () => true, client: () => client },
   );
 
-  expect(result).toBeNull();
+  expect(result).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
 });
 
 test("structured message routing returns the durable queued receipt immediately", async () => {
@@ -445,7 +701,8 @@ test("migration-held delivery settles through the runtime journal after EngineHo
   expect(outcome).toBe("delivered");
 });
 
-test("held delivery falls through when structured ownership is unavailable", async () => {
+test("held delivery stays fenced when persisted ownership is unavailable", async () => {
+  const registry = new AgentRegistry(path.join(sandbox, `registry-${registryNumber += 1}.json`));
   const request = {
     conversationId: "conversation_missing",
     path: artifactPath,
@@ -460,12 +717,14 @@ test("held delivery falls through when structured ownership is unavailable", asy
   expect(await deliverHeldStructuredMessage(request, {
     enabled: () => true,
     client: () => null,
+    registry: () => registry,
     startupFailed: () => true,
-  })).toBeNull();
+  })).toBe("delivery-uncertain");
   expect(await deliverHeldStructuredMessage(request, {
     enabled: () => true,
     client: () => missingSessionClient,
-  })).toBeNull();
+    registry: () => registry,
+  })).toBe("delivery-uncertain");
 });
 
 test("held delivery fences a missing runtime client without startup failure evidence", async () => {
@@ -480,6 +739,42 @@ test("held delivery fences a missing runtime client without startup failure evid
     client: () => null,
     startupFailed: () => false,
   })).toBe("delivery-uncertain");
+});
+
+test("held delivery keeps a persisted structured owner fenced when startup failed", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordStructuredOwner(registry, conversation);
+
+  expect(await deliverHeldStructuredMessage({
+    conversationId: conversation.id,
+    path: artifactPath,
+    deliveryId: "held-structured-startup-failure",
+    clientMessageId: "held-structured-startup-failure-message",
+    text: "remain structured through startup recovery",
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    startupFailed: () => true,
+  })).toBe("delivery-uncertain");
+});
+
+test("held delivery authorizes legacy fallback from persisted tmux ownership", async () => {
+  const { registry, conversation } = registryWithConversation();
+  recordLegacyOwner(registry, conversation);
+
+  expect(await deliverHeldStructuredMessage({
+    conversationId: conversation.id,
+    path: artifactPath,
+    deliveryId: "held-legacy-startup-failure",
+    clientMessageId: "held-legacy-startup-failure-message",
+    text: "continue through the legacy ladder",
+  }, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    startupFailed: () => true,
+  })).toBeNull();
 });
 
 test("held delivery stays uncertain during a transient structured snapshot failure", async () => {

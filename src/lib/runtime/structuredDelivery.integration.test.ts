@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import { reconcileMigrations } from "@/lib/accounts/migration/coordinator";
+import { drainHeldDeliveries, reconcileMigrations, type HeldDeliveryPort } from "@/lib/accounts/migration/coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
 import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
@@ -872,6 +872,153 @@ test("a failed idle send retry keeps its null turn fence when another turn start
     turnId: null,
     reason: "stale-turn",
   });
+  journal.close();
+});
+
+test("runtime recovery drains one durable synchronization hold into one engine command", async () => {
+  const sessionId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const directory = path.join(sandbox, "runtime-synchronization-hold");
+  const artifactPath = path.join(directory, `${sessionId}.jsonl`);
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const profile = emptyLaunchProfile({ cwd: directory });
+  registry.reconcileConversations([{
+    engine: "codex",
+    path: artifactPath,
+    accountId: "default",
+    launchProfile: profile,
+    turn: { state: "idle", source: "empty", terminalAt: null },
+    observedAt: "2026-07-16T20:07:01.000Z",
+  }]);
+  const conversation = registry.conversationForPath(artifactPath)!;
+  registry.upsert({
+    key: { engine: "codex", sessionId },
+    artifactPath,
+    cwd: directory,
+    accountId: "default",
+    launchProfile: profile,
+    status: "idle",
+    host: null,
+    structuredHost: {
+      kind: "codex-app-server",
+      endpoint: "stdio:runtime-before-restart",
+      process: null,
+      eventCursor: 42,
+      protocolVersion: "v2",
+      writerClaimEpoch: 5,
+      activeTurnRef: null,
+      pendingAttention: [],
+      activeFlags: [],
+    },
+    claimEpoch: 5,
+    claimOwner: null,
+    pendingAction: null,
+  });
+  const request = {
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "runtime-sync-held-message",
+    text: "deliver exactly once after runtime recovery",
+    hasImages: false,
+  };
+  let requestedDrains = 0;
+
+  const first = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { requestedDrains += 1; },
+  });
+  const refreshedRegistry = new AgentRegistry(registry.filename);
+  const duplicate = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => refreshedRegistry,
+    requestMigrationTick: () => { requestedDrains += 1; },
+  });
+  const held = Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.clientMessageId === request.clientMessageId);
+
+  expect(first).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(duplicate).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(requestedDrains).toBe(2);
+  expect(held).toMatchObject([{
+    text: request.text,
+    state: "assigned",
+    generationId: sessionId,
+  }]);
+
+  await drainHeldDeliveries(conversation.id, {
+    async deliver({ delivery, path: deliveryPath, clientMessageId }) {
+      return await deliverHeldStructuredMessage({
+        conversationId: conversation.id,
+        path: deliveryPath,
+        deliveryId: delivery.id,
+        clientMessageId,
+        text: delivery.text,
+      }, {
+        enabled: () => true,
+        client: () => null,
+        registry: () => registry,
+        startupFailed: () => true,
+      }) ?? "delivery-uncertain";
+    },
+  }, registry);
+  expect(registry.snapshot().heldDeliveries[held[0]!.id]).toMatchObject({
+    state: "delivery-uncertain",
+    clientMessageId: request.clientMessageId,
+    text: request.text,
+  });
+
+  const journal = new RuntimeJournal(path.join(directory, "runtime.sqlite"), { structuredHosts: true });
+  const client = runtimeJournalClient(journal);
+  const ledger = createFakeDeliveryLedger();
+  await bindStructuredDeliveryQueue([{
+    key: { engine: "codex", sessionId },
+    host: observableFakeHost(new FakeEngineHost(ledger)),
+  }], { registry, client });
+
+  const deliverAfterRecovery = async ({ delivery, path: deliveryPath, clientMessageId }: Parameters<HeldDeliveryPort["deliver"]>[0]) => {
+    return await deliverHeldStructuredMessage({
+      conversationId: conversation.id,
+      path: deliveryPath,
+      deliveryId: delivery.id,
+      clientMessageId,
+      text: delivery.text,
+    }, {
+      enabled: () => true,
+      client: () => client,
+      kick: kickStructuredDeliveryQueue,
+    }) ?? "delivery-uncertain";
+  };
+  await drainHeldDeliveries(conversation.id, {
+    deliver: deliverAfterRecovery,
+    reconcileUncertain: deliverAfterRecovery,
+  }, registry);
+
+  expect(ledger.writes).toEqual([{
+    id: held[0]!.id,
+    text: request.text,
+    expectedTurnId: null,
+  }]);
+  expect(registry.snapshot().heldDeliveries[held[0]!.id]).toMatchObject({
+    state: "delivered",
+    clientMessageId: request.clientMessageId,
+    text: "",
+  });
+  expect(journal.operationResult(held[0]!.id)?.receipt.status).toBe("delivered");
+
+  const afterDeliveryDuplicate = await enqueueStructuredMessage(request, {
+    enabled: () => true,
+    client: () => null,
+    registry: () => registry,
+    requestMigrationTick: () => { requestedDrains += 1; },
+  });
+  expect(afterDeliveryDuplicate).toMatchObject({ ok: true, structured: true, outcome: "held" });
+  expect(ledger.writes).toHaveLength(1);
+  expect(Object.values(registry.snapshot().heldDeliveries)
+    .filter((delivery) => delivery.clientMessageId === request.clientMessageId)).toHaveLength(1);
+
+  await bindStructuredDeliveryQueue([], { registry, client: null });
   journal.close();
 });
 
