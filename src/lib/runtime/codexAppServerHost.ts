@@ -285,6 +285,9 @@ export class CodexAppServerHost implements EngineHost {
   private reaped = false;
   private terminationStarted = false;
   private terminationTimer: ReturnType<typeof setTimeout> | null = null;
+  private terminationPromise: Promise<void> | null = null;
+  private resolveTermination: (() => void) | null = null;
+  private failureCleanupTimer: ReturnType<typeof setTimeout> | null = null;
   private releasePromise: Promise<void> | null = null;
   private writerFence: (() => boolean) | null = null;
   private ledgerFailed = false;
@@ -314,9 +317,10 @@ export class CodexAppServerHost implements EngineHost {
     child.on("error", (error) => this.fail(new Error(`Codex app-server child failed: ${safeError(error)}`)));
     child.on("close", () => {
       this.reaped = true;
+      this.completeGroupCleanupAfterReap();
       this.resolveReaped();
       if (this.releasing) {
-        this.finishRelease();
+        this.startFailureCleanup();
       } else if (!this.released) {
         if (this.dead) this.notifyStateListeners();
         else this.fail(new Error("Codex app-server child exited"));
@@ -570,7 +574,7 @@ export class CodexAppServerHost implements EngineHost {
     let terminationStarted = this.startTermination();
     const initialOwnership = this.childProcessOwnership();
     if (!this.reaped && (initialOwnership === "gone" || initialOwnership === "recycled")) {
-      this.finishRelease();
+      await this.finishReleaseAfterGroupCleanup();
       return;
     }
     if (!this.reaped && initialOwnership === "owned" && !terminationStarted) {
@@ -582,7 +586,7 @@ export class CodexAppServerHost implements EngineHost {
     if (!await this.waitForReap(this.shutdownGraceMs)) {
       const ownership = this.childProcessOwnership();
       if (!this.reaped && (ownership === "gone" || ownership === "recycled")) {
-        this.finishRelease();
+        await this.finishReleaseAfterGroupCleanup();
         return;
       }
       if (!this.reaped && ownership === "unknown") {
@@ -592,7 +596,7 @@ export class CodexAppServerHost implements EngineHost {
       if (!await this.waitForReap(this.shutdownGraceMs)) {
         const escalatedOwnership = this.childProcessOwnership();
         if (!this.reaped && (escalatedOwnership === "gone" || escalatedOwnership === "recycled")) {
-          this.finishRelease();
+          await this.finishReleaseAfterGroupCleanup();
           return;
         }
         if (!this.reaped && escalatedOwnership === "unknown") {
@@ -601,11 +605,20 @@ export class CodexAppServerHost implements EngineHost {
         throw new Error("Codex app-server child could not be reaped");
       }
     }
+    await this.finishReleaseAfterGroupCleanup();
+  }
+
+  private async finishReleaseAfterGroupCleanup(): Promise<void> {
+    await this.terminationPromise;
     this.finishRelease();
   }
 
   private finishRelease(): void {
     if (this.released) return;
+    if (this.failureCleanupTimer) {
+      clearTimeout(this.failureCleanupTimer);
+      this.failureCleanupTimer = null;
+    }
     this.released = true;
     this.releasing = false;
     this.activeTurnId = null;
@@ -615,14 +628,45 @@ export class CodexAppServerHost implements EngineHost {
     this.closeSubscribers();
   }
 
+  private completeGroupCleanupAfterReap(): void {
+    if (!this.terminationStarted || !this.resolveTermination) return;
+    if (this.terminationTimer) {
+      clearTimeout(this.terminationTimer);
+      this.terminationTimer = null;
+    }
+    try {
+      if (this.childProcessOwnership() === "gone") {
+        signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      }
+    } finally {
+      this.resolveTermination();
+      this.resolveTermination = null;
+    }
+  }
+
   private startTermination(): boolean {
     if (this.terminationStarted) return true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
+    const ownership = this.childProcessOwnership();
+    if (ownership === "gone") {
+      signalProcessGroup(this.child.pid, "SIGTERM", this.signalProcess);
+      signalProcessGroup(this.child.pid, "SIGKILL", this.signalProcess);
+      this.terminationStarted = true;
+      this.terminationPromise = Promise.resolve();
+      return true;
+    }
+    if (ownership !== "owned") return false;
     if (this.signalTermination("SIGTERM") === "unsafe") return false;
     this.terminationStarted = true;
+    this.terminationPromise = new Promise((resolve) => { this.resolveTermination = resolve; });
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
-      this.signalTermination("SIGKILL");
+      try {
+        this.signalTermination("SIGKILL");
+      } finally {
+        this.resolveTermination?.();
+        this.resolveTermination = null;
+      }
     }, this.shutdownGraceMs);
     return true;
   }
@@ -1238,7 +1282,11 @@ export class CodexAppServerHost implements EngineHost {
 
   private startFailureCleanup(): void {
     void this.release().catch(() => {
-      // Persistent unknown ownership keeps the dead host claimed for a later fenced retry.
+      if (this.released || this.failureCleanupTimer) return;
+      this.failureCleanupTimer = setTimeout(() => {
+        this.failureCleanupTimer = null;
+        this.startFailureCleanup();
+      }, this.shutdownGraceMs);
     });
   }
 

@@ -1186,7 +1186,6 @@ describe("CodexAppServerHost", () => {
     });
 
     await host.release();
-    await Bun.sleep(10);
 
     expect(signals).toEqual([
       { pid: -4242, signal: "SIGTERM" },
@@ -1374,7 +1373,10 @@ describe("CodexAppServerHost", () => {
 
     processIdentity = "4242:owned";
     await expect(host.release()).resolves.toBeUndefined();
-    expect(signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
   });
 
   test("release retries TERM when a transient identity lookup immediately recovers", async () => {
@@ -1488,6 +1490,43 @@ describe("CodexAppServerHost", () => {
 
     server.stdout.write("malformed\n");
     await Bun.sleep(10);
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: null });
+  });
+
+  test("protocol failure keeps retrying fenced cleanup until identity recovers", async () => {
+    const server = new FakeAppServer("failed-delayed-identity-recovery-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let processIdentity: string | null = "4242:owned";
+    let alive = true;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => processIdentity,
+      pidAlive: () => alive,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") {
+          alive = false;
+          queueMicrotask(() => server.emit("close", 0, signal));
+        }
+      },
+    });
+    processIdentity = null;
+
+    server.stdout.write("malformed\n");
+    await Bun.sleep(6);
+    expect(signals).toEqual([]);
+    expect(await host.health()).toMatchObject({ status: "dead", pid: 4242 });
+
+    processIdentity = "4242:owned";
+    await Bun.sleep(12);
 
     expect(signals).toEqual([
       { pid: -4242, signal: "SIGTERM" },
