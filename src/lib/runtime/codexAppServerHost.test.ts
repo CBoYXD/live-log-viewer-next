@@ -1377,6 +1377,36 @@ describe("CodexAppServerHost", () => {
     expect(signals).toEqual([{ pid: -4242, signal: "SIGTERM" }]);
   });
 
+  test("release retries TERM when a transient identity lookup immediately recovers", async () => {
+    const server = new FakeAppServer("immediate-identity-recovery-thread");
+    const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let failNextIdentityRead = false;
+    const host = await CodexAppServerHost.start({
+      cwd: "/repo",
+      shutdownGraceMs: 2,
+      eventStore: new MemoryEventStore(),
+      spawnProcess: fakeSpawn(server),
+      processIdentity: () => {
+        if (!failNextIdentityRead) return "4242:owned";
+        failNextIdentityRead = false;
+        return null;
+      },
+      pidAlive: () => true,
+      signalProcess: (pid, signal) => {
+        signals.push({ pid, signal });
+        if (signal === "SIGKILL") queueMicrotask(() => server.emit("close", 0, signal));
+      },
+    });
+    failNextIdentityRead = true;
+
+    await expect(host.release()).resolves.toBeUndefined();
+
+    expect(signals).toEqual([
+      { pid: -4242, signal: "SIGTERM" },
+      { pid: -4242, signal: "SIGKILL" },
+    ]);
+  });
+
   test("release skips group cleanup after the reaped leader pid is reused", async () => {
     const server = new FakeAppServer("reaped-recycled-pid-thread");
     const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];

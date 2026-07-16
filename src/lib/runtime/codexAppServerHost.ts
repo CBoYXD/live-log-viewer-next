@@ -567,13 +567,16 @@ export class CodexAppServerHost implements EngineHost {
       request.reject(new Error("Codex app-server host released"));
     }
     this.pending.clear();
-    const terminationStarted = this.startTermination();
+    let terminationStarted = this.startTermination();
     const initialOwnership = this.childProcessOwnership();
     if (!this.reaped && (initialOwnership === "gone" || initialOwnership === "recycled")) {
       this.finishRelease();
       return;
     }
-    if (!this.reaped && initialOwnership === "unknown" && !terminationStarted) {
+    if (!this.reaped && initialOwnership === "owned" && !terminationStarted) {
+      terminationStarted = this.startTermination();
+    }
+    if (!this.reaped && !terminationStarted) {
       throw new Error("Codex app-server child ownership is unknown");
     }
     if (!await this.waitForReap(this.shutdownGraceMs)) {
