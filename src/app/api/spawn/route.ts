@@ -13,6 +13,7 @@ import { agentRegistry, SpawnChildLimitError } from "@/lib/agent/registry";
 import { reasoningFromBody } from "@/lib/agent/efforts";
 import { modelFromBody } from "@/lib/agent/models";
 import { resolveSpawnRole } from "@/lib/roles/registry";
+import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
@@ -47,12 +48,14 @@ interface SpawnRouteDependencies {
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   runtimeHostClient: typeof runtimeHostClient;
   spawnStructuredConversation: typeof spawnStructuredConversation;
+  assertStructuredRuntime: typeof assertDarwinStructuredRuntime;
 }
 
 const productionSpawnRouteDependencies: SpawnRouteDependencies = {
   resolveHealthySpawnAccount,
   runtimeHostClient,
   spawnStructuredConversation,
+  assertStructuredRuntime: assertDarwinStructuredRuntime,
 };
 
 interface SuggestResponse {
@@ -175,6 +178,11 @@ async function postSpawn(
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }
   if (transport === "structured") {
+    try {
+      dependencies.assertStructuredRuntime();
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 503 });
+    }
     const gap = structuredSpawnGap({ engine, hasImages: images.length > 0, fast: reasoning.fast });
     if (gap) return NextResponse.json({ error: gap }, { status: 409 });
   }

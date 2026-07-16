@@ -1371,6 +1371,67 @@ test("runtime socket keeps command capacity beyond 64 concurrent SSE waits", asy
   }
 });
 
+test("runtime socket bounds waiters and reserves command capacity", async () => {
+  const dir = sandbox("socket-bounded-waits");
+  const socketPath = path.join(dir, "runtime.sock");
+  const journal = new RuntimeJournal(path.join(dir, "events.sqlite"));
+  const server = serveRuntimeHost(socketPath, new RuntimeHost(journal), {
+    maxConnections: 4,
+    maxWaitConnections: 2,
+  });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const waiters: net.Socket[] = [];
+
+  const openWait = async (id: string): Promise<net.Socket> => await new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    socket.once("error", reject);
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify({ id, method: "wait", params: { after: 0, timeoutMs: 5_000 } })}\n`);
+      waiters.push(socket);
+      resolve(socket);
+    });
+  });
+
+  try {
+    await openWait("wait-one");
+    await openWait("wait-two");
+    await Bun.sleep(10);
+    const rejected = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const socket = net.createConnection(socketPath);
+      let response = "";
+      socket.once("error", reject);
+      socket.on("data", (chunk) => {
+        response += String(chunk);
+        const newline = response.indexOf("\n");
+        if (newline >= 0) {
+          socket.destroy();
+          resolve(JSON.parse(response.slice(0, newline)) as Record<string, unknown>);
+        }
+      });
+      socket.once("connect", () => {
+        socket.write(`${JSON.stringify({ id: "wait-excess", method: "wait", params: { after: 0, timeoutMs: 5_000 } })}\n`);
+      });
+    });
+
+    expect(rejected).toEqual({ id: "wait-excess", ok: false, error: "runtime wait capacity exceeded" });
+    const client = new UnixRuntimeHostClient(socketPath, 250);
+    expect((await client.snapshot()).snapshotSeq).toBe(0);
+    expect(server.maxConnections).toBe(4);
+  } finally {
+    journal.append({ scope: runtimeScope("system", "runtime"), kind: "files.revision", payload: { filesRevision: 1 } });
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const connections = await new Promise<number>((resolve, reject) => {
+        server.getConnections((error, count) => error ? reject(error) : resolve(count));
+      });
+      if (connections === 0) break;
+      await Bun.sleep(2);
+    }
+    for (const waiter of waiters) waiter.destroy();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    journal.close();
+  }
+});
+
 test("concurrent socket replays keep maximum-size command output byte-bounded and advancing", async () => {
   const dir = sandbox("socket-replay-burst");
   const socketPath = path.join(dir, "runtime.sock");

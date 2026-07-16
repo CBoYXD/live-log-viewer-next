@@ -19,12 +19,16 @@ interface BunFfiModule {
 
 let cachedReader: ProcPidInfoReader | null | undefined;
 
+export class StructuredRuntimeRequirementError extends Error {
+  override readonly name = "StructuredRuntimeRequirementError";
+}
+
 export function assertDarwinStructuredRuntime(
   platform = process.platform,
   versions: { bun?: string } = process.versions,
 ): void {
   if (platform === "darwin" && !versions.bun) {
-    throw new Error("structured hosts on macOS require the Viewer server to run with Bun");
+    throw new StructuredRuntimeRequirementError("structured hosts on macOS require the Viewer server to run with Bun");
   }
 }
 

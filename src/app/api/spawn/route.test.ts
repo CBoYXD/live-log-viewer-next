@@ -13,6 +13,7 @@ import { rotateOperatorSpawnCapability } from "@/lib/agent/operatorCapability";
 import { spawnReplayStatus, spawnResponseForReceipt } from "@/lib/agent/spawnResponse";
 import { resolveSpawnLineage, resolveSpawnLineageParent, resolveSpawnParent, SpawnParentError } from "@/lib/agent/spawnParent";
 import type { RuntimeHostClient } from "@/lib/runtime/client";
+import { StructuredRuntimeRequirementError } from "@/lib/proc/darwinIdentity";
 import { authenticatedAgentSpawnCaller, isAgentInitiatedSpawn, spawnLineageSelectorForCaller } from "./admission";
 import { POST } from "./route";
 
@@ -31,8 +32,11 @@ function registry(): AgentRegistry {
   return new AgentRegistry(path.join(dir, "agent-registry.json"));
 }
 
-function structuredRouteDependencies(cwd: string): Parameters<typeof POST.withDependencies>[1] {
+type SpawnRouteTestDependencies = NonNullable<Parameters<typeof POST.withDependencies>[1]>;
+
+function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   return {
+    assertStructuredRuntime: () => {},
     resolveHealthySpawnAccount: async () => ({
       engine: "claude",
       accountId: "claude-test",
@@ -55,6 +59,72 @@ function structuredRouteDependencies(cwd: string): Parameters<typeof POST.withDe
     }),
   };
 }
+
+test("structured spawn runtime fence preserves durable state", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-runtime-fence-"));
+  const previous = {
+    transport: process.env.LLV_SPAWN_TRANSPORT,
+    hosts: process.env.LLV_STRUCTURED_HOSTS,
+    events: process.env.LLV_RUNTIME_EVENTS,
+    socket: process.env.LLV_RUNTIME_HOST_SOCKET,
+    ui: process.env.NEXT_PUBLIC_RUNTIME_UI,
+  };
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const store = agentRegistry();
+  const before = store.snapshot();
+  let accountLookups = 0;
+  let structuredSpawns = 0;
+  const dependencies = {
+    ...structuredRouteDependencies(cwd),
+    assertStructuredRuntime: () => {
+      throw new StructuredRuntimeRequirementError("structured hosts on macOS require the Viewer server to run with Bun");
+    },
+    resolveHealthySpawnAccount: async () => {
+      accountLookups += 1;
+      throw new Error("account lookup crossed the runtime fence");
+    },
+    spawnStructuredConversation: async () => {
+      structuredSpawns += 1;
+      throw new Error("structured spawn crossed the runtime fence");
+    },
+  } satisfies SpawnRouteTestDependencies;
+
+  try {
+    const response = await POST.withDependencies(new NextRequest("http://127.0.0.1:8898/api/spawn", {
+      method: "POST",
+      headers: {
+        host: "127.0.0.1:8898",
+        origin: "http://127.0.0.1:8898",
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ engine: "codex", cwd, prompt: "must stay fenced" }),
+    }), dependencies);
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "structured hosts on macOS require the Viewer server to run with Bun" });
+    expect(accountLookups).toBe(0);
+    expect(structuredSpawns).toBe(0);
+    const after = store.snapshot();
+    expect(Object.keys(after.receipts)).toEqual(Object.keys(before.receipts));
+    expect(Object.keys(after.conversations)).toEqual(Object.keys(before.conversations));
+  } finally {
+    if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
+    if (previous.hosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous.hosts;
+    if (previous.events === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previous.events;
+    if (previous.socket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previous.socket;
+    if (previous.ui === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previous.ui;
+  }
+});
 
 test("agent-initiated spawn without lineage returns a teaching 400", async () => {
   const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
