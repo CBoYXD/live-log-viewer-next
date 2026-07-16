@@ -1931,7 +1931,7 @@ export class AgentRegistry {
 
   conversationIdForSpawnCapabilityDigest(digest: string): ViewerConversationId | null {
     if (!/^[0-9a-f]{64}$/.test(digest)) return null;
-    const file = this.snapshot();
+    const file = this.readOnlySnapshot();
     const receipt = Object.values(file.receipts).find((candidate) => candidate.spawnCapabilityDigest === digest);
     return receipt ? resolveConversationAlias(file, receipt.conversationId) : null;
   }
@@ -2814,8 +2814,10 @@ export class AgentRegistry {
   }
 
   resumePanes(serverPid: number): Map<string, ResumePaneRecord> {
-    const saved = this.snapshot().legacyResumePanes;
-    return saved.serverPid === serverPid ? new Map(Object.entries(saved.panes)) : new Map();
+    const saved = this.readOnlySnapshot().legacyResumePanes;
+    return saved.serverPid === serverPid
+      ? new Map(Object.entries(saved.panes).map(([pathname, record]) => [pathname, clone(record)]))
+      : new Map();
   }
 
   rememberResumePane(serverPid: number, pathname: string, record: ResumePaneRecord): void {
@@ -3084,20 +3086,23 @@ export class AgentRegistry {
   }
 
   conversationForPath(artifactPath: string): RegistryConversation | null {
-    return Object.values(this.snapshot().conversations).find((conversation) => conversationOwnsPath(conversation, artifactPath)) ?? null;
+    const conversation = Object.values(this.readOnlySnapshot().conversations)
+      .find((candidate) => conversationOwnsPath(candidate, artifactPath));
+    return conversation ? clone(conversation) : null;
   }
 
   canonicalConversationId(id: ViewerConversationId): ViewerConversationId {
-    return resolveConversationAlias(this.snapshot(), id);
+    return resolveConversationAlias(this.readOnlySnapshot(), id);
   }
 
   conversation(id: ViewerConversationId): RegistryConversation | null {
-    const snapshot = this.snapshot();
-    return snapshot.conversations[resolveConversationAlias(snapshot, id)] ?? null;
+    const snapshot = this.readOnlySnapshot();
+    const conversation = snapshot.conversations[resolveConversationAlias(snapshot, id)];
+    return conversation ? clone(conversation) : null;
   }
 
   launchProfileForPath(artifactPath: string): LaunchProfile | null {
-    const snapshot = this.snapshot();
+    const snapshot = this.readOnlySnapshot();
     for (const conversation of Object.values(snapshot.conversations)) {
       const generation = conversation.generations.find((item) => item.path === artifactPath);
       if (generation) return clone(generation.launchProfile);
@@ -3125,11 +3130,11 @@ export class AgentRegistry {
   }
 
   engineRouting(engine: Extract<AgentEngine, "claude" | "codex">): { activeAccountId: string | null; revision: number } {
-    return clone(this.snapshot().engineRouting[engine]);
+    return clone(this.readOnlySnapshot().engineRouting[engine]);
   }
 
   migrationScope(engine: Extract<AgentEngine, "claude" | "codex">, targetId: string): MigrationScopeCounts {
-    return migrationScopeCounts(this.snapshot(), engine, targetId);
+    return migrationScopeCounts(this.readOnlySnapshot(), engine, targetId);
   }
 
   retireAccount(engine: Extract<AgentEngine, "claude" | "codex">, accountId: string, fallbackAccountId: string): void {
@@ -3575,11 +3580,11 @@ export class AgentRegistry {
   }
 
   autoBalancePolicy(engine: Extract<AgentEngine, "claude" | "codex">): AutoBalancePolicy {
-    return clone(this.snapshot().autoBalance[engine]);
+    return clone(this.readOnlySnapshot().autoBalance[engine]);
   }
 
   quotaObservations(engine: Extract<AgentEngine, "claude" | "codex">): DurableQuotaObservation[] {
-    return clone(Object.values(this.snapshot().quotaObservations[engine]));
+    return clone(Object.values(this.readOnlySnapshot().quotaObservations[engine]));
   }
 
   recordQuotaEvaluation(input: {
@@ -3715,11 +3720,11 @@ export class AgentRegistry {
   }
 
   pendingDeliveries(conversationId: ViewerConversationId): HeldDelivery[] {
-    const snapshot = this.snapshot();
+    const snapshot = this.readOnlySnapshot();
     const canonicalId = resolveConversationAlias(snapshot, conversationId);
-    return Object.values(snapshot.heldDeliveries)
+    return clone(Object.values(snapshot.heldDeliveries)
       .filter((item) => item.conversationId === canonicalId && item.state !== "delivered")
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)));
   }
 
   compactDeliveryReservations(): number {

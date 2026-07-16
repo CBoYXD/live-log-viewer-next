@@ -116,7 +116,7 @@ function autoBalanceProjection(engine: MigrationEngine, snapshot: ReturnType<Ret
 /** Pure durable projection. Live auth/quota/login reconciliation runs in the controller. */
 export async function GET() {
   const registry = agentRegistry();
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const now = Date.now();
   const claudeObservations = snapshot.quotaObservations.claude;
   const codexObservations = snapshot.quotaObservations.codex;

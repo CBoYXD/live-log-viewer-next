@@ -67,6 +67,23 @@ describe("agent registry", () => {
     expect(store.snapshot()).not.toBe(replacement);
   });
 
+  test("read helpers share one signature-fenced registry parse", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/sessions/read-helper.jsonl", "work");
+    store.setEngineRouting("codex", "work");
+    const reads = spyOn(fs, "readFileSync");
+    try {
+      expect(store.engineRouting("codex").activeAccountId).toBe("work");
+      expect(store.conversationForPath("/sessions/read-helper.jsonl")?.id).toBe(conversation.id);
+      expect(store.canonicalConversationId(conversation.id)).toBe(conversation.id);
+      expect(store.autoBalancePolicy("codex").enabled).toBeTrue();
+      expect(store.quotaObservations("codex")).toEqual([]);
+      expect(reads.mock.calls.filter(([filename]) => filename === store.filename)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
   test("startup compaction bounds legacy delivered reservations per conversation", () => {
     const store = registry();
     const conversation = store.ensureConversation("codex", "/legacy-deliveries.jsonl", "default");
