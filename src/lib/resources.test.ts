@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { createTranscriptHostObserver, type TranscriptHost } from "@/lib/agent/transcriptHost";
 import { procBackend } from "@/lib/proc";
-import { RESOURCE_FAILURE_STDERR_MAX_BYTES } from "@/lib/resourceCollector";
+import { createResourceDiagnosticTail, RESOURCE_FAILURE_STDERR_MAX_BYTES } from "@/lib/resourceCollector";
 import type { FileEntry, ResourcesPayload } from "@/lib/types";
 
 import { allowedKillTarget, applyResourceTargets, buildResourceSnapshot, canonicalResourceEntry, conflictingResourceHost, consumeKillTarget, createResourcesReader, lastResourceBuildDiagnostic, lastResourceTargetRefs, noteSessionTargets, parsePersistedResourceObservation, parseResourcesFixture, resetResourcesForTests, resolveResourceWorkerLaunch, resourceDiagnosticHeader, resourceWorkerFileSnapshot, RESOURCE_OBSERVATION_MAX_BYTES, RESOURCE_WORKER_OUTPUT_MAX_BYTES } from "./resources";
@@ -116,12 +116,82 @@ function processExists(pid: number): boolean {
   }
 }
 
-function processGroupExists(pid: number): boolean {
+interface FixtureProcessGroup {
+  pgid: number;
+  authorizerPid: number;
+  authorizerIdentity: string;
+}
+
+function processGroupId(pid: number): number | null {
   try {
-    process.kill(-pid, 0);
-    return true;
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const pgid = Number(fields[2]);
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
   } catch {
-    return false;
+    return null;
+  }
+}
+
+function confirmedFixtureProcessGroups(executable: string): FixtureProcessGroup[] {
+  const fixtureRoot = path.dirname(executable) + path.sep;
+  const processes = procBackend.listProcesses().flatMap((process) => {
+    const pgid = processGroupId(process.pid);
+    const identity = procBackend.processIdentity(process.pid);
+    return pgid === null || identity === null ? [] : [{ ...process, pgid, identity, ppid: procBackend.readPpid(process.pid) }];
+  });
+  const byPid = new Map(processes.map((process) => [process.pid, process]));
+  const fixtureProcesses = processes.filter((process) => process.argv.some(
+    (argument) => argument === executable || argument.startsWith(fixtureRoot),
+  ));
+  const pgids = new Set(fixtureProcesses.map((process) => process.pgid));
+
+  const confirmed: FixtureProcessGroup[] = [];
+  for (const pgid of pgids) {
+    const members = processes.filter((process) => process.pgid === pgid);
+    const fixturePids = new Set(fixtureProcesses.filter((process) => process.pgid === pgid).map((process) => process.pid));
+    const contained = members.every((member) => {
+      let current: typeof member | undefined = member;
+      const visited = new Set<number>();
+      while (current && !visited.has(current.pid)) {
+        if (fixturePids.has(current.pid)) return true;
+        visited.add(current.pid);
+        current = current.ppid === null ? undefined : byPid.get(current.ppid);
+      }
+      return false;
+    });
+    if (!contained) continue;
+    const authorizer = fixtureProcesses.find((process) => process.pgid === pgid);
+    if (!authorizer || procBackend.processIdentity(authorizer.pid) !== authorizer.identity) continue;
+    if (!procBackend.readArgv(authorizer.pid).some(
+      (argument) => argument === executable || argument.startsWith(fixtureRoot),
+    )) continue;
+    confirmed.push({ pgid, authorizerPid: authorizer.pid, authorizerIdentity: authorizer.identity });
+  }
+  return confirmed;
+}
+
+async function fixtureProcessGroupsAfterQuietInterval(executable: string): Promise<FixtureProcessGroup[]> {
+  let groups: FixtureProcessGroup[] = [];
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    groups = confirmedFixtureProcessGroups(executable);
+    if (groups.length === 0) return [];
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return groups;
+}
+
+function killConfirmedFixtureProcessGroups(executable: string, groups: FixtureProcessGroup[]): void {
+  for (const group of groups) {
+    const current = confirmedFixtureProcessGroups(executable).find((candidate) => (
+      candidate.pgid === group.pgid
+      && candidate.authorizerPid === group.authorizerPid
+      && candidate.authorizerIdentity === group.authorizerIdentity
+    ));
+    if (!current) continue;
+    try {
+      process.kill(-group.pgid, "SIGKILL");
+    } catch {}
   }
 }
 
@@ -213,7 +283,12 @@ async function withResourceWorkerScript<T>(
   } finally {
     if (previousExecutable === undefined) delete process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE;
     else process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE = previousExecutable;
+    const leakedGroups = await fixtureProcessGroupsAfterQuietInterval(executable);
+    killConfirmedFixtureProcessGroups(executable, leakedGroups);
+    const survivingGroups = await fixtureProcessGroupsAfterQuietInterval(executable);
     rmSync(directory, { recursive: true, force: true });
+    expect(survivingGroups, `fixture process groups still present after cleanup: ${leakedGroups.map((group) => group.pgid).join(",")}`).toEqual([]);
+    expect(leakedGroups, "fixture process groups present after test settlement").toEqual([]);
   }
 }
 
@@ -915,7 +990,7 @@ describe("resource recurring reads", () => {
       } });
       expect(processExists(workerPid)).toBeFalse();
       expect(processExists(descendantPid)).toBeFalse();
-      expect(() => process.kill(-workerPid, 0)).toThrow();
+      expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"))).toEqual([]);
     });
   });
 
@@ -941,7 +1016,7 @@ describe("resource recurring reads", () => {
         failure: { cause: "worker-exit" },
       } });
       expect(elapsedMs).toBeLessThan(250);
-      expect(processGroupExists(workerPid)).toBeFalse();
+      expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"))).toEqual([]);
       expect(processExists(descendantPid)).toBeFalse();
       await expectProcessAbsentAfterQuietInterval(workerPid, "exited leader");
       await expectProcessAbsentAfterQuietInterval(descendantPid, "pipe-holding descendant");
@@ -988,11 +1063,11 @@ describe("resource recurring reads", () => {
         initial: null,
         workerLimits: { timeoutMs: 500, closeTimeoutMs: 150 },
       }).read(true);
-      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
       const descendantPid = Number(readFileSync(path.join(directory, "redirected-descendant-pid"), "utf8"));
-      const groupPresentAtSettlement = processGroupExists(workerPid);
+      const fixtureGroups = confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"));
+      const groupPresentAtSettlement = fixtureGroups.length > 0;
 
-      if (groupPresentAtSettlement) process.kill(-workerPid, "SIGKILL");
+      killConfirmedFixtureProcessGroups(path.join(directory, "fixture-worker"), fixtureGroups);
       expect(outcome.diagnostic.degradedReason).toBeUndefined();
       expect(groupPresentAtSettlement).toBeFalse();
       await expectProcessAbsentAfterQuietInterval(descendantPid, "redirected descendant");
@@ -1025,12 +1100,12 @@ describe("resource recurring reads", () => {
             initial: null,
             workerLimits: { timeoutMs: 50, closeTimeoutMs: 50 },
           }).read(true);
-          const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
           const descendantPid = Number(readFileSync(path.join(directory, "matrix-descendant-pid"), "utf8"));
           const label = `${pipes} ${fixture.name}`;
-          const groupPresentAtSettlement = processGroupExists(workerPid);
+          const fixtureGroups = confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"));
+          const groupPresentAtSettlement = fixtureGroups.length > 0;
 
-          if (groupPresentAtSettlement) process.kill(-workerPid, "SIGKILL");
+          killConfirmedFixtureProcessGroups(path.join(directory, "fixture-worker"), fixtureGroups);
           expect(outcome.diagnostic, label).toMatchObject(fixture.expected);
           expect(groupPresentAtSettlement, label).toBeFalse();
           expect(processExists(descendantPid), label).toBeFalse();
@@ -1093,10 +1168,10 @@ describe("resource recurring reads", () => {
         } finally {
           kill.mockRestore();
         }
-        const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
-        try {
-          realKill(-workerPid, "SIGKILL");
-        } catch {}
+        killConfirmedFixtureProcessGroups(
+          path.join(directory, "fixture-worker"),
+          confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")),
+        );
         const final = await settleWithin(read, 300);
         await new Promise<void>((resolve) => setImmediate(resolve));
         const handles = newReferencedHandleCount(baseline);
@@ -1143,10 +1218,10 @@ describe("resource recurring reads", () => {
       } finally {
         kill.mockRestore();
       }
-      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
-      try {
-        realKill(-workerPid, "SIGKILL");
-      } catch {}
+      killConfirmedFixtureProcessGroups(
+        path.join(directory, "fixture-worker"),
+        confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")),
+      );
       await settleWithin(read, 300);
 
       expect(initial === CLEANUP_DEADLINE).toBeFalse();
@@ -1208,15 +1283,15 @@ describe("resource recurring reads", () => {
         workerLimits: { observeTimeoutMs: 400, inputTimeoutMs: 10, timeoutMs: 100, closeTimeoutMs: 30, headroomMs: 80 },
       }).read(true);
       const initial = await settleWithin(read, 250);
-      const workerPid = Number(readFileSync(path.join(directory, "pid"), "utf8"));
       const descendantPid = Number(readFileSync(path.join(directory, "escaped-descendant-pid"), "utf8"));
       if (initial === CLEANUP_DEADLINE) {
         try {
           process.kill(descendantPid, "SIGKILL");
         } catch {}
-        try {
-          process.kill(-workerPid, "SIGKILL");
-        } catch {}
+        killConfirmedFixtureProcessGroups(
+          path.join(directory, "fixture-worker"),
+          confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")),
+        );
         await settleWithin(read, 300);
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1228,6 +1303,152 @@ describe("resource recurring reads", () => {
       expect(processExists(descendantPid)).toBeFalse();
       expect(handles).toBe(0);
     });
+  });
+
+  test("TERM-handler escaped descendants are absent before every worker outcome settles", async () => {
+    const fixtures = [
+      {
+        name: "success",
+        output: `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        expected: { fresh: true, status: "complete" },
+        denyEscaped: false,
+        escapedAtSettlement: false,
+      },
+      {
+        name: "malformed output",
+        output: "printf '{invalid}\\n'",
+        expected: { degradedReason: "collector-crash", failure: { cause: "worker-output-invalid" } },
+        denyEscaped: false,
+        escapedAtSettlement: false,
+      },
+      {
+        name: "crash",
+        output: "exit 7",
+        expected: { degradedReason: "collector-crash", failure: { cause: "worker-exit" } },
+        denyEscaped: false,
+        escapedAtSettlement: false,
+      },
+      {
+        name: "timeout",
+        output: ":",
+        expected: { degradedReason: "timeout", failure: { cause: "worker-timeout" } },
+        denyEscaped: false,
+        escapedAtSettlement: false,
+      },
+      {
+        name: "denied success cleanup",
+        output: `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        expected: { degradedReason: "collector-crash", failure: { cause: "worker-cleanup" } },
+        denyEscaped: true,
+        escapedAtSettlement: true,
+      },
+      {
+        name: "denied malformed cleanup",
+        output: "printf '{invalid}\\n'",
+        expected: {
+          degradedReason: "collector-crash",
+          failure: {
+            cause: "worker-output-invalid",
+            causes: expect.arrayContaining(["resource collector worker cleanup deadline expired"]),
+          },
+        },
+        denyEscaped: true,
+        escapedAtSettlement: true,
+      },
+    ] as const;
+
+    for (const pipes of ["inherited", "redirected"] as const) {
+      for (const fixture of fixtures) {
+        await withResourceWorkerScript((directory) => {
+          const escapedScript = path.join(directory, "escaped-child.cjs");
+          const memberScript = path.join(directory, "term-member.cjs");
+          const escapedPid = path.join(directory, "term-escaped-pid");
+          const escapedReady = path.join(directory, "term-escaped-ready");
+          const memberReady = path.join(directory, "term-member-ready");
+          writeFileSync(escapedScript, [
+            '#!/usr/bin/node',
+            'const fs = require("node:fs");',
+            'const [pidFile, readyFile] = process.argv.slice(2);',
+            'process.on("SIGTERM", () => {});',
+            'process.on("SIGINT", () => {});',
+            'fs.writeFileSync(pidFile, String(process.pid));',
+            'fs.writeFileSync(readyFile, "ready");',
+            'setInterval(() => {}, 1_000);',
+            '',
+          ].join("\n"));
+          writeFileSync(memberScript, [
+            '#!/usr/bin/node',
+            'const fs = require("node:fs");',
+            'const { spawn } = require("node:child_process");',
+            'const [escapedScript, escapedPid, escapedReady, memberReady, pipes] = process.argv.slice(2);',
+            'fs.writeFileSync(memberReady, "ready");',
+            'let handled = false;',
+            'process.on("SIGTERM", () => {',
+            '  if (handled) return;',
+            '  handled = true;',
+            '  const stdio = pipes === "inherited" ? ["ignore", "inherit", "inherit"] : "ignore";',
+            '  const child = spawn(process.execPath, [escapedScript, escapedPid, escapedReady], { detached: true, stdio });',
+            '  child.unref();',
+            '  const deadline = Date.now() + 100;',
+            '  while (!fs.existsSync(escapedReady) && Date.now() < deadline) {}',
+            '  setTimeout(() => process.exit(0), 20);',
+            '});',
+            'setInterval(() => {}, 1_000);',
+            '',
+          ].join("\n"));
+          return [
+            `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
+            `trap 'exit 0' TERM INT`,
+            `/usr/bin/node "${memberScript}" "${escapedScript}" "${escapedPid}" "${escapedReady}" "${memberReady}" "${pipes}" &`,
+            `while [ ! -e "${memberReady}" ]; do sleep 0.005; done`,
+            "sleep 0.08",
+            fixture.output,
+            "while :; do sleep 0.01; done",
+          ];
+        }, async (directory) => {
+          const baseline = referencedHandles();
+          const escapedPidFile = path.join(directory, "term-escaped-pid");
+          const realKill = process.kill.bind(process);
+          const kill = fixture.denyEscaped
+            ? spyOn(process, "kill").mockImplementation(((pid: number, signal?: string | number) => {
+                if (pid > 0 && signal !== 0 && existsSync(escapedPidFile)
+                  && pid === Number(readFileSync(escapedPidFile, "utf8"))) throw errno("EPERM");
+                return realKill(pid, signal as NodeJS.Signals | number | undefined);
+              }) as typeof process.kill)
+            : null;
+          let escapedPid = 0;
+          let leaked = false;
+          let outcome: Awaited<ReturnType<ReturnType<typeof workerTestReader>["read"]>>;
+          try {
+            outcome = await workerTestReader({
+              initial: null,
+              workerLimits: {
+                observeTimeoutMs: 900,
+                inputTimeoutMs: 10,
+                timeoutMs: fixture.name === "timeout" ? 180 : 500,
+                closeTimeoutMs: 40,
+                cleanupTimeoutMs: 150,
+                headroomMs: 250,
+              },
+            }).read(true);
+            for (let attempt = 0; attempt < 20 && !existsSync(escapedPidFile); attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            escapedPid = Number(readFileSync(escapedPidFile, "utf8"));
+            leaked = processExists(escapedPid);
+          } finally {
+            kill?.mockRestore();
+            if (escapedPid > 0 && processExists(escapedPid)) realKill(escapedPid, "SIGKILL");
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const label = `${pipes} ${fixture.name}`;
+
+          expect(outcome.diagnostic, label).toMatchObject(fixture.expected);
+          expect(leaked, `${label} escaped descendant`).toBe(fixture.escapedAtSettlement);
+          expect(newReferencedHandleCount(baseline), `${label} referenced handles`).toBe(0);
+        });
+      }
+    }
   });
 
   test("leader-first cleanup sends no signals to recycled or null-identity groups", async () => {
@@ -1269,11 +1490,212 @@ describe("resource recurring reads", () => {
     }
   });
 
+  test("cleanup never adopts a recycled process group after the original leader exits", async () => {
+    await withResourceWorkerScript([
+      "exit 0",
+    ], async () => {
+      let leaderPid = 0;
+      let leaderIdentityReads = 0;
+      let groupPresent = true;
+      let unrelatedPresent = true;
+      const groupSignals: NodeJS.Signals[] = [];
+      const individualSignals: NodeJS.Signals[] = [];
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 5, headroomMs: 30 },
+        workerProcessRuntime: {
+          pidAlive: (pid) => pid === leaderPid ? false : unrelatedPresent,
+          processIdentity: (pid) => {
+            if (leaderPid === 0) leaderPid = pid;
+            if (pid === leaderPid) {
+              leaderIdentityReads += 1;
+              return leaderIdentityReads <= 2 ? `${pid}:owned` : null;
+            }
+            return unrelatedPresent ? `${pid}:unrelated` : null;
+          },
+          descendants: (pid) => [pid],
+          processGroupId: () => leaderPid,
+          processGroupMembers: () => [leaderPid + 1],
+          signal: (pid, signal) => {
+            if (pid < 0 && signal === 0) {
+              if (!groupPresent) throw errno("ESRCH");
+              return;
+            }
+            if (pid < 0) {
+              groupSignals.push(signal as NodeJS.Signals);
+              groupPresent = false;
+              return;
+            }
+            individualSignals.push(signal as NodeJS.Signals);
+            unrelatedPresent = false;
+          },
+        },
+      }).read(true);
+
+      expect(groupSignals).toEqual([]);
+      expect(individualSignals).toEqual([]);
+      expect(outcome.diagnostic).toMatchObject({
+        degradedReason: "collector-crash",
+        failure: {
+          cause: "worker-exit",
+          causes: expect.arrayContaining(["resource collector worker cleanup deadline expired"]),
+        },
+      });
+    });
+  });
+
+  test("a previously absent process group never becomes cleanup authority", async () => {
+    await withResourceWorkerScript([
+      `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "while :; do sleep 0.01; done",
+    ], async () => {
+      const realKill = process.kill.bind(process);
+      let leaderPid = 0;
+      let active = true;
+      let groupPresent = true;
+      const groupSignals: NodeJS.Signals[] = [];
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 5, headroomMs: 30 },
+        workerProcessRuntime: {
+          pidAlive: () => active,
+          processIdentity: (pid) => {
+            if (leaderPid === 0) leaderPid = pid;
+            return active ? `${pid}:owned` : null;
+          },
+          descendants: (pid) => [pid],
+          processGroupId: () => leaderPid,
+          processGroupMembers: () => [],
+          signal: (pid, signal) => {
+            if (pid < 0 && signal === 0) {
+              if (!groupPresent) throw errno("ESRCH");
+              return;
+            }
+            if (pid < 0) groupSignals.push(signal as NodeJS.Signals);
+            realKill(pid, signal as NodeJS.Signals);
+            active = false;
+            groupPresent = false;
+          },
+        },
+      }).read(true);
+
+      expect(groupSignals).toEqual([]);
+      expect(outcome.diagnostic).toMatchObject({
+        degradedReason: "collector-crash",
+        failure: { cause: "worker-cleanup" },
+      });
+    });
+  });
+
+  test("group cleanup revalidates an authorizing identity after processGroupId", async () => {
+    await withResourceWorkerScript([
+      `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+      "exit 0",
+    ], async () => {
+      let leaderPid = 0;
+      let groupIdReads = 0;
+      let identityChanged = false;
+      let groupPresent = true;
+      const groupSignals: NodeJS.Signals[] = [];
+      const individualSignals: NodeJS.Signals[] = [];
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 5, headroomMs: 30 },
+        workerProcessRuntime: {
+          pidAlive: () => groupPresent,
+          processIdentity: (pid) => {
+            if (leaderPid === 0) leaderPid = pid;
+            return `${pid}:${identityChanged ? "recycled" : "owned"}`;
+          },
+          descendants: (pid) => [pid],
+          processGroupId: () => {
+            groupIdReads += 1;
+            if (groupIdReads > 1) identityChanged = true;
+            return leaderPid;
+          },
+          processGroupMembers: () => [leaderPid],
+          signal: (pid, signal) => {
+            if (pid < 0 && signal === 0) {
+              if (!groupPresent) throw errno("ESRCH");
+              return;
+            }
+            if (pid < 0) {
+              groupSignals.push(signal as NodeJS.Signals);
+              groupPresent = false;
+              return;
+            }
+            individualSignals.push(signal as NodeJS.Signals);
+          },
+        },
+      }).read(true);
+
+      expect(groupSignals).toEqual([]);
+      expect(individualSignals).toEqual([]);
+      expect(outcome.diagnostic).toMatchObject({
+        degradedReason: "collector-crash",
+        failure: {
+          cause: "worker-cleanup",
+          causes: expect.arrayContaining(["resource collector worker cleanup deadline expired"]),
+        },
+      });
+    });
+  });
+
+  test("continuously owned process groups retain bounded TERM and KILL cleanup", async () => {
+    await withResourceWorkerScript([
+      "trap '' TERM INT",
+      "while :; do sleep 0.01; done",
+    ], async () => {
+      const realKill = process.kill.bind(process);
+      let leaderPid = 0;
+      let owned = true;
+      let groupPresent = true;
+      const groupSignals: NodeJS.Signals[] = [];
+      const outcome = await workerTestReader({
+        initial: null,
+        workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 20, closeTimeoutMs: 10, headroomMs: 60 },
+        workerProcessRuntime: {
+          pidAlive: () => owned,
+          processIdentity: (pid) => {
+            if (leaderPid === 0) leaderPid = pid;
+            return owned ? `${pid}:owned` : null;
+          },
+          descendants: (pid) => [pid],
+          processGroupId: () => leaderPid,
+          processGroupMembers: () => owned ? [leaderPid] : [],
+          signal: (pid, signal) => {
+            if (pid < 0 && signal === 0) {
+              if (!groupPresent) throw errno("ESRCH");
+              return;
+            }
+            if (pid < 0) {
+              groupSignals.push(signal as NodeJS.Signals);
+              realKill(pid, signal as NodeJS.Signals);
+              if (signal === "SIGKILL") {
+                owned = false;
+                groupPresent = false;
+              }
+              return;
+            }
+            if (owned) realKill(pid, signal as NodeJS.Signals);
+          },
+        },
+      }).read(true);
+
+      expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(outcome.diagnostic).toMatchObject({
+        degradedReason: "timeout",
+        failure: { cause: "worker-timeout" },
+      });
+    });
+  });
+
   test("individual cleanup revalidates identity after a verified group signal", async () => {
     await withResourceWorkerScript([
       `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
       "exit 0",
     ], async () => {
+      let leaderPid = 0;
       let recycled = false;
       const groupSignals: NodeJS.Signals[] = [];
       const individualSignals: NodeJS.Signals[] = [];
@@ -1282,10 +1704,13 @@ describe("resource recurring reads", () => {
         workerLimits: { observeTimeoutMs: 300, inputTimeoutMs: 10, timeoutMs: 80, closeTimeoutMs: 10, headroomMs: 40 },
         workerProcessRuntime: {
           pidAlive: () => !recycled,
-          processIdentity: (pid) => `${pid}:${recycled ? "recycled" : "owned"}`,
+          processIdentity: (pid) => {
+            if (leaderPid === 0) leaderPid = pid;
+            return `${pid}:${recycled ? "recycled" : "owned"}`;
+          },
           descendants: (pid) => [pid],
           processGroupId: (pid) => pid,
-          processGroupMembers: () => [],
+          processGroupMembers: () => [leaderPid],
           signal: (pid, signal) => {
             if (pid < 0 && signal === 0) {
               if (recycled) throw errno("ESRCH");
@@ -1579,6 +2004,29 @@ describe("resource recurring reads", () => {
     expect(JSON.parse(header)).toEqual(diagnostic);
   });
 
+  test("streaming quoted Authorization diagnostics stay redacted through resource header serialization", () => {
+    const input = '{"Authorization":"Basic QUOTED_HEADER_LEAK","safe":"SAFE_HEADER_FIELD"}\r\n'
+      + 'Bearer "QUOTED_BEARER_PART_A QUOTED_BEARER_PART_B"\n'
+      + "X-Safe-After: HEADER_TAIL_COMPLETE 😀";
+
+    for (let split = 0; split <= input.length; split += 1) {
+      const tail = createResourceDiagnosticTail();
+      tail.append(input.slice(0, split));
+      tail.append(input.slice(split));
+      const header = resourceDiagnosticHeader({ failure: { stderr: tail.value() } });
+      const stderr = (JSON.parse(header) as { failure: { stderr: string } }).failure.stderr;
+      const label = `header split ${split}`;
+
+      expect(stderr.includes("SAFE_HEADER_FIELD"), label).toBeTrue();
+      expect(stderr.includes("HEADER_TAIL_COMPLETE 😀"), label).toBeTrue();
+      expect(stderr.includes("QUOTED_HEADER_LEAK"), label).toBeFalse();
+      expect(stderr.includes("QUOTED_BEARER_PART_A"), label).toBeFalse();
+      expect(stderr.includes("QUOTED_BEARER_PART_B"), label).toBeFalse();
+      expect(stderr.includes("\uFFFD"), label).toBeFalse();
+      expect([...header].every((character) => character.charCodeAt(0) <= 0x7e), label).toBeTrue();
+    }
+  });
+
   test("malformed, oversized, crash, timeout, and immediate-exit paths release complete worker trees", async () => {
     const withGrandchild = (directory: string, lines: string[]) => [
       `printf '%s' "$$" > "${path.join(directory, "pid")}"`,
@@ -1664,6 +2112,20 @@ describe("resource recurring reads", () => {
       if (previousExecutable === undefined) delete process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE;
       else process.env.LLV_RESOURCE_COLLECTOR_EXECUTABLE = previousExecutable;
     }
+  });
+
+  test("an existing non-executable worker preserves the spawn failure cause", async () => {
+    await withResourceWorkerScript([
+      `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+    ], async (directory) => {
+      chmodSync(path.join(directory, "fixture-worker"), 0o600);
+      const outcome = await workerTestReader({ initial: null }).read(true);
+
+      expect(outcome.diagnostic).toMatchObject({
+        degradedReason: "collector-crash",
+        failure: { cause: "worker-spawn" },
+      });
+    });
   });
 
   test("persists each completed generation once across ordinary reads", async () => {

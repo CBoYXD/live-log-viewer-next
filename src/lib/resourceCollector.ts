@@ -84,22 +84,24 @@ type SensitiveTextMatch = {
   length: number;
   replacement: string;
   quote: "\"" | "'" | null;
+  quotedKey: boolean;
   authorization: boolean;
   bearer: boolean;
 };
 
 function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
-  const keyed = /\b([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\s*[:=]\s*(?:(["'])|(?=[^"'\s]))/i.exec(value);
-  const bearer = /\b(Bearer)\s+(?=\S)/i.exec(value);
+  const keyed = /(^|[^A-Z0-9_.-])(["']?)([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\2\s*[:=]\s*(?!<redacted>(?:$|[\s,}\]]))(?:(['"])|(?=[^"'\s]))/i.exec(value);
+  const bearer = /\b(Bearer)\s+(?:(["'])|(?=\S))/i.exec(value);
   const standalone = /\b(?:(?:sk|ghp|github_pat|xox[baprs])[-_A-Za-z0-9]{16,}|[A-Za-z0-9+/_=-]{48,})/i.exec(value);
   const matches: SensitiveTextMatch[] = [];
   if (keyed) {
     matches.push({
-      index: keyed.index,
-      length: keyed[0].length,
-      replacement: `${keyed[1]}=<redacted>`,
-      quote: keyed[2] === "\"" || keyed[2] === "'" ? keyed[2] : null,
-      authorization: /AUTHORIZATION/i.test(keyed[1]),
+      index: keyed.index + keyed[1].length,
+      length: keyed[0].length - keyed[1].length,
+      replacement: `${keyed[3]}=<redacted>`,
+      quote: keyed[4] === "\"" || keyed[4] === "'" ? keyed[4] : null,
+      quotedKey: keyed[2] === "\"" || keyed[2] === "'",
+      authorization: /AUTHORIZATION/i.test(keyed[3]),
       bearer: false,
     });
   }
@@ -108,7 +110,8 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
       index: bearer.index,
       length: bearer[0].length,
       replacement: `${bearer[1]} <redacted>`,
-      quote: null,
+      quote: bearer[2] === "\"" || bearer[2] === "'" ? bearer[2] : null,
+      quotedKey: false,
       authorization: false,
       bearer: true,
     });
@@ -119,6 +122,7 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
       length: standalone[0].length,
       replacement: "<redacted>",
       quote: null,
+      quotedKey: false,
       authorization: false,
       bearer: false,
     });
@@ -126,13 +130,50 @@ function sensitiveTextMatch(value: string): SensitiveTextMatch | null {
   return matches.sort((left, right) => left.index - right.index)[0] ?? null;
 }
 
+function quotedValueEnd(value: string, quote: "\"" | "'", start = 0): number {
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === quote) return index;
+  }
+  return -1;
+}
+
 function redactDiagnosticText(value: string): string {
-  return value
-    .replace(/\b([A-Z0-9_.-]*AUTHORIZATION[A-Z0-9_.-]*)\s*[:=][^\r\n]*/gi, "$1=<redacted>")
-    .replace(/\b(Bearer)\s+[^\s]+/gi, "$1 <redacted>")
-    .replace(/\b([A-Z0-9_.-]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|AUTHORIZATION|COOKIE)[A-Z0-9_.-]*)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s]+)/gi, "$1=<redacted>")
-    .replace(/\b(?:sk|ghp|github_pat|xox[baprs])[-_A-Za-z0-9]{16,}\b/gi, "<redacted>")
-    .replace(/\b[A-Za-z0-9+/_=-]{48,}\b/g, "<redacted>")
+  let redacted = "";
+  let pending = value;
+  while (pending) {
+    const match = sensitiveTextMatch(pending);
+    if (!match) {
+      redacted += pending;
+      break;
+    }
+    redacted += pending.slice(0, match.index) + match.replacement;
+    pending = pending.slice(match.index + match.length);
+    if (match.authorization && !(match.quotedKey && match.quote)) {
+      const end = pending.search(/[\r\n]/);
+      pending = end < 0 ? "" : pending.slice(end);
+      continue;
+    }
+    if (match.quote) {
+      const end = quotedValueEnd(pending, match.quote);
+      pending = end < 0 ? "" : pending.slice(end + 1);
+      continue;
+    }
+    if (match.bearer || !match.authorization) {
+      const end = pending.search(/\s/);
+      pending = end < 0 ? "" : pending.slice(end);
+    }
+  }
+  return redacted
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
     .trim();
 }
@@ -158,6 +199,7 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
   let sanitizedTail = "";
   let pending = "";
   let redacting: "unquoted" | "line" | "\"" | "'" | null = null;
+  let redactionEscape = false;
   let carriedCredential: "key" | "authorization-key" | "value" | "authorization" | "bearer" | null = null;
   const appendSanitized = (value: string) => {
     sanitizedTail += value;
@@ -232,15 +274,34 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         carriedCredential = null;
       }
       if (redacting) {
-        const end = redacting === "line"
-          ? pending.search(/[\r\n]/)
-          : redacting === "unquoted" ? pending.search(/\s/) : pending.indexOf(redacting);
+        let end: number;
+        if (redacting === "line") end = pending.search(/[\r\n]/);
+        else if (redacting === "unquoted") end = pending.search(/\s/);
+        else {
+          end = -1;
+          for (let index = 0; index < pending.length; index += 1) {
+            const character = pending[index];
+            if (redactionEscape) {
+              redactionEscape = false;
+              continue;
+            }
+            if (character === "\\") {
+              redactionEscape = true;
+              continue;
+            }
+            if (character === redacting) {
+              end = index;
+              break;
+            }
+          }
+        }
         if (end < 0) {
           pending = "";
           return;
         }
         pending = pending.slice(end + (redacting === "unquoted" || redacting === "line" ? 0 : 1));
         redacting = null;
+        redactionEscape = false;
         continue;
       }
       const match = sensitiveTextMatch(pending);
@@ -248,11 +309,11 @@ export function createResourceDiagnosticTail(maxBytes = RESOURCE_FAILURE_STDERR_
         appendSanitized(pending.slice(0, match.index) + match.replacement);
         pending = pending.slice(match.index + match.length);
         if (match.authorization) {
-          redacting = "line";
+          redacting = match.quotedKey && match.quote ? match.quote : "line";
           continue;
         }
         if (match.bearer) {
-          carriedCredential = "bearer";
+          redacting = match.quote ?? "unquoted";
           continue;
         }
         redacting = match.quote ?? "unquoted";

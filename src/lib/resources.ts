@@ -399,9 +399,34 @@ const RESOURCE_OBSERVATION_SCHEMA_VERSION = 1;
 const RESOURCE_OBSERVATION_FILE = "resources-observation.json";
 export const RESOURCE_OBSERVATION_MAX_BYTES = 16 * 1024 * 1024;
 export const RESOURCE_WORKER_OUTPUT_MAX_BYTES = RESOURCE_OBSERVATION_MAX_BYTES + RESOURCE_WORKER_FRAME_HEADROOM_BYTES;
+const RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS = 50;
+const RESOURCE_WORKER_SUPERVISOR = `
+const { spawn } = require("node:child_process");
+const child = spawn(process.argv[1], process.argv.slice(2), { stdio: "inherit" });
+let finished = false;
+const finish = (code, signal) => {
+  if (finished) return;
+  finished = true;
+  setTimeout(() => {
+    if (signal) process.kill(process.pid, signal);
+    else process.exit(code ?? 1);
+  }, ${RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS});
+};
+child.once("error", () => finish(127, null));
+child.once("exit", finish);
+`;
 const RESOURCE_OBSERVATION_MAX_SESSIONS = 10_000;
 const RESOURCE_OBSERVATION_MAX_TARGETS = 10_000;
 const RESOURCE_READER_VERSION = 2;
+
+function resourceWorkerExecutableCanBeSupervised(executable: string): boolean {
+  try {
+    const stat = statSync(executable);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
 
 type ResourceWorkerLimits = Partial<{
   observeTimeoutMs: number;
@@ -777,9 +802,13 @@ async function collectResourcesInWorker(
     closeTimeoutMs,
     limits.cleanupTimeoutMs ?? closeTimeoutMs + Math.floor(headroomMs / 2),
   );
+  const cleanupAbsenceConfirmationMs = Math.min(25, Math.max(5, closeTimeoutMs));
   const settlementHeadroomMs = Math.max(
-    0,
-    headroomMs - Math.max(0, cleanupTimeoutMs - closeTimeoutMs),
+    Math.min(250, Math.ceil(observeTimeoutMs * 0.2)),
+    RESOURCE_WORKER_SUPERVISOR_EXIT_GRACE_MS + cleanupAbsenceConfirmationMs + Math.max(
+      0,
+      headroomMs - Math.max(0, cleanupTimeoutMs - closeTimeoutMs),
+    ),
   );
   const workerBudgetMs = Math.max(
     0,
@@ -809,17 +838,24 @@ async function collectResourcesInWorker(
       "resource collector input exceeded transport limit",
     );
   }
-  const worker = spawn(launch.executable, [launch.workerPath], {
-    cwd: process.cwd(),
-    detached: true,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const superviseWorker = processRuntime === defaultResourceWorkerProcessRuntime
+    && resourceWorkerExecutableCanBeSupervised(launch.executable);
+  const worker = spawn(
+    superviseWorker ? process.execPath : launch.executable,
+    superviseWorker ? ["-e", RESOURCE_WORKER_SUPERVISOR, launch.executable, launch.workerPath] : [launch.workerPath],
+    {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
   return new Promise<CollectedResources>((resolve, reject) => {
     const pid = worker.pid;
     const expectedIdentity = typeof pid === "number" ? processRuntime.processIdentity(pid) : null;
     const groupEstablished = typeof pid === "number"
       && expectedIdentity !== null
-      && processRuntime.processGroupId(pid) === pid;
+      && processRuntime.processGroupId(pid) === pid
+      && processRuntime.processIdentity(pid) === expectedIdentity;
     type WorkerOutcome =
       | { type: "success"; value: CollectedResources }
       | {
@@ -840,10 +876,14 @@ async function collectResourcesInWorker(
     let killTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
     let cleanupPoll: ReturnType<typeof setTimeout> | undefined;
+    let cleanupAbsentSince: number | null = null;
     let cleanupStarted = false;
     let cleanupComplete = false;
     let cleanupIssue: unknown;
     let cleanupFailure: Error | null = null;
+    let cleanupVerificationFailed = false;
+    let groupContinuityLost = false;
+    let groupSignalSent = false;
     let leaderExited = false;
     let workerClosed = false;
     let streamsDetached = false;
@@ -862,6 +902,10 @@ async function collectResourcesInWorker(
     const rememberCleanupIssue = (error: unknown) => {
       cleanupIssue ??= error;
     };
+    const failCleanupVerification = (message: string) => {
+      cleanupVerificationFailed = true;
+      rememberCleanupIssue(new Error(message));
+    };
     const finishStderr = () => {
       if (stderrEnded) return;
       stderrEnded = true;
@@ -871,40 +915,90 @@ async function collectResourcesInWorker(
       for (const timer of ownershipTimers) clearTimeout(timer);
       ownershipTimers.length = 0;
     };
-    const refreshOwnedProcesses = () => {
-      if (typeof pid !== "number" || expectedIdentity === null) return;
-      if (processRuntime.processIdentity(pid) !== expectedIdentity) return;
-      try {
-        for (const descendant of processRuntime.descendants(pid)) {
-          if (ownedProcesses.has(descendant)) continue;
-          const identity = processRuntime.processIdentity(descendant);
-          if (identity !== null) ownedProcesses.set(descendant, identity);
-        }
-      } catch (error) {
-        rememberCleanupIssue(error);
+    const retainLiveGroupMembers = () => {
+      if (!groupEstablished || groupContinuityLost || groupSignalSent || leaderExited
+        || typeof pid !== "number" || expectedIdentity === null) return;
+      if (processRuntime.processIdentity(pid) !== expectedIdentity) {
+        groupContinuityLost = true;
+        failCleanupVerification("resource collector worker group leader identity changed");
+        return;
       }
-    };
-    const retainContinuousGroupMembers = () => {
-      if (!leaderExited || !groupEstablished || typeof pid !== "number" || expectedIdentity === null) return;
       let members: number[];
       try {
         members = processRuntime.processGroupMembers(pid);
       } catch (error) {
+        groupContinuityLost = true;
+        failCleanupVerification("resource collector worker group membership could not be inspected");
         rememberCleanupIssue(error);
         return;
       }
-      if (members.includes(pid) && processRuntime.processIdentity(pid) !== expectedIdentity) {
-        rememberCleanupIssue(new Error("resource collector worker group leader identity changed"));
+      if (!members.includes(pid)) {
+        groupContinuityLost = true;
+        failCleanupVerification("resource collector worker group continuity was lost");
         return;
       }
-      const identities = members.map((member) => [member, processRuntime.processIdentity(member)] as const);
-      if (identities.some(([, identity]) => identity === null)) {
-        rememberCleanupIssue(new Error("resource collector worker group member identity is unavailable"));
+      const observed: Array<readonly [number, string]> = [];
+      for (const member of members) {
+        const identity = processRuntime.processIdentity(member);
+        if (identity === null || processRuntime.processGroupId(member) !== pid
+          || processRuntime.processIdentity(member) !== identity) {
+          continue;
+        }
+        observed.push([member, identity]);
+      }
+      if (processRuntime.processIdentity(pid) !== expectedIdentity) {
+        groupContinuityLost = true;
+        failCleanupVerification("resource collector worker group leader identity changed");
         return;
       }
-      for (const [member, identity] of identities) {
-        if (!ownedProcesses.has(member)) ownedProcesses.set(member, identity!);
+      for (const [member, identity] of observed) {
+        const prior = ownedProcesses.get(member);
+        if (prior !== undefined && prior !== identity) {
+          groupContinuityLost = true;
+          failCleanupVerification("resource collector worker group member identity changed");
+          return;
+        }
+        ownedProcesses.set(member, identity);
       }
+    };
+    const refreshOwnedProcesses = (): boolean => {
+      let discovered = false;
+      const pending = [...ownedProcesses.keys()];
+      const inspected = new Set<number>();
+      while (pending.length > 0) {
+        const root = pending.pop()!;
+        if (inspected.has(root)) continue;
+        inspected.add(root);
+        const rootIdentity = ownedProcesses.get(root);
+        if (rootIdentity === undefined || processRuntime.processIdentity(root) !== rootIdentity) continue;
+        let descendants: number[];
+        try {
+          descendants = processRuntime.descendants(root);
+        } catch (error) {
+          rememberCleanupIssue(error);
+          continue;
+        }
+        if (processRuntime.processIdentity(root) !== rootIdentity) continue;
+        for (const descendant of descendants) {
+          if (descendant === root) continue;
+          const identity = processRuntime.processIdentity(descendant);
+          if (identity === null
+            || processRuntime.processIdentity(root) !== rootIdentity
+            || processRuntime.processIdentity(descendant) !== identity) continue;
+          const prior = ownedProcesses.get(descendant);
+          if (prior !== undefined && prior !== identity) {
+            failCleanupVerification("resource collector descendant identity was recycled");
+            continue;
+          }
+          if (prior === undefined) {
+            ownedProcesses.set(descendant, identity);
+            discovered = true;
+          }
+          pending.push(descendant);
+        }
+      }
+      retainLiveGroupMembers();
+      return discovered;
     };
     const ownedProcessState = () => {
       const active: number[] = [];
@@ -926,38 +1020,52 @@ async function collectResourcesInWorker(
         return "present";
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
-        if (code === "ESRCH") return "absent";
+        if (code === "ESRCH") {
+          if (!groupSignalSent) groupContinuityLost = true;
+          return "absent";
+        }
         if (code === "EPERM") return "present";
         rememberCleanupIssue(error);
         return "unknown";
       }
     };
-    const workerGroupOwned = (active: readonly number[]): boolean => {
-      if (typeof pid !== "number" || expectedIdentity === null) return false;
-      for (const ownedPid of active) {
-        if (processRuntime.processGroupId(ownedPid) === pid) return true;
+    const workerGroupOwned = (): boolean => {
+      if (!groupEstablished || groupContinuityLost || typeof pid !== "number" || expectedIdentity === null) return false;
+      for (const [member, identity] of ownedProcesses) {
+        if (processRuntime.processIdentity(member) === identity
+          && processRuntime.processGroupId(member) === pid
+          && processRuntime.processIdentity(member) === identity) return true;
       }
       return false;
     };
     const signalOwnedCleanup = (signal: NodeJS.Signals) => {
       refreshOwnedProcesses();
-      retainContinuousGroupMembers();
       const state = ownedProcessState();
       const group = probeWorkerGroup();
       if (group === "present") {
-        if (workerGroupOwned(state.active)) {
+        if (workerGroupOwned()) {
           try {
             processRuntime.signal(-pid!, signal);
+            groupSignalSent = true;
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
           }
         } else {
-          rememberCleanupIssue(new Error("resource collector worker group ownership could not be verified"));
+          if (groupSignalSent) {
+            rememberCleanupIssue(new Error("resource collector worker group ownership could not be verified"));
+          } else {
+            failCleanupVerification("resource collector worker group ownership could not be verified");
+          }
         }
       }
       for (const ownedPid of state.active) {
         const identity = ownedProcesses.get(ownedPid);
-        if (identity === undefined || processRuntime.processIdentity(ownedPid) !== identity) continue;
+        if (identity === undefined || processRuntime.processIdentity(ownedPid) !== identity) {
+          if (!groupSignalSent) {
+            failCleanupVerification("resource collector worker identity changed before individual cleanup");
+          }
+          continue;
+        }
         try {
           processRuntime.signal(ownedPid, signal);
         } catch (error) {
@@ -967,7 +1075,14 @@ async function collectResourcesInWorker(
     };
     const cleanupIsAbsent = (): boolean => {
       const state = ownedProcessState();
-      return probeWorkerGroup() === "absent" && state.active.length === 0 && !state.uncertain;
+      const absent = probeWorkerGroup() === "absent" && state.active.length === 0 && !state.uncertain;
+      if (absent && cleanupVerificationFailed && cleanupFailure === null) {
+        cleanupFailure = new Error(
+          "resource collector worker cleanup ownership verification failed",
+          cleanupIssue === undefined ? undefined : { cause: cleanupIssue },
+        );
+      }
+      return absent;
     };
     const releaseWorkerHandles = () => {
       if (streamsDetached) return;
@@ -1016,7 +1131,11 @@ async function collectResourcesInWorker(
     };
     const confirmCleanup = () => {
       if (!cleanupStarted || cleanupComplete) return;
-      if (cleanupIsAbsent()) {
+      if (refreshOwnedProcesses()) cleanupAbsentSince = null;
+      const absent = cleanupIsAbsent();
+      if (!absent) cleanupAbsentSince = null;
+      else if (cleanupAbsentSince === null) cleanupAbsentSince = Date.now();
+      if (absent && Date.now() - cleanupAbsentSince! >= cleanupAbsenceConfirmationMs) {
         cleanupComplete = true;
         if (killTimer) clearTimeout(killTimer);
         if (cleanupPoll) clearTimeout(cleanupPoll);
@@ -1057,7 +1176,7 @@ async function collectResourcesInWorker(
       terminate();
     };
     refreshOwnedProcesses();
-    for (const delay of [0, 5, 20]) {
+    for (const delay of [0, 5, 20, 40]) {
       const timer = setTimeout(() => {
         if (!cleanupStarted && !leaderExited) refreshOwnedProcesses();
       }, delay);

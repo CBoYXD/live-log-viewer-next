@@ -324,6 +324,102 @@ describe("resource collector", () => {
     expect(Buffer.byteLength(diagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
   });
 
+  test("static and streaming diagnostics redact quoted Authorization keys and quoted Bearer values", async () => {
+    const cases = [
+      {
+        name: "quoted JSON Basic",
+        input: '{"Authorization":"Basic QUOTED_JSON_BASIC_LEAK","safe":"SAFE_JSON_FIELD"}',
+        safe: "SAFE_JSON_FIELD",
+        secrets: ["QUOTED_JSON_BASIC_LEAK"],
+      },
+      {
+        name: "single-quoted Digest",
+        input: "{'Authorization':'Digest username=\"DIGEST_USER_LEAK\" response=\"DIGEST_RESPONSE_LEAK\"','safe':'SAFE_DIGEST_FIELD'}",
+        safe: "SAFE_DIGEST_FIELD",
+        secrets: ["DIGEST_USER_LEAK", "DIGEST_RESPONSE_LEAK"],
+      },
+      {
+        name: "quoted JSON Negotiate",
+        input: '{"Authorization":"Negotiate NEGOTIATE_LEAK FIRST_TAIL SECOND_TAIL","safe":"SAFE_NEGOTIATE_FIELD"}',
+        safe: "SAFE_NEGOTIATE_FIELD",
+        secrets: ["NEGOTIATE_LEAK", "FIRST_TAIL", "SECOND_TAIL"],
+      },
+      {
+        name: "quoted JSON custom scheme",
+        input: '{"Authorization":"Custom scheme=CUSTOM_LEAK quoted=\\\"CUSTOM_TAIL VALUE\\\"","safe":"SAFE_CUSTOM_FIELD"}',
+        safe: "SAFE_CUSTOM_FIELD",
+        secrets: ["CUSTOM_LEAK", "CUSTOM_TAIL"],
+      },
+      {
+        name: "double-quoted Bearer value",
+        input: 'Bearer "PART_A_LEAK PART_B_LEAK"\r\nX-Safe-After: SAFE_BEARER_FIELD',
+        safe: "SAFE_BEARER_FIELD",
+        secrets: ["PART_A_LEAK", "PART_B_LEAK"],
+      },
+      {
+        name: "single-quoted Bearer value",
+        input: "Bearer 'SINGLE_PART_A_LEAK SINGLE_PART_B_LEAK'\nX-Safe-After: SAFE_SINGLE_BEARER_FIELD",
+        safe: "SAFE_SINGLE_BEARER_FIELD",
+        secrets: ["SINGLE_PART_A_LEAK", "SINGLE_PART_B_LEAK"],
+      },
+    ];
+
+    for (const fixture of cases) {
+      for (let split = 0; split <= fixture.input.length; split += 1) {
+        const tail = createResourceDiagnosticTail();
+        tail.append(fixture.input.slice(0, split));
+        tail.append(fixture.input.slice(split));
+        const streamed = tail.value();
+        const label = `${fixture.name} split ${split}`;
+
+        expect(streamed.includes("<redacted>"), label).toBeTrue();
+        expect(streamed.includes(fixture.safe), label).toBeTrue();
+        expect(streamed.includes("\uFFFD"), label).toBeFalse();
+        expect(Buffer.byteLength(streamed), label).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+        for (const secret of fixture.secrets) {
+          expect(streamed.includes(secret), `${label} secret ${secret}`).toBeFalse();
+        }
+      }
+
+      const collector = createResourceCollector({
+        collectorId: `quoted-static-${fixture.name}`,
+        collect: async () => {
+          throw new ResourceCollectorFailureError(
+            "collector-crash",
+            "collector-error",
+            "resource collection failed",
+            { cause: new Error(fixture.input), stderr: fixture.input },
+          );
+        },
+      });
+      const result = await collector.observe(0, 1_000);
+      const cause = result.failure?.diagnostic.causes[0] ?? "";
+      const stderr = result.failure?.diagnostic.stderr ?? "";
+
+      expect(cause.includes(fixture.safe), `${fixture.name} static cause safe field`).toBeTrue();
+      expect(stderr.includes(fixture.safe), `${fixture.name} static stderr safe field`).toBeTrue();
+      for (const secret of fixture.secrets) {
+        expect(cause.includes(secret), `${fixture.name} static cause secret ${secret}`).toBeFalse();
+        expect(stderr.includes(secret), `${fixture.name} static stderr secret ${secret}`).toBeFalse();
+      }
+    }
+
+    const longSecret = "LONG_QUOTED_BEARER_LEAK ".repeat(1_000);
+    const longTail = createResourceDiagnosticTail();
+    longTail.append('Bearer "');
+    for (let offset = 0; offset < longSecret.length; offset += 61) {
+      longTail.append(longSecret.slice(offset, offset + 61));
+    }
+    longTail.append('"\r\nX-Safe-After: LONG_SAFE_SUFFIX 😀');
+    const longDiagnostic = longTail.value();
+
+    expect(longDiagnostic).toContain("Bearer <redacted>");
+    expect(longDiagnostic).toContain("LONG_SAFE_SUFFIX 😀");
+    expect(longDiagnostic).not.toContain("LONG_QUOTED_BEARER_LEAK");
+    expect(longDiagnostic).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(longDiagnostic)).toBeLessThanOrEqual(RESOURCE_FAILURE_STDERR_MAX_BYTES);
+  });
+
   test("stderr tail truncation preserves every UTF-8 boundary", async () => {
     for (const character of ["é", "€", "😀"]) {
       const width = Buffer.byteLength(character);
