@@ -539,7 +539,7 @@ async function makeInput(
   const flows = (overrides.loadFlows ?? loadFlows)();
   const processIdentity = overrides.processIdentity ?? ((pid: number) => procBackend.processIdentity(pid));
   const mergedFlowIds = await refreshMergedFlowIds(flows, overrides);
-  const snapshot = registry.snapshot();
+  const snapshot = registry.readOnlySnapshot();
   const missingTranscriptPaths = new Set(hosts.flatMap((host) =>
     host.primaryPath && !fs.existsSync(host.primaryPath) ? [host.primaryPath] : []));
   const authorship = await authorshipEvidence(snapshot, hosts, flows, files, missingTranscriptPaths, state.scannedAt);

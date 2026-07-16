@@ -2,7 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry, conversationLookupFromSnapshot, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
@@ -42,6 +42,46 @@ describe("agent registry", () => {
     expect(lookup.conversationForPath("/shared.jsonl")?.id).toBe(first.id);
     expect(lookup.canonicalConversationId("conversation_alias")).toBe(first.id);
     expect(lookup.conversation("conversation_alias")?.id).toBe(first.id);
+  });
+
+  test("read-only snapshots reuse one parse until an atomic registry replacement", () => {
+    const store = registry();
+    store.setEngineRouting("codex", "work");
+    const reads = spyOn(fs, "readFileSync");
+    let first: ReturnType<AgentRegistry["snapshot"]>;
+    let second: ReturnType<AgentRegistry["snapshot"]>;
+    try {
+      first = store.readOnlySnapshot();
+      second = store.readOnlySnapshot();
+      expect(reads.mock.calls.filter(([filename]) => filename === store.filename)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
+    expect(second!).toBe(first!);
+
+    store.setEngineRouting("codex", "default");
+    const replacement = store.readOnlySnapshot();
+
+    expect(replacement).not.toBe(first!);
+    expect(replacement.engineRouting.codex.activeAccountId).toBe("default");
+    expect(store.snapshot()).not.toBe(replacement);
+  });
+
+  test("read helpers share one signature-fenced registry parse", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("codex", "/sessions/read-helper.jsonl", "work");
+    store.setEngineRouting("codex", "work");
+    const reads = spyOn(fs, "readFileSync");
+    try {
+      expect(store.engineRouting("codex").activeAccountId).toBe("work");
+      expect(store.conversationForPath("/sessions/read-helper.jsonl")?.id).toBe(conversation.id);
+      expect(store.canonicalConversationId(conversation.id)).toBe(conversation.id);
+      expect(store.autoBalancePolicy("codex").enabled).toBeTrue();
+      expect(store.quotaObservations("codex")).toEqual([]);
+      expect(reads.mock.calls.filter(([filename]) => filename === store.filename)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
   });
 
   test("startup compaction bounds legacy delivered reservations per conversation", () => {
@@ -148,6 +188,26 @@ describe("agent registry", () => {
     });
     expect(entry.key).toEqual(KEY);
     expect(store.snapshot().receipts[receipt.launchId]?.state).toBe("completed");
+  });
+
+  test("skips an atomic rewrite when a mutation leaves the registry unchanged", () => {
+    const store = registry();
+    store.setEngineRouting("codex", "work");
+    const beforeBytes = fs.readFileSync(store.filename, "utf8");
+    const before = fs.statSync(store.filename);
+    const reads = spyOn(fs, "readFileSync");
+
+    try {
+      expect(store.releaseStructuredHostClaim(KEY, "missing-owner", 99)).toBeFalse();
+      expect(reads.mock.calls.filter(([filename]) => filename === store.filename)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
+
+    const after = fs.statSync(store.filename);
+    expect(fs.readFileSync(store.filename, "utf8")).toBe(beforeBytes);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
   });
 
   test("route settlement recovers when observation completed the same spawn first", () => {
