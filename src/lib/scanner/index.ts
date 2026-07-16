@@ -236,6 +236,7 @@ async function listFilesInternal(
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
     entry.activity = verdict.state;
     entry.activityReason = verdict.reason;
+    entry.derivationComplete = verdict.complete;
     const models = entryModels(entry);
     entry.model = models.display;
     entry.launchModel = models.launch;
@@ -276,7 +277,7 @@ async function listFilesInternal(
     files: entries,
     projectCatalog: scan.projectCatalog,
     ...(pinOverlayPaths?.length ? { pinOverlayPaths } : {}),
-    complete: scan.complete,
+    complete: scan.complete && entries.every((entry) => entry.derivationComplete !== false),
   };
 }
 

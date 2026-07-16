@@ -63,6 +63,8 @@ export interface FileEntry {
   activity: Activity;
   /** Machine-readable reason behind `activity` (jsonl_turn_open, mtime_fresh…). */
   activityReason?: string;
+  /** Whether transcript-backed scanner derivations completed for this file identity. */
+  derivationComplete?: boolean;
   /** Real OS process state when the entry maps to a process, else null. */
   proc: "running" | "done" | "killed" | null;
   pid: number | null;

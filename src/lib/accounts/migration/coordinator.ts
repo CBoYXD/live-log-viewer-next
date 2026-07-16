@@ -48,6 +48,28 @@ function engineOf(entry: FileEntry): MigrationEngine | null {
   return entry.engine === "claude" || entry.engine === "codex" ? entry.engine : null;
 }
 
+function projectedInventoryTurn(
+  entry: FileEntry,
+  parsed: ConversationObservation["turn"] | null,
+  existing: RegistryConversation | null,
+): ConversationObservation["turn"] {
+  if (!parsed) {
+    if (existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")) {
+      return { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt };
+    }
+    return { state: "unknown", source: "empty", terminalAt: null };
+  }
+
+  const activityComplete = entry.derivationComplete !== false;
+  if (parsed.state === "busy" && activityComplete && entry.activityReason === "pane_at_composer") {
+    return { state: "idle", source: "empty", terminalAt: null };
+  }
+  if (parsed.state === "unknown" && activityComplete && (entry.activity === "idle" || entry.activity === "recent")) {
+    return { state: "idle", source: "empty", terminalAt: null };
+  }
+  return parsed;
+}
+
 async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<ConversationObservation[]> {
   const inventoryStartedAt = Date.now();
   const snapshot = registry.snapshot();
@@ -78,13 +100,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
     const tail = tailRecordsResult(entry.path, entry.size, entry.mtime * 1000);
     const parsed = tail.complete ? turnStateFromRecords(tail.records, engine === "codex", true) : null;
-    const turn = parsed
-      ? parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
-        ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
-        : parsed
-      : existing && (existing.turn.state === "busy" || existing.turn.state === "unknown")
-        ? { state: existing.turn.state, source: existing.turn.source, terminalAt: existing.turn.terminalAt }
-        : { state: "unknown" as const, source: "empty" as const, terminalAt: null };
+    const turn = projectedInventoryTurn(entry, parsed, existing);
     const currentProfile = launchProfileByPath.get(entry.path)
       ?? existing?.generations.find((generation) => generation.path === entry.path)?.launchProfile;
     const configuredRoot = process.env.LLV_ROOT_CONVERSATION_ID;
@@ -201,6 +217,11 @@ function productionProvider(): SuccessorProviderPort {
 
 function terminalMigrationPhase(phase: string): boolean {
   return phase === "committed" || phase === "rolled-back" || phase === "failed-recoverable";
+}
+
+function successorCreationReady(conversation: RegistryConversation, registry: AgentRegistry): boolean {
+  if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return false;
+  return !registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain");
 }
 
 export interface MigrationCoordinatorOptions {
@@ -342,8 +363,7 @@ export async function advanceConversationMigration(
   if (!conversation?.migration) throw new Error("conversation has no migration");
   let migration = conversation.migration;
   if (migration.phase === "waiting-turn") {
-    if (conversation.turn.state !== "terminal" && conversation.turn.state !== "idle") return conversation;
-    if (registry.pendingDeliveries(conversation.id).some((delivery) => delivery.state === "delivery-uncertain")) return conversation;
+    if (!successorCreationReady(conversation, registry)) return conversation;
     conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["waiting-turn"], { phase: "requested" });
     migration = conversation.migration!;
   }
@@ -363,6 +383,7 @@ export async function advanceConversationMigration(
     if (migration.providerReceipt) {
       receipt = migration.providerReceipt;
     } else {
+      if (!successorCreationReady(conversation, registry)) return conversation;
       if (migration.phase === "requested") {
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["requested"], { phase: "preparing" });
         migration = conversation.migration!;
@@ -371,6 +392,7 @@ export async function advanceConversationMigration(
         conversation = registry.transitionConversationMigration(conversation.id, migration.revision, ["preparing"], { phase: "successor-starting" });
         migration = conversation.migration!;
       }
+      if (!successorCreationReady(conversation, registry)) return conversation;
       const source = conversation.generations.find((generation) => generation.id === migration.sourceGenerationId)
         ?? conversation.generations.at(-1);
       if (!source) throw new Error("conversation has no source generation");

@@ -114,6 +114,7 @@ function persistedTurnState(entry: FileEntry): string | null | undefined {
 
 function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
   for (const entry of snapshot.files) {
+    if (entry.derivationComplete !== true) continue;
     let current: fs.Stats;
     try {
       current = fs.statSync(entry.path);

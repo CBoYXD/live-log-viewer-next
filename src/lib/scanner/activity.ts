@@ -184,6 +184,7 @@ export function turnStateFromRecords(records: Record<string, unknown>[], codex: 
 export interface ActivityVerdict {
   state: Activity;
   reason: string;
+  complete: boolean;
 }
 
 export function activityVerdict(
@@ -194,9 +195,10 @@ export function activityVerdict(
 ): ActivityVerdict {
   const age = Date.now() / 1000 - mtime;
   if (root === "claude-tasks" && pathname.endsWith(".output")) {
-    if (outputHolders().has(pathname)) return { state: "live", reason: "output_held" };
-    return { state: age < 900 ? "recent" : "idle", reason: "output_released" };
+    if (outputHolders().has(pathname)) return { state: "live", reason: "output_held", complete: true };
+    return { state: age < 900 ? "recent" : "idle", reason: "output_released", complete: true };
   }
+  let complete = true;
   if (pathname.endsWith(".jsonl")) {
     const mtimeMs = mtime * 1000;
     const cached = turnCache.get(pathname);
@@ -205,18 +207,21 @@ export function activityVerdict(
     else {
       const turn = jsonlTurnState(pathname, size, mtimeMs, root.startsWith("codex"));
       state = turn.state;
+      complete = turn.complete;
       if (turn.complete) turnCache.set(pathname, [size, mtimeMs, state]);
     }
     if (state === "busy") {
-      return age < 180 ? { state: "live", reason: "jsonl_turn_open" } : { state: "stalled", reason: "jsonl_turn_stalled" };
+      return age < 180
+        ? { state: "live", reason: "jsonl_turn_open", complete }
+        : { state: "stalled", reason: "jsonl_turn_stalled", complete };
     }
     if (state === "done") {
-      return { state: age < 900 ? "recent" : "idle", reason: "jsonl_turn_completed" };
+      return { state: age < 900 ? "recent" : "idle", reason: "jsonl_turn_completed", complete };
     }
   }
-  if (age < 20) return { state: "live", reason: "mtime_fresh" };
-  if (age < 900) return { state: "recent", reason: "mtime_recent" };
-  return { state: "idle", reason: "mtime_old" };
+  if (age < 20) return { state: "live", reason: "mtime_fresh", complete };
+  if (age < 900) return { state: "recent", reason: "mtime_recent", complete };
+  return { state: "idle", reason: "mtime_old", complete };
 }
 
 export function activity(

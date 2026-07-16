@@ -31,7 +31,7 @@ export async function observeFiles(): Promise<FileEntry[]> {
   const holders = entries.some((entry) => entry.root === "claude-tasks" && entry.path.endsWith(".output")) ? outputHolders() : NO_HOLDERS;
   await each(entries, (entry) => {
     const verdict = activityVerdict(entry.root, entry.path, entry.mtime, entry.size);
-    entry.activity = verdict.state; entry.activityReason = verdict.reason;
+    entry.activity = verdict.state; entry.activityReason = verdict.reason; entry.derivationComplete = verdict.complete;
     const models = entryModels(entry); entry.model = models.display; entry.launchModel = models.launch;
     if (entry.root === "claude-tasks" && entry.path.endsWith(".output")) {
       const holder = holders.get(entry.path) ?? null; entry.pid = holder; entry.proc = holder === null ? "done" : "running";
