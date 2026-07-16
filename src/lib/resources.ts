@@ -1,7 +1,7 @@
 import { procBackend } from "@/lib/proc";
 import type { ProcBackend } from "@/lib/proc";
 import crypto from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -452,6 +452,11 @@ type ResourceWorkerLimits = Partial<{
   outputMaxBytes: number;
 }>;
 
+type ResourceWorkerNamespaceReference = Readonly<{
+  members(): number[] | null;
+  close(): void;
+}>;
+
 type ResourceWorkerProcessRuntime = Readonly<{
   kernelContainment?: "proven" | "unavailable";
   pidAlive(pid: number): boolean;
@@ -462,7 +467,7 @@ type ResourceWorkerProcessRuntime = Readonly<{
   namespaceMembers?(owner: string): number[] | null;
   processNamespaceId?(pid: number): string | null;
   processNamespacePid?(pid: number): number | null;
-  containmentMembers?(namespaceId: string): number[] | null;
+  openNamespaceReference?(pid: number, namespaceId: string): ResourceWorkerNamespaceReference | null;
   signal(pid: number, signal: NodeJS.Signals | 0): void;
 }>;
 
@@ -618,23 +623,51 @@ function linuxProcessNamespacePid(pid: number): number | null {
   }
 }
 
-function linuxProcessNamespaceMembers(namespaceId: string): number[] | null {
-  let names: string[];
+function openLinuxProcessNamespaceReference(pid: number, namespaceId: string): ResourceWorkerNamespaceReference | null {
+  let fd: number;
   try {
-    names = readdirSync("/proc");
+    fd = openSync(`/proc/${pid}/ns/pid`, "r");
   } catch {
     return null;
   }
-  const members: number[] = [];
-  for (const name of names) {
-    const pid = Number(name);
-    if (!Number.isInteger(pid) || pid <= 0) continue;
-    const identity = procBackend.processIdentity(pid);
-    if (identity === null || linuxProcessNamespaceId(pid) !== namespaceId) continue;
-    if (procBackend.processIdentity(pid) === identity
-      && linuxProcessNamespaceId(pid) === namespaceId) members.push(pid);
+  try {
+    if (readlinkSync(`/proc/self/fd/${fd}`) !== namespaceId) {
+      closeSync(fd);
+      return null;
+    }
+    const namespace = fstatSync(fd, { bigint: true });
+    let closed = false;
+    return {
+      members: () => {
+        let names: string[];
+        try {
+          names = readdirSync("/proc");
+        } catch {
+          return null;
+        }
+        const members: number[] = [];
+        for (const name of names) {
+          const member = Number(name);
+          if (!Number.isInteger(member) || member <= 0) continue;
+          try {
+            const candidate = statSync(`/proc/${member}/ns/pid`, { bigint: true });
+            if (candidate.dev === namespace.dev && candidate.ino === namespace.ino) members.push(member);
+          } catch {
+            // Processes may exit between the /proc directory scan and namespace inspection.
+          }
+        }
+        return members;
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        closeSync(fd);
+      },
+    };
+  } catch {
+    closeSync(fd);
+    return null;
   }
-  return members;
 }
 
 const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
@@ -650,8 +683,8 @@ const defaultResourceWorkerProcessRuntime: ResourceWorkerProcessRuntime = {
     : portableWorkerNamespaceMembers(owner),
   processNamespaceId: (pid) => procBackend.name === "linux" ? linuxProcessNamespaceId(pid) : null,
   processNamespacePid: (pid) => procBackend.name === "linux" ? linuxProcessNamespacePid(pid) : null,
-  containmentMembers: (namespaceId) => procBackend.name === "linux"
-    ? linuxProcessNamespaceMembers(namespaceId)
+  openNamespaceReference: (pid, namespaceId) => procBackend.name === "linux"
+    ? openLinuxProcessNamespaceReference(pid, namespaceId)
     : null,
   signal: (pid, signal) => process.kill(pid, signal),
 };
@@ -1041,9 +1074,12 @@ async function collectResourcesInWorker(
     let containmentNamespaceId: string | null = null;
     let containmentRootPid: number | null = null;
     let containmentRootIdentity: string | null = null;
+    let containmentReference: ResourceWorkerNamespaceReference | null = null;
+    let containmentRootRetired = false;
     const injectedContainmentProven = processRuntime !== defaultResourceWorkerProcessRuntime
       && processRuntime.kernelContainment !== "unavailable";
     let containmentScanComplete = injectedContainmentProven;
+    let containmentMembershipEmpty = injectedContainmentProven;
     let containmentProven = injectedContainmentProven;
     let groupContinuityLost = false;
     let groupSignalSent = false;
@@ -1079,35 +1115,34 @@ async function collectResourcesInWorker(
       ownershipTimers.length = 0;
     };
     const retainLiveContainmentMembers = (): boolean => {
-      if (!containmentProven || containmentNamespaceId === null || !processRuntime.containmentMembers) {
+      if (!containmentProven || containmentNamespaceId === null || containmentReference === null) {
         return false;
       }
       let members: number[] | null;
       try {
-        const currentRootIdentity = containmentRootPid === null
-          ? null
-          : processRuntime.processIdentity(containmentRootPid);
-        const rootIsLive = containmentRootPid !== null
-          && containmentRootIdentity !== null
-          && currentRootIdentity === containmentRootIdentity
-          && processRuntime.processNamespaceId?.(containmentRootPid) === containmentNamespaceId
-          && processRuntime.processNamespacePid?.(containmentRootPid) === 1;
-        const rootIsAbsent = containmentRootPid !== null
-          && containmentRootIdentity !== null
-          && currentRootIdentity === null
-          && !processRuntime.pidAlive(containmentRootPid);
-        if (!rootIsLive && !rootIsAbsent && currentRootIdentity !== null) {
-          failCleanupVerification("resource collector PID namespace root identity changed");
+        if (!containmentRootRetired && containmentRootPid !== null && containmentRootIdentity !== null) {
+          const currentRootIdentity = processRuntime.processIdentity(containmentRootPid);
+          if (currentRootIdentity === containmentRootIdentity) {
+            const namespaceId = processRuntime.processNamespaceId?.(containmentRootPid);
+            const namespacePid = processRuntime.processNamespacePid?.(containmentRootPid);
+            const confirmedIdentity = processRuntime.processIdentity(containmentRootPid);
+            if (confirmedIdentity !== currentRootIdentity) containmentRootRetired = true;
+            else if (namespaceId !== containmentNamespaceId || namespacePid !== 1) {
+              failCleanupVerification("resource collector PID namespace root identity changed");
+            }
+          } else if (currentRootIdentity !== null || !processRuntime.pidAlive(containmentRootPid)) {
+            containmentRootRetired = true;
+          }
         }
-        if (rootIsLive) members = processRuntime.descendants(containmentRootPid!);
-        else if (rootIsAbsent) members = [];
-        else members = processRuntime.containmentMembers(containmentNamespaceId);
+        members = containmentReference.members();
       } catch (error) {
         containmentScanComplete = false;
+        containmentMembershipEmpty = false;
         rememberCleanupIssue(error);
         return false;
       }
       containmentScanComplete = members !== null;
+      containmentMembershipEmpty = members?.length === 0;
       if (members === null) {
         rememberCleanupIssue(new Error("resource collector PID namespace could not be inspected"));
         return false;
@@ -1312,10 +1347,17 @@ async function collectResourcesInWorker(
             if ((error as NodeJS.ErrnoException).code !== "ESRCH") rememberCleanupIssue(error);
           }
         }
+        if (containmentRootRetired) return;
         const currentIdentity = processRuntime.processIdentity(containmentRootPid);
-        if (currentIdentity === null) return;
-        if (currentIdentity !== containmentRootIdentity
-          || processRuntime.processNamespaceId?.(containmentRootPid) !== containmentNamespaceId
+        if (currentIdentity === null) {
+          if (!processRuntime.pidAlive(containmentRootPid)) containmentRootRetired = true;
+          return;
+        }
+        if (currentIdentity !== containmentRootIdentity) {
+          containmentRootRetired = true;
+          return;
+        }
+        if (processRuntime.processNamespaceId?.(containmentRootPid) !== containmentNamespaceId
           || processRuntime.processNamespacePid?.(containmentRootPid) !== 1
           || processRuntime.processIdentity(containmentRootPid) !== currentIdentity) {
           failCleanupVerification("resource collector PID namespace root identity changed before cleanup");
@@ -1367,7 +1409,7 @@ async function collectResourcesInWorker(
         && probeWorkerGroup() === "absent"
         && state.active.length === 0
         && !state.uncertain;
-      const absent = processChecksAbsent && containmentScanComplete;
+      const absent = processChecksAbsent && containmentScanComplete && containmentMembershipEmpty;
       if (processChecksAbsent && !containmentProven && cleanupFailure === null) {
         cleanupVerificationFailed = true;
         cleanupFailure = new Error("resource collector kernel containment could not be established");
@@ -1384,6 +1426,13 @@ async function collectResourcesInWorker(
     const releaseWorkerHandles = () => {
       if (streamsDetached) return;
       streamsDetached = true;
+      try {
+        containmentReference?.close();
+      } catch (error) {
+        rememberCleanupIssue(error);
+        cleanupFailure ??= new Error("resource collector PID namespace reference could not be closed", { cause: error });
+      }
+      containmentReference = null;
       finishStderr();
       worker.removeAllListeners();
       for (const stream of [worker.stdin, worker.stdout, worker.stderr]) {
@@ -1399,7 +1448,7 @@ async function collectResourcesInWorker(
       const rootPid = Number(rawRootPid);
       if (line.length > 512 || token !== containmentToken || !Number.isInteger(rootPid) || rootPid <= 0
         || !/^pid:\[\d+\]$/.test(namespaceId) || extra.length > 0
-        || !processRuntime.containmentMembers || !processRuntime.processNamespaceId
+        || !processRuntime.openNamespaceReference || !processRuntime.processNamespaceId
         || !processRuntime.processNamespacePid) {
         failCleanupVerification("resource collector PID namespace handshake was invalid");
         return true;
@@ -1409,16 +1458,26 @@ async function collectResourcesInWorker(
         && processRuntime.processNamespaceId(rootPid) === namespaceId
         && processRuntime.processNamespacePid(rootPid) === 1
         && processRuntime.processIdentity(rootPid) === rootIdentity;
-      const members = liveRootIsValid ? null : processRuntime.containmentMembers(namespaceId);
-      if (!liveRootIsValid && (members === null || members.length > 0)) {
+      const reference = liveRootIsValid
+        ? processRuntime.openNamespaceReference(rootPid, namespaceId)
+        : null;
+      const liveRootRemainsValid = reference !== null
+        && processRuntime.processIdentity(rootPid) === rootIdentity
+        && processRuntime.processNamespaceId(rootPid) === namespaceId
+        && processRuntime.processNamespacePid(rootPid) === 1
+        && processRuntime.processIdentity(rootPid) === rootIdentity;
+      if (!liveRootRemainsValid) {
+        reference?.close();
         failCleanupVerification("resource collector PID namespace root could not be verified");
         return true;
       }
       containmentNamespaceId = namespaceId;
       containmentRootPid = rootPid;
       containmentRootIdentity = rootIdentity;
+      containmentReference = reference;
       containmentProven = true;
-      containmentScanComplete = members?.length === 0;
+      containmentScanComplete = false;
+      containmentMembershipEmpty = false;
       namespaceScanComplete = true;
       retainLiveContainmentMembers();
       return true;
@@ -1523,6 +1582,7 @@ async function collectResourcesInWorker(
       if (typeof pid !== "number") {
         containmentProven = true;
         containmentScanComplete = true;
+        containmentMembershipEmpty = true;
         namespaceScanComplete = true;
       }
       finish({

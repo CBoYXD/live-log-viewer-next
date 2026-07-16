@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -116,6 +116,14 @@ function processExists(pid: number): boolean {
   }
 }
 
+function fileHasText(filename: string): boolean {
+  try {
+    return readFileSync(filename, "utf8").trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
 interface FixtureProcessGroup {
   pgid: number;
   authorizerPid: number;
@@ -147,6 +155,24 @@ function pidNamespaceMembers(namespaceId: string): number[] {
     } catch {}
   }
   return members;
+}
+
+function retainedPidNamespaceReferences(namespaceId: string): number {
+  let references = 0;
+  for (const name of readdirSync(`/proc/${process.pid}/fd`)) {
+    try {
+      if (readlinkSync(`/proc/${process.pid}/fd/${name}`) === namespaceId) references += 1;
+    } catch {}
+  }
+  return references;
+}
+
+function retainPidNamespaceReference(pid: number, namespaceId: string): number {
+  const fd = openSync(`/proc/${pid}/ns/pid`, "r");
+  const actualNamespaceId = readlinkSync(`/proc/self/fd/${fd}`);
+  if (actualNamespaceId === namespaceId) return fd;
+  closeSync(fd);
+  throw new Error(`PID ${pid} changed namespace from ${namespaceId} to ${actualNamespaceId} before the test reference was retained`);
 }
 
 function confirmedFixtureProcessGroups(executable: string): FixtureProcessGroup[] {
@@ -1452,7 +1478,6 @@ describe("resource recurring reads", () => {
             'const fs = require("node:fs");',
             'const { spawn } = require("node:child_process");',
             'const [escapedScript, escapedPid, escapedReady, memberReady, pipes] = process.argv.slice(2);',
-            'fs.writeFileSync(memberReady, "ready");',
             'let handled = false;',
             'process.on("SIGTERM", () => {',
             '  if (handled) return;',
@@ -1462,6 +1487,7 @@ describe("resource recurring reads", () => {
             '  child.unref();',
             '  process.exit(0);',
             '});',
+            'fs.writeFileSync(memberReady, "ready");',
             'setInterval(() => {}, 1_000);',
             '',
           ].join("\n"));
@@ -1474,6 +1500,8 @@ describe("resource recurring reads", () => {
             "sleep 0.08",
             fixture.name === "crash"
               ? `kill -TERM "$member_pid"; while [ ! -e "${escapedReady}" ]; do sleep 0.005; done; exit 7`
+              : fixture.name === "timeout"
+                ? `kill -TERM "$member_pid"; while [ ! -e "${escapedReady}" ]; do sleep 0.005; done`
               : fixture.output,
             "while :; do sleep 0.01; done",
           ];
@@ -1528,25 +1556,25 @@ describe("resource recurring reads", () => {
       {
         name: "success",
         output: `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
-        timeoutMs: 500,
+        timeoutMs: 1_200,
         expected: { status: "complete" },
       },
       {
         name: "malformed output",
         output: "printf '{invalid}\\n'",
-        timeoutMs: 500,
+        timeoutMs: 1_200,
         expected: { degradedReason: "collector-crash", failure: { cause: "worker-output-invalid" } },
       },
       {
         name: "crash",
         output: "exit 7",
-        timeoutMs: 500,
+        timeoutMs: 1_200,
         expected: { degradedReason: "collector-crash", failure: { cause: "worker-exit" } },
       },
       {
         name: "timeout",
         output: ":",
-        timeoutMs: 180,
+        timeoutMs: 650,
         expected: { degradedReason: "timeout", failure: { cause: "worker-timeout" } },
       },
     ] as const;
@@ -1584,7 +1612,6 @@ describe("resource recurring reads", () => {
             'const fs = require("node:fs");',
             'const { spawn } = require("node:child_process");',
             'const [escapedScript, escapedPid, escapedNamespace, escapedReady, memberReady, ownerMode] = process.argv.slice(2);',
-            'fs.writeFileSync(memberReady, "ready");',
             'let handled = false;',
             'process.on("SIGTERM", () => {',
             '  if (handled) return;',
@@ -1598,15 +1625,18 @@ describe("resource recurring reads", () => {
             '  child.unref();',
             '  process.exit(0);',
             '});',
+            'fs.writeFileSync(memberReady, "ready");',
             'setInterval(() => {}, 1_000);',
             '',
           ].join("\n"));
           return [
             `read host_pid _ < /proc/self/stat; printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+            `readlink /proc/self/ns/pid > "${path.join(directory, "root-namespace")}"`,
             "trap 'exit 0' TERM INT",
             `/usr/bin/node "${memberScript}" "${escapedScript}" "${escapedPid}" "${escapedNamespace}" "${escapedReady}" "${memberReady}" "${owner}" &`,
             "member_pid=$!",
             `while [ ! -e "${memberReady}" ]; do sleep 0.005; done`,
+            `while [ ! -e "${path.join(directory, "release")}" ]; do sleep 0.005; done`,
             "sleep 0.08",
             fixture.name === "crash"
               ? `kill -TERM "$member_pid"; while [ ! -e "${escapedReady}" ]; do sleep 0.005; done; exit 7`
@@ -1616,34 +1646,55 @@ describe("resource recurring reads", () => {
         }, async (directory) => {
           const escapedPidFile = path.join(directory, "owner-escaped-pid");
           const escapedNamespaceFile = path.join(directory, "owner-escaped-namespace");
-          const diagnostic = (await workerTestReader({
+          const read = workerTestReader({
             initial: null,
             workerLimits: {
-              observeTimeoutMs: 900,
+              observeTimeoutMs: 3_000,
               inputTimeoutMs: 10,
               timeoutMs: fixture.timeoutMs,
-              closeTimeoutMs: 40,
-              cleanupTimeoutMs: 150,
-              headroomMs: 250,
+              closeTimeoutMs: 250,
+              cleanupTimeoutMs: 600,
+              headroomMs: 900,
             },
-          }).read(true)).diagnostic;
-          for (let attempt = 0; attempt < 20 && !existsSync(escapedPidFile); attempt += 1) {
+          }).read(true);
+          const rootPidFile = path.join(directory, "pid");
+          const rootNamespaceFile = path.join(directory, "root-namespace");
+          for (let attempt = 0; attempt < 100
+            && (!fileHasText(rootPidFile) || !fileHasText(rootNamespaceFile)); attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 5));
           }
-          expect(existsSync(escapedPidFile), `${owner} ${fixture.name} spawn: ${JSON.stringify(diagnostic)}`).toBeTrue();
-          const escapedPid = Number(readFileSync(escapedPidFile, "utf8"));
-          const namespaceId = readFileSync(escapedNamespaceFile, "utf8");
-          const descendantAliveAtSettlement = processExists(escapedPid);
-          results.push({ owner, outcome: fixture.name, diagnostic, descendantAliveAtSettlement });
-          if (descendantAliveAtSettlement) process.kill(escapedPid, "SIGKILL");
-          await expectProcessAbsentAfterQuietInterval(escapedPid, `${owner} ${fixture.name} RED cleanup`);
+          const rootPid = Number(readFileSync(rootPidFile, "utf8"));
+          const rootNamespaceId = readFileSync(rootNamespaceFile, "utf8").trim();
+          const namespaceReference = retainPidNamespaceReference(rootPid, rootNamespaceId);
+          writeFileSync(path.join(directory, "release"), "release");
+          let namespaceId = rootNamespaceId;
+          try {
+            const diagnostic = (await read).diagnostic;
+            for (let attempt = 0; attempt < 40
+              && (!fileHasText(escapedPidFile) || !fileHasText(escapedNamespaceFile)); attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+            expect(fileHasText(escapedPidFile) && fileHasText(escapedNamespaceFile),
+              `${owner} ${fixture.name} spawn: ${JSON.stringify(diagnostic)}`).toBeTrue();
+            const escapedPid = Number(readFileSync(escapedPidFile, "utf8"));
+            namespaceId = readFileSync(escapedNamespaceFile, "utf8").trim();
+            const descendantAliveAtSettlement = processExists(escapedPid);
+            results.push({ owner, outcome: fixture.name, diagnostic, descendantAliveAtSettlement });
+            if (descendantAliveAtSettlement) process.kill(escapedPid, "SIGKILL");
+            await expectProcessAbsentAfterQuietInterval(escapedPid, `${owner} ${fixture.name} RED cleanup`);
 
-          expect(diagnostic, `${owner} ${fixture.name} primary outcome`).toMatchObject(fixture.expected);
-          expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")), `${owner} ${fixture.name} groups`).toEqual([]);
-          expect(pidNamespaceMembers(namespaceId), `${owner} ${fixture.name} namespace`).toEqual([]);
-          await new Promise((resolve) => setTimeout(resolve, 30));
-          expect(processExists(escapedPid), `${owner} ${fixture.name} sustained identity`).toBeFalse();
-          expect(pidNamespaceMembers(namespaceId), `${owner} ${fixture.name} sustained namespace`).toEqual([]);
+            expect(namespaceId, `${owner} ${fixture.name} namespace identity`).toBe(rootNamespaceId);
+            expect(diagnostic, `${owner} ${fixture.name} primary outcome`).toMatchObject(fixture.expected);
+            expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker")), `${owner} ${fixture.name} groups`).toEqual([]);
+            expect(pidNamespaceMembers(namespaceId), `${owner} ${fixture.name} namespace`).toEqual([]);
+            expect(retainedPidNamespaceReferences(namespaceId), `${owner} ${fixture.name} production namespace references`).toBe(1);
+            await new Promise((resolve) => setTimeout(resolve, 30));
+            expect(processExists(escapedPid), `${owner} ${fixture.name} sustained identity`).toBeFalse();
+            expect(pidNamespaceMembers(namespaceId), `${owner} ${fixture.name} sustained namespace`).toEqual([]);
+          } finally {
+            closeSync(namespaceReference);
+          }
+          expect(retainedPidNamespaceReferences(namespaceId), `${owner} ${fixture.name} namespace references`).toBe(0);
         });
       }
     }
@@ -1660,6 +1711,95 @@ describe("resource recurring reads", () => {
     )), `uncontained outcomes: ${JSON.stringify(results)}`).toEqual([]);
   });
 
+  test("retains PID namespace membership authority through init disappearance", async () => {
+    await withResourceWorkerScript((directory) => {
+      const escapedScript = path.join(directory, "retained-namespace-child.cjs");
+      const memberScript = path.join(directory, "retained-namespace-member.cjs");
+      writeFileSync(escapedScript, [
+        '#!/usr/bin/node',
+        'const fs = require("node:fs");',
+        'const [pidFile, namespaceFile, readyFile] = process.argv.slice(2);',
+        'process.on("SIGTERM", () => {});',
+        'process.on("SIGINT", () => {});',
+        'fs.writeFileSync(pidFile, fs.readFileSync("/proc/self/stat", "utf8").split(" ", 1)[0]);',
+        'fs.writeFileSync(namespaceFile, fs.readlinkSync("/proc/self/ns/pid"));',
+        'fs.writeFileSync(readyFile, "ready");',
+        'setInterval(() => {}, 1_000);',
+        '',
+      ].join("\n"));
+      writeFileSync(memberScript, [
+        '#!/usr/bin/node',
+        'const fs = require("node:fs");',
+        'const { spawn } = require("node:child_process");',
+        'const [escapedScript, pidFile, namespaceFile, readyFile, memberReady] = process.argv.slice(2);',
+        'process.once("SIGTERM", () => {',
+        '  const env = { ...process.env };',
+        '  delete env.LLV_RESOURCE_COLLECTOR_OWNER;',
+        '  const child = spawn(process.execPath, [escapedScript, pidFile, namespaceFile, readyFile], {',
+        '    detached: true, stdio: "ignore", env,',
+        '  });',
+        '  child.unref();',
+        '  process.exit(0);',
+        '});',
+        'fs.writeFileSync(memberReady, "ready");',
+        'setInterval(() => {}, 1_000);',
+        '',
+      ].join("\n"));
+      return [
+        `readlink /proc/self/ns/pid > "${path.join(directory, "root-namespace")}"`,
+        "trap 'exit 0' TERM INT",
+        `/usr/bin/node "${memberScript}" "${escapedScript}" "${path.join(directory, "escaped-pid")}" "${path.join(directory, "escaped-namespace")}" "${path.join(directory, "escaped-ready")}" "${path.join(directory, "member-ready")}" &`,
+        `while [ ! -e "${path.join(directory, "member-ready")}" ]; do sleep 0.005; done`,
+        `while [ ! -e "${path.join(directory, "release")}" ]; do sleep 0.005; done`,
+        `printf '%s\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
+        "while :; do sleep 0.01; done",
+      ];
+    }, async (directory) => {
+      const baseline = referencedHandles();
+      const read = workerTestReader({
+        initial: null,
+        workerLimits: {
+          observeTimeoutMs: 2_000,
+          inputTimeoutMs: 10,
+          timeoutMs: 1_200,
+          closeTimeoutMs: 250,
+          cleanupTimeoutMs: 600,
+          headroomMs: 700,
+        },
+      }).read(true);
+      const rootNamespaceFile = path.join(directory, "root-namespace");
+      for (let attempt = 0; attempt < 100 && !fileHasText(rootNamespaceFile); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(fileHasText(rootNamespaceFile)).toBeTrue();
+      const namespaceId = readFileSync(rootNamespaceFile, "utf8").trim();
+      const retainedReferences = retainedPidNamespaceReferences(namespaceId);
+      writeFileSync(path.join(directory, "release"), "release");
+      const outcome = await read;
+      const escapedPidFile = path.join(directory, "escaped-pid");
+      const escapedNamespaceFile = path.join(directory, "escaped-namespace");
+      for (let attempt = 0; attempt < 40
+        && (!fileHasText(escapedPidFile) || !fileHasText(escapedNamespaceFile)); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const escapedPid = fileHasText(escapedPidFile) ? Number(readFileSync(escapedPidFile, "utf8")) : 0;
+      const escapedAliveAtSettlement = escapedPid > 0 && processExists(escapedPid);
+      const namespaceMembersAtSettlement = pidNamespaceMembers(namespaceId);
+      const referencesAtSettlement = retainedPidNamespaceReferences(namespaceId);
+      if (escapedAliveAtSettlement) process.kill(escapedPid, "SIGKILL");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(retainedReferences).toBeGreaterThan(0);
+      expect(outcome.diagnostic.degradedReason).toBeUndefined();
+      expect(escapedPid).toBeGreaterThan(0);
+      expect(escapedAliveAtSettlement).toBeFalse();
+      expect(namespaceMembersAtSettlement).toEqual([]);
+      expect(referencesAtSettlement).toBe(0);
+      expect(newReferencedHandleCount(baseline)).toBe(0);
+    });
+  });
+
   test("concurrent containment verification reaches exact zero for every TERM descendant", async () => {
     await withResourceWorkerScript((directory) => {
       const memberScript = path.join(directory, "concurrent-term-member.cjs");
@@ -1668,7 +1808,6 @@ describe("resource recurring reads", () => {
         'const fs = require("node:fs");',
         'const { spawn } = require("node:child_process");',
         'const [directory, key] = process.argv.slice(2);',
-        'fs.writeFileSync(`${directory}/${key}.member`, "ready");',
         'let handled = false;',
         'process.on("SIGTERM", () => {',
         '  if (handled) return;',
@@ -1687,54 +1826,83 @@ describe("resource recurring reads", () => {
         '  child.unref();',
         '  process.exit(0);',
         '});',
+        'fs.writeFileSync(`${directory}/${key}.member`, "ready");',
         'setInterval(() => {}, 1_000);',
         '',
       ].join("\n"));
       return [
         "read host_pid _ < /proc/self/stat",
         `printf '%s' "$host_pid" > "${path.join(directory, "pid")}"`,
+        `readlink /proc/self/ns/pid > "${directory}/$host_pid.root-namespace"`,
         "trap 'exit 0' TERM INT",
         `/usr/bin/node "${memberScript}" "${directory}" "$host_pid" &`,
         `while [ ! -e "${directory}/$host_pid.member" ]; do sleep 0.005; done`,
+        `while [ ! -e "${directory}/$host_pid.release" ]; do sleep 0.005; done`,
         `printf '%s\\n' '${EMPTY_FRESH_WORKER_MESSAGE}'`,
         "while :; do sleep 0.01; done",
       ];
     }, async (directory) => {
       const baseline = referencedHandles();
-      const outcomes = await Promise.all(Array.from({ length: 6 }, () => workerTestReader({
+      const reads = Array.from({ length: 6 }, () => workerTestReader({
         initial: null,
         workerLimits: {
-          observeTimeoutMs: 1_200,
+          observeTimeoutMs: 3_000,
           inputTimeoutMs: 10,
-          timeoutMs: 700,
-          closeTimeoutMs: 50,
-          cleanupTimeoutMs: 300,
-          headroomMs: 300,
+          timeoutMs: 1_200,
+          closeTimeoutMs: 250,
+          cleanupTimeoutMs: 600,
+          headroomMs: 900,
         },
-      }).read(true)));
-      const pidFiles = readdirSync(directory).filter((name) => /^\d+\.pid$/.test(name));
-      expect(outcomes).toHaveLength(6);
-      expect(outcomes.every((outcome) => (
-        (outcome.diagnostic.status === "complete" && outcome.diagnostic.degradedReason === undefined)
-        || outcome.diagnostic.failure?.cause === "worker-cleanup"
-      )), JSON.stringify(outcomes.map((outcome) => outcome.diagnostic))).toBeTrue();
-      expect(outcomes.some((outcome) => outcome.diagnostic.status === "complete")).toBeTrue();
-      expect(pidFiles).toHaveLength(6);
-      for (const pidFile of pidFiles) {
-        const key = pidFile.slice(0, -4);
-        const escapedPid = Number(readFileSync(path.join(directory, pidFile), "utf8"));
-        const namespaceId = readFileSync(path.join(directory, `${key}.namespace`), "utf8").trim();
-        expect(processExists(escapedPid), `${key} identity`).toBeFalse();
-        expect(pidNamespaceMembers(namespaceId), `${key} namespace`).toEqual([]);
+      }).read(true));
+      for (let attempt = 0; attempt < 200
+        && readdirSync(directory).filter((name) => /^\d+\.root-namespace$/.test(name)
+          && fileHasText(path.join(directory, name))).length < 6; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
-      expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"))).toEqual([]);
-      await new Promise((resolve) => setTimeout(resolve, 30));
-      for (const pidFile of pidFiles) {
-        const key = pidFile.slice(0, -4);
-        const escapedPid = Number(readFileSync(path.join(directory, pidFile), "utf8"));
-        const namespaceId = readFileSync(path.join(directory, `${key}.namespace`), "utf8").trim();
-        expect(processExists(escapedPid), `${key} sustained identity`).toBeFalse();
-        expect(pidNamespaceMembers(namespaceId), `${key} sustained namespace`).toEqual([]);
+      const rootNamespaceFiles = readdirSync(directory).filter((name) => /^\d+\.root-namespace$/.test(name)
+        && fileHasText(path.join(directory, name)));
+      expect(rootNamespaceFiles).toHaveLength(6);
+      const namespaceReferences = rootNamespaceFiles.map((filename) => {
+        const key = filename.slice(0, -".root-namespace".length);
+        const namespaceId = readFileSync(path.join(directory, filename), "utf8").trim();
+        return { key, namespaceId, fd: retainPidNamespaceReference(Number(key), namespaceId) };
+      });
+      for (const { key } of namespaceReferences) writeFileSync(path.join(directory, `${key}.release`), "release");
+      try {
+        const outcomes = await Promise.all(reads);
+        const pidFiles = readdirSync(directory).filter((name) => /^\d+\.pid$/.test(name));
+        expect(outcomes).toHaveLength(6);
+        expect(outcomes.every((outcome) => (
+          (outcome.diagnostic.status === "complete" && outcome.diagnostic.degradedReason === undefined)
+          || outcome.diagnostic.failure?.cause === "worker-cleanup"
+        )), JSON.stringify(outcomes.map((outcome) => outcome.diagnostic))).toBeTrue();
+        expect(outcomes.some((outcome) => outcome.diagnostic.status === "complete")).toBeTrue();
+        expect(pidFiles).toHaveLength(6);
+        for (const pidFile of pidFiles) {
+          const key = pidFile.slice(0, -4);
+          const escapedPid = Number(readFileSync(path.join(directory, pidFile), "utf8"));
+          const namespaceId = readFileSync(path.join(directory, `${key}.namespace`), "utf8").trim();
+          expect(namespaceId, `${key} namespace identity`).toBe(
+            namespaceReferences.find((item) => item.key === key)?.namespaceId ?? "missing namespace reference",
+          );
+          expect(processExists(escapedPid), `${key} identity`).toBeFalse();
+          expect(pidNamespaceMembers(namespaceId), `${key} namespace`).toEqual([]);
+          expect(retainedPidNamespaceReferences(namespaceId), `${key} production namespace references`).toBe(1);
+        }
+        expect(confirmedFixtureProcessGroups(path.join(directory, "fixture-worker"))).toEqual([]);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        for (const pidFile of pidFiles) {
+          const key = pidFile.slice(0, -4);
+          const escapedPid = Number(readFileSync(path.join(directory, pidFile), "utf8"));
+          const namespaceId = readFileSync(path.join(directory, `${key}.namespace`), "utf8").trim();
+          expect(processExists(escapedPid), `${key} sustained identity`).toBeFalse();
+          expect(pidNamespaceMembers(namespaceId), `${key} sustained namespace`).toEqual([]);
+        }
+      } finally {
+        for (const reference of namespaceReferences) closeSync(reference.fd);
+      }
+      for (const { key, namespaceId } of namespaceReferences) {
+        expect(retainedPidNamespaceReferences(namespaceId), `${key} namespace references`).toBe(0);
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(newReferencedHandleCount(baseline)).toBe(0);
