@@ -1264,14 +1264,19 @@ export function normalizeRegistry(value: unknown): RegistryFile {
   };
 }
 
-function readFile(filename: string): RegistryFile {
+function readFileWithPayload(filename: string): { file: RegistryFile; payload: string | null } {
   try {
-    return normalizeRegistry(JSON.parse(fs.readFileSync(filename, "utf8")));
+    const payload = fs.readFileSync(filename, "utf8");
+    return { file: normalizeRegistry(JSON.parse(payload)), payload };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return clone(EMPTY);
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { file: clone(EMPTY), payload: null };
     if (error instanceof RegistryReadError) throw error;
     throw new RegistryReadError(`agent registry cannot be read: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function readFile(filename: string): RegistryFile {
+  return readFileWithPayload(filename).file;
 }
 
 function compactLaunchProfile(profile: LaunchProfile): Partial<LaunchProfile> {
@@ -1329,15 +1334,6 @@ function writeAtomicPayload(filename: string, payload: string): void {
 
 function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
   writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision));
-}
-
-function serializedFile(filename: string): string | null {
-  try {
-    return fs.readFileSync(filename, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
 }
 
 export type AgentRegistrySqliteMode = "off" | "dual-write" | "read" | "sqlite";
@@ -1875,10 +1871,11 @@ export class AgentRegistry {
         }
         this.assertSqliteParity(sqlite);
       }
-      const file = readFile(this.filename);
+      const original = readFileWithPayload(this.filename);
+      const file = original.file;
       const result = fn(file);
       const payload = serializeRegistry(file);
-      const changed = serializedFile(this.filename) !== payload;
+      const changed = original.payload !== payload;
       if (changed) writeAtomicPayload(this.filename, payload);
       if (sqlite && !changed) this.assertSqliteParity();
       if (sqlite && changed) {

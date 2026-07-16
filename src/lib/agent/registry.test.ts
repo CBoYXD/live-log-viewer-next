@@ -2,7 +2,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 
 import { AgentRegistry, conversationLookupFromSnapshot, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
@@ -155,8 +155,14 @@ describe("agent registry", () => {
     store.setEngineRouting("codex", "work");
     const beforeBytes = fs.readFileSync(store.filename, "utf8");
     const before = fs.statSync(store.filename);
+    const reads = spyOn(fs, "readFileSync");
 
-    expect(store.releaseStructuredHostClaim(KEY, "missing-owner", 99)).toBeFalse();
+    try {
+      expect(store.releaseStructuredHostClaim(KEY, "missing-owner", 99)).toBeFalse();
+      expect(reads.mock.calls.filter(([filename]) => filename === store.filename)).toHaveLength(1);
+    } finally {
+      reads.mockRestore();
+    }
 
     const after = fs.statSync(store.filename);
     expect(fs.readFileSync(store.filename, "utf8")).toBe(beforeBytes);
