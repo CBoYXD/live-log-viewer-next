@@ -1,7 +1,7 @@
 import path from "node:path";
 
 import type { FileEntry } from "../types";
-import { headRecordsResult, tailRecords } from "./activity";
+import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { readJson, recordValue, stringValue } from "./json";
 
@@ -42,14 +42,15 @@ export function entryModels(entry: FileEntry): EntryModels {
   const cached = modelCache.get(entry.path);
   if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2];
   let model: string | null = null;
-  for (const obj of tailRecords(entry.path, entry.size, 131_072, mtimeMs).reverse()) {
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  let complete = tail.complete;
+  for (const obj of tail.records.reverse()) {
     model = pickModel(entry, obj);
     if (model) break;
   }
-  let complete = true;
   if (!model) {
     const head = headRecordsResult(entry.path, entry.size, mtimeMs);
-    complete = head.complete;
+    complete &&= head.complete;
     for (const obj of head.records) {
       model = pickModel(entry, obj);
       if (model) break;

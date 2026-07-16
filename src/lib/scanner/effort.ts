@@ -1,5 +1,5 @@
 import type { FileEntry } from "../types";
-import { headRecordsResult, tailRecords } from "./activity";
+import { headRecordsResult, tailRecordsResult } from "./activity";
 import { globalCache } from "./caches";
 import { recordValue, recordsValue, stringValue } from "./json";
 import { readArgv } from "./process";
@@ -60,14 +60,15 @@ export function entryEffort(entry: FileEntry): string | null {
   const cached = effortCache.get(entry.path);
   if (cached?.[0] === entry.size && cached[1] === mtimeMs) return cached[2] ?? argv;
   let effort: string | null = null;
-  for (const obj of tailRecords(entry.path, entry.size, 131_072, mtimeMs).reverse()) {
+  const tail = tailRecordsResult(entry.path, entry.size, mtimeMs);
+  let complete = tail.complete;
+  for (const obj of tail.records.reverse()) {
     effort = normalizeEffort(pickEffort(entry, obj));
     if (effort) break;
   }
-  let complete = true;
   if (!effort) {
     const head = headRecordsResult(entry.path, entry.size, mtimeMs);
-    complete = head.complete;
+    complete &&= head.complete;
     for (const obj of head.records) {
       effort = normalizeEffort(pickEffort(entry, obj));
       if (effort) break;

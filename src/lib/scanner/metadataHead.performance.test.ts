@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { FileEntry } from "../types";
+import { activityVerdict } from "./activity";
 import { describeFile } from "./describe";
 import { entryEffort } from "./effort";
 import { entryModels } from "./model";
@@ -44,6 +45,52 @@ function splitUtf8Row(): string {
 
 function largeTail(): string {
   return JSON.stringify({ type: "response_item", payload: { content: "z".repeat(256 * 1024) } }) + "\n";
+}
+
+function tailMetadataFixture(name: string): string {
+  const pathname = path.join(SANDBOX, name);
+  fs.writeFileSync(pathname, [
+    JSON.stringify({ type: "session_meta", payload: { model: "gpt-head" } }),
+    JSON.stringify({ type: "turn_context", payload: { effort: "low" } }),
+    JSON.stringify({ type: "response_item", payload: { content: "x".repeat(300_000) } }),
+    JSON.stringify({ type: "turn_context", payload: { model: "gpt-tail", effort: "xhigh" } }),
+  ].join("\n") + "\n");
+  return pathname;
+}
+
+function withTailReadPatch<T>(
+  pathname: string,
+  patch: (original: typeof fs.readSync, fd: number, args: unknown[]) => number,
+  run: () => T,
+): T {
+  const tailOffset = Math.max(0, fs.statSync(pathname).size - 131_072);
+  const originalOpenSync = fs.openSync;
+  const originalReadSync = fs.readSync;
+  const originalCloseSync = fs.closeSync;
+  const targetFds = new Set<number>();
+  const tailFds = new Set<number>();
+  fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
+    const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
+    if (path.resolve(String(target)) === pathname) targetFds.add(fd);
+    return fd;
+  }) as typeof fs.openSync;
+  fs.readSync = ((fd: number, ...args: unknown[]) => {
+    if (targetFds.has(fd) && !tailFds.has(fd) && args[3] === tailOffset) tailFds.add(fd);
+    if (tailFds.has(fd)) return patch(originalReadSync, fd, args);
+    return Reflect.apply(originalReadSync, fs, [fd, ...args]);
+  }) as typeof fs.readSync;
+  fs.closeSync = ((fd: number) => {
+    targetFds.delete(fd);
+    tailFds.delete(fd);
+    return originalCloseSync(fd);
+  }) as typeof fs.closeSync;
+  try {
+    return run();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.readSync = originalReadSync;
+    fs.closeSync = originalCloseSync;
+  }
 }
 
 test("metadata after a large UTF-8-splitting early row preserves Codex and Claude projections", () => {
@@ -87,6 +134,7 @@ test("one shared prefix serves cold, append, and same-size rewrite projections",
   const originalCloseSync = fs.closeSync;
   const targetFds = new Set<number>();
   let positionZeroReads = 0;
+  let tailReads = 0;
   fs.openSync = ((target: fs.PathLike, ...args: unknown[]) => {
     const fd = Reflect.apply(originalOpenSync, fs, [target, ...args]) as number;
     if (path.resolve(String(target)) === pathname) targetFds.add(fd);
@@ -94,6 +142,10 @@ test("one shared prefix serves cold, append, and same-size rewrite projections",
   }) as typeof fs.openSync;
   fs.readSync = ((fd: number, ...args: unknown[]) => {
     if (targetFds.has(fd) && args[3] === 0) positionZeroReads += 1;
+    if (targetFds.has(fd)) {
+      const tailOffset = Math.max(0, fs.fstatSync(fd).size - 131_072);
+      if (args[3] === tailOffset) tailReads += 1;
+    }
     return Reflect.apply(originalReadSync, fs, [fd, ...args]);
   }) as typeof fs.readSync;
   fs.closeSync = ((fd: number) => {
@@ -103,6 +155,7 @@ test("one shared prefix serves cold, append, and same-size rewrite projections",
 
   const derive = () => {
     const stat = fs.statSync(pathname);
+    activityVerdict("codex-sessions", pathname, stat.mtimeMs / 1000, stat.size);
     describeFile("codex-sessions", SANDBOX, pathname, stat);
     return { model: entryModels(entry(pathname)), effort: entryEffort(entry(pathname)) };
   };
@@ -131,7 +184,48 @@ test("one shared prefix serves cold, append, and same-size rewrite projections",
   }
 
   expect(positionZeroReads).toBe(3);
+  expect(tailReads).toBe(3);
 });
+
+test("legal short tail reads retain newest model and effort precedence", () => {
+  const pathname = tailMetadataFixture("short-tail-codex.jsonl");
+  const value = withTailReadPatch(pathname, (original, fd, args) => {
+    return Reflect.apply(original, fs, [fd, args[0], args[1], Math.min(args[2] as number, 7), args[3]]) as number;
+  }, () => ({ model: entryModels(entry(pathname)), effort: entryEffort(entry(pathname)) }));
+
+  expect(value).toEqual({
+    model: { display: "gpt-tail", launch: "gpt-tail" },
+    effort: "xhigh",
+  });
+});
+
+for (const [name, mode] of [["early EOF", "eof"], ["transient error", "error"]] as const) {
+  test(`${name} during a tail read leaves same-identity recovery uncached`, () => {
+    const pathname = tailMetadataFixture(`interrupted-tail-${mode}.jsonl`);
+    let blocked = true;
+    const values = withTailReadPatch(pathname, (original, fd, args) => {
+      if (!blocked) return Reflect.apply(original, fs, [fd, ...args]) as number;
+      if (mode === "eof") return 0;
+      const error = new Error("transient tail failure") as NodeJS.ErrnoException;
+      error.code = "EIO";
+      throw error;
+    }, () => {
+      const first = { model: entryModels(entry(pathname)), effort: entryEffort(entry(pathname)) };
+      blocked = false;
+      const retry = { model: entryModels(entry(pathname)), effort: entryEffort(entry(pathname)) };
+      return { first, retry };
+    });
+
+    expect(values.first).toEqual({
+      model: { display: "gpt-head", launch: "gpt-head" },
+      effort: "low",
+    });
+    expect(values.retry).toEqual({
+      model: { display: "gpt-tail", launch: "gpt-tail" },
+      effort: "xhigh",
+    });
+  });
+}
 
 test("legal short reads fill the bounded metadata prefix", () => {
   const pathname = path.join(SANDBOX, "short-read-codex.jsonl");

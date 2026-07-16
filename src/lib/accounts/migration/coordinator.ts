@@ -76,7 +76,7 @@ async function inventory(files: FileEntry[], registry: AgentRegistry): Promise<C
     const existing = conversationByPath.get(entry.path) ?? null;
     const parentConversation = entry.parent ? conversationByPath.get(entry.parent) ?? null : null;
     const owner = accountManager.resolveTranscriptOwner(engine, entry.path);
-    const parsed = turnStateFromRecords(tailRecords(entry.path, entry.size), engine === "codex", true);
+    const parsed = turnStateFromRecords(tailRecords(entry.path, entry.size, entry.mtime * 1000), engine === "codex", true);
     const turn = parsed.state !== "terminal" && (entry.activity === "idle" || entry.activity === "recent")
       ? { state: "idle" as const, source: "empty" as const, terminalAt: null }
       : parsed;

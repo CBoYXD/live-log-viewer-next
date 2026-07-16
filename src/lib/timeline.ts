@@ -37,7 +37,7 @@ function label(text: string, max = 72): string {
 
 function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
   const out: ActionEvent[] = [];
-  for (const obj of tailRecords(entry.path, entry.size)) {
+  for (const obj of tailRecords(entry.path, entry.size, entry.mtime * 1000)) {
     const ts = toTs(obj.timestamp);
     if (ts === null) continue;
     if (obj.type === "user") {
@@ -95,7 +95,7 @@ function claudeEvents(entry: FileEntry, actor: string): ActionEvent[] {
 
 function codexEvents(entry: FileEntry, actor: string): ActionEvent[] {
   const out: ActionEvent[] = [];
-  for (const obj of tailRecords(entry.path, entry.size)) {
+  for (const obj of tailRecords(entry.path, entry.size, entry.mtime * 1000)) {
     const ts = toTs(obj.timestamp);
     if (ts === null) continue;
     const payload = rec(obj.payload);

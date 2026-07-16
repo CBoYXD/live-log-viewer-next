@@ -6,16 +6,22 @@ import { readHead } from "./head";
 import { outputHolders } from "./process";
 import { turnStateFromRecords as structuredTurnStateFromRecords } from "@/lib/accounts/migration/turnState";
 
-const turnCache = globalCache<[number, string | null]>("turn");
+const turnCache = globalCache<[number, number, string | null]>("turn");
 
-/** Shared tail read+parse, keyed by path → [size, nbytes, records]. Within one
+/** Shared tail read+parse, keyed by path and file identity. Within one
     /api/files scan the per-entry derivations (turn state, model, context, plan,
-    effort, questions) all ask for the same (path, size) tail, so the first pays
+    effort, questions) all ask for the same tail, so the first pays
     the 128 KB read and JSON parse and the rest reuse it. Replaced when the file
     grows. Unlike its siblings this cache holds whole parsed record arrays, so
     it is bounded: only actively-growing transcripts benefit from it anyway
     (idle files resolve through the small derived caches and never come back). */
-const tailCache = globalCache<[number, number | null, number, Record<string, unknown>[]]>("tail");
+type CachedTailRecords = {
+  size: number;
+  mtimeMs: number;
+  nbytes: number;
+  records: Record<string, unknown>[];
+};
+const tailCache = globalCache<CachedTailRecords>("tail-v2");
 const TAIL_CACHE_CAP = 64;
 type CachedHeadRecords = {
   size: number;
@@ -92,37 +98,54 @@ export function headRecords(
   return headRecordsResult(pathname, size, mtimeMs, nbytes, recordLimit).records;
 }
 
-export function tailRecords(pathname: string, size: number, nbytes = 131_072, mtimeMs: number | null = null) {
+export interface TailRecordsResult {
+  records: Record<string, unknown>[];
+  complete: boolean;
+}
+
+export function tailRecordsResult(pathname: string, size: number, mtimeMs: number, nbytes = 131_072): TailRecordsResult {
   const cached = tailCache.get(pathname);
-  if (cached && cached[0] === size && cached[2] === nbytes && (mtimeMs === null || cached[1] === mtimeMs)) {
-    return cached[3].slice();
+  if (cached && cached.size === size && cached.mtimeMs === mtimeMs && cached.nbytes === nbytes) {
+    return { records: cached.records.slice(), complete: true };
   }
-  const records = readTail(pathname, size, nbytes);
+  const result = readTail(pathname, size, nbytes);
+  if (!result.complete) return result;
   if (tailCache.size >= TAIL_CACHE_CAP && !tailCache.has(pathname)) {
     const oldest = tailCache.keys().next().value;
     if (oldest !== undefined) tailCache.delete(oldest);
   }
-  tailCache.set(pathname, [size, mtimeMs, nbytes, records]);
+  tailCache.set(pathname, { size, mtimeMs, nbytes, records: result.records });
   /* Hand out a fresh copy every call: consumers reverse() the result in place,
      which must never reorder the shared cached array under the next consumer. */
-  return records.slice();
+  return { records: result.records.slice(), complete: true };
 }
 
-function readTail(pathname: string, size: number, nbytes: number): Record<string, unknown>[] {
-  let data: string;
+export function tailRecords(pathname: string, size: number, mtimeMs: number, nbytes = 131_072): Record<string, unknown>[] {
+  return tailRecordsResult(pathname, size, mtimeMs, nbytes).records;
+}
+
+function readTail(pathname: string, size: number, nbytes: number): TailRecordsResult {
   let seek = 0;
+  let data = "";
+  let complete = false;
   try {
     const fd = fs.openSync(pathname, "r");
     try {
       seek = Math.max(0, size - nbytes);
       const buf = Buffer.alloc(Math.max(0, size - seek));
-      fs.readSync(fd, buf, 0, buf.length, seek);
-      data = buf.toString("utf8");
+      let read = 0;
+      while (read < buf.length) {
+        const chunk = fs.readSync(fd, buf, read, buf.length - read, seek + read);
+        if (chunk === 0) break;
+        read += chunk;
+      }
+      complete = read === buf.length;
+      data = buf.toString("utf8", 0, read);
     } finally {
       fs.closeSync(fd);
     }
   } catch {
-    return [];
+    return { records: [], complete: false };
   }
   let lines = data.split("\n");
   if (seek > 0 && lines.length) lines = lines.slice(1);
@@ -137,12 +160,16 @@ function readTail(pathname: string, size: number, nbytes: number): Record<string
       /* skip malformed tail rows */
     }
   }
-  return out;
+  return { records: out, complete };
 }
 
-function jsonlTurnState(pathname: string, size: number, codex: boolean) {
-  const state = structuredTurnStateFromRecords(tailRecords(pathname, size), codex).state;
-  return state === "terminal" ? "done" : state === "busy" ? "busy" : null;
+function jsonlTurnState(pathname: string, size: number, mtimeMs: number, codex: boolean) {
+  const result = tailRecordsResult(pathname, size, mtimeMs);
+  const state = structuredTurnStateFromRecords(result.records, codex).state;
+  return {
+    state: state === "terminal" ? "done" : state === "busy" ? "busy" : null,
+    complete: result.complete,
+  };
 }
 
 /** Compatibility projection retained for scanner callers. */
@@ -171,12 +198,14 @@ export function activityVerdict(
     return { state: age < 900 ? "recent" : "idle", reason: "output_released" };
   }
   if (pathname.endsWith(".jsonl")) {
+    const mtimeMs = mtime * 1000;
     const cached = turnCache.get(pathname);
     let state: string | null;
-    if (cached?.[0] === size) state = cached[1];
+    if (cached?.[0] === size && cached[1] === mtimeMs) state = cached[2];
     else {
-      state = jsonlTurnState(pathname, size, root.startsWith("codex"));
-      turnCache.set(pathname, [size, state]);
+      const turn = jsonlTurnState(pathname, size, mtimeMs, root.startsWith("codex"));
+      state = turn.state;
+      if (turn.complete) turnCache.set(pathname, [size, mtimeMs, state]);
     }
     if (state === "busy") {
       return age < 180 ? { state: "live", reason: "jsonl_turn_open" } : { state: "stalled", reason: "jsonl_turn_stalled" };
