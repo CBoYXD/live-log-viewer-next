@@ -1308,10 +1308,9 @@ function serializeRegistry(value: RegistryFile, sqliteRevision?: number): string
   return JSON.stringify(storage) + "\n";
 }
 
-function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
+function writeAtomicPayload(filename: string, payload: string): void {
   fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temp = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  const payload = serializeRegistry(value, sqliteRevision);
   let fd: number | null = null;
   try {
     fd = fs.openSync(temp, "w", 0o600);
@@ -1325,6 +1324,19 @@ function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: num
   } finally {
     if (fd !== null) fs.closeSync(fd);
     try { fs.unlinkSync(temp); } catch { /* rename completed */ }
+  }
+}
+
+function writeAtomic(filename: string, value: RegistryFile, sqliteRevision?: number): void {
+  writeAtomicPayload(filename, serializeRegistry(value, sqliteRevision));
+}
+
+function serializedFile(filename: string): string | null {
+  try {
+    return fs.readFileSync(filename, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
 }
 
@@ -1865,8 +1877,11 @@ export class AgentRegistry {
       }
       const file = readFile(this.filename);
       const result = fn(file);
-      writeAtomic(this.filename, file);
-      if (sqlite) {
+      const payload = serializeRegistry(file);
+      const changed = serializedFile(this.filename) !== payload;
+      if (changed) writeAtomicPayload(this.filename, payload);
+      if (sqlite && !changed) this.assertSqliteParity();
+      if (sqlite && changed) {
         this.beforeDualWriteMutationReplace?.();
         const replacement = this.sqliteStore!.replace(file, sqlite.revision);
         if (!replacement.replaced) {

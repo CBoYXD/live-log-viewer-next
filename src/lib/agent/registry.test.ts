@@ -150,6 +150,20 @@ describe("agent registry", () => {
     expect(store.snapshot().receipts[receipt.launchId]?.state).toBe("completed");
   });
 
+  test("skips an atomic rewrite when a mutation leaves the registry unchanged", () => {
+    const store = registry();
+    store.setEngineRouting("codex", "work");
+    const beforeBytes = fs.readFileSync(store.filename, "utf8");
+    const before = fs.statSync(store.filename);
+
+    expect(store.releaseStructuredHostClaim(KEY, "missing-owner", 99)).toBeFalse();
+
+    const after = fs.statSync(store.filename);
+    expect(fs.readFileSync(store.filename, "utf8")).toBe(beforeBytes);
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
   test("route settlement recovers when observation completed the same spawn first", () => {
     const store = registry();
     const receipt = store.beginSpawn("codex", "/repo");
