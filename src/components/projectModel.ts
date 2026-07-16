@@ -564,8 +564,11 @@ export interface DescendantRow {
   depth: number;
 }
 
-/** Depth-first subtree of a node: children stay under their parent, siblings ordered by state then recency. */
-export function descendantsOf(file: FileEntry | null, files: FileEntry[]): DescendantRow[] {
+function collectDescendants(
+  file: FileEntry | null,
+  files: FileEntry[],
+  include: (child: FileEntry) => boolean,
+): DescendantRow[] {
   if (!file) return [];
   const kids = kidsIndex(files);
   const out: DescendantRow[] = [];
@@ -576,10 +579,23 @@ export function descendantsOf(file: FileEntry | null, files: FileEntry[]): Desce
       .sort((a, b) => activityBand(a) - activityBand(b) || b.mtime - a.mtime);
     for (const child of children) {
       seen.add(child.path);
+      if (!include(child)) continue;
       out.push({ file: child, depth });
       walk(child, depth + 1);
     }
   };
   walk(file, 1);
   return out;
+}
+
+/** Depth-first subtree of a node: children stay under their parent, siblings ordered by state then recency. */
+export function descendantsOf(file: FileEntry | null, files: FileEntry[]): DescendantRow[] {
+  return collectDescendants(file, files, () => true);
+}
+
+/** Descendants owned by the root's project, stopping traversal at every foreign boundary. */
+export function projectDescendantsOf(file: FileEntry | null, files: FileEntry[]): DescendantRow[] {
+  if (!file) return [];
+  const project = projectKey(file);
+  return collectDescendants(file, files, (child) => projectKey(child) === project);
 }
