@@ -1416,6 +1416,32 @@ test("runtime socket bounds waiters and reserves command capacity", async () => 
     expect(rejected).toEqual({ id: "wait-excess", ok: false, error: "runtime wait capacity exceeded" });
     const client = new UnixRuntimeHostClient(socketPath, 250);
     expect((await client.snapshot()).snapshotSeq).toBe(0);
+
+    for (const waiter of waiters) waiter.destroy();
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const connections = await new Promise<number>((resolve, reject) => {
+        server.getConnections((error, count) => error ? reject(error) : resolve(count));
+      });
+      if (connections === 0) break;
+      await Bun.sleep(2);
+    }
+    const replacement = net.createConnection(socketPath);
+    const replacementResponse = new Promise<Record<string, unknown>>((resolve, reject) => {
+      let response = "";
+      replacement.once("error", reject);
+      replacement.on("data", (chunk) => {
+        response += String(chunk);
+        const newline = response.indexOf("\n");
+        if (newline >= 0) resolve(JSON.parse(response.slice(0, newline)) as Record<string, unknown>);
+      });
+      replacement.once("connect", () => {
+        replacement.write(`${JSON.stringify({ id: "wait-replacement", method: "wait", params: { after: 0, timeoutMs: 5_000 } })}\n`);
+      });
+    });
+    await Bun.sleep(10);
+    journal.append({ scope: runtimeScope("system", "runtime"), kind: "files.revision", payload: { filesRevision: 1 } });
+    expect(await replacementResponse).toMatchObject({ id: "wait-replacement", ok: true });
+    replacement.destroy();
     expect(server.maxConnections).toBe(4);
   } finally {
     journal.append({ scope: runtimeScope("system", "runtime"), kind: "files.revision", payload: { filesRevision: 1 } });

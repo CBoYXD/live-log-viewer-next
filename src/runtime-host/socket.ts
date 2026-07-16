@@ -35,6 +35,8 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost, options:
   try { fs.unlinkSync(socketPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   let activeWaitConnections = 0;
   const server = net.createServer((socket) => {
+    const abort = new AbortController();
+    socket.once("close", () => abort.abort());
     socket.setTimeout(defaultTimeoutMs, () => socket.destroy());
     let buffer = "";
     let handled = false;
@@ -58,7 +60,7 @@ export function serveRuntimeHost(socketPath: string, host: RuntimeHost, options:
             return;
           }
           activeWaitConnections += 1;
-          void host.handle(request)
+          void host.handle(request, { signal: abort.signal })
             .then((response) => socket.end(JSON.stringify(response) + "\n"))
             .finally(() => { activeWaitConnections -= 1; });
           return;

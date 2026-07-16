@@ -45,6 +45,7 @@ const SUGGEST_SCAN_LIMIT = 80;
 const SUGGEST_MAX = 10;
 
 interface SpawnRouteDependencies {
+  registry: typeof agentRegistry;
   resolveHealthySpawnAccount: typeof resolveHealthySpawnAccount;
   runtimeHostClient: typeof runtimeHostClient;
   spawnStructuredConversation: typeof spawnStructuredConversation;
@@ -52,6 +53,7 @@ interface SpawnRouteDependencies {
 }
 
 const productionSpawnRouteDependencies: SpawnRouteDependencies = {
+  registry: agentRegistry,
   resolveHealthySpawnAccount,
   runtimeHostClient,
   spawnStructuredConversation,
@@ -119,16 +121,6 @@ async function postSpawn(
   if (body.allowSubagents !== undefined && typeof body.allowSubagents !== "boolean") {
     return NextResponse.json({ error: "allowSubagents must be a boolean" }, { status: 400 });
   }
-  const registry = agentRegistry();
-  let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
-  if (agentInitiated) {
-    const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
-    if ("error" in caller) return NextResponse.json({ error: caller.error }, { status: caller.status ?? 403 });
-    authenticatedCaller = caller;
-  }
-  if (agentInitiated && body.allowSubagents === true && authenticatedCaller?.kind !== "operator") {
-    return NextResponse.json({ error: "allowSubagents requires an authenticated Viewer operator spawn" }, { status: 403 });
-  }
   const role = resolveSpawnRole(body);
   if (!role.ok) return NextResponse.json({ error: role.error }, { status: 400 });
   if (role.value?.role === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
@@ -152,19 +144,6 @@ async function postSpawn(
   const selectedModel = modelFromBody({ model: body.model === undefined ? role.value?.config.model : body.model });
   if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
 
-  const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
-  if (!rawCwd) return NextResponse.json({ error: "working directory is required" }, { status: 400 });
-  const cwd = path.resolve(rawCwd === "~" || rawCwd.startsWith("~/") ? path.join(os.homedir(), rawCwd.slice(1)) : rawCwd);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(cwd);
-  } catch {
-    return NextResponse.json({ error: `directory does not exist: ${cwd}` }, { status: 400 });
-  }
-  if (!stat.isDirectory()) {
-    return NextResponse.json({ error: `not a directory: ${cwd}` }, { status: 400 });
-  }
-
   const userPrompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   const prompt = role.value ? [role.value.scaffold, userPrompt].filter(Boolean).join("\n\n") : userPrompt;
   const { images, error: imageError } = collectImagePayloads(body);
@@ -185,6 +164,30 @@ async function postSpawn(
     }
     const gap = structuredSpawnGap({ engine, hasImages: images.length > 0, fast: reasoning.fast });
     if (gap) return NextResponse.json({ error: gap }, { status: 409 });
+  }
+
+  const registry = dependencies.registry();
+  let authenticatedCaller: AuthenticatedSpawnCaller | null = null;
+  if (agentInitiated) {
+    const caller = authenticatedAgentSpawnCaller(req, body.src, registry);
+    if ("error" in caller) return NextResponse.json({ error: caller.error }, { status: caller.status ?? 403 });
+    authenticatedCaller = caller;
+  }
+  if (agentInitiated && body.allowSubagents === true && authenticatedCaller?.kind !== "operator") {
+    return NextResponse.json({ error: "allowSubagents requires an authenticated Viewer operator spawn" }, { status: 403 });
+  }
+
+  const rawCwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
+  if (!rawCwd) return NextResponse.json({ error: "working directory is required" }, { status: 400 });
+  const cwd = path.resolve(rawCwd === "~" || rawCwd.startsWith("~/") ? path.join(os.homedir(), rawCwd.slice(1)) : rawCwd);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(cwd);
+  } catch {
+    return NextResponse.json({ error: `directory does not exist: ${cwd}` }, { status: 400 });
+  }
+  if (!stat.isDirectory()) {
+    return NextResponse.json({ error: `not a directory: ${cwd}` }, { status: 400 });
   }
 
   /* Saved paths stay visible to the catch. A pane-bound receipt keeps them:

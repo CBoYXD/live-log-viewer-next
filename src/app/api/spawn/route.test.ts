@@ -36,6 +36,7 @@ type SpawnRouteTestDependencies = NonNullable<Parameters<typeof POST.withDepende
 
 function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
   return {
+    registry: agentRegistry,
     assertStructuredRuntime: () => {},
     resolveHealthySpawnAccount: async () => ({
       engine: "claude",
@@ -62,6 +63,30 @@ function structuredRouteDependencies(cwd: string): SpawnRouteTestDependencies {
 
 test("structured spawn runtime fence preserves durable state", async () => {
   const cwd = fs.mkdtempSync(path.join(routeSandbox, "structured-runtime-fence-"));
+  const registryPath = path.join(cwd, "cold-agent-registry.json");
+  const seeded = new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+  const conversation = seeded.ensureConversation("codex", path.join(cwd, "session.jsonl"), "codex-test");
+  const snapshot = seeded.snapshot();
+  for (let index = 0; index < 101; index += 1) {
+    const id = `legacy-${String(index).padStart(3, "0")}`;
+    snapshot.heldDeliveries[id] = {
+      id,
+      conversationId: conversation.id,
+      text: `legacy body ${index}`,
+      createdAt: `2026-07-16T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      clientMessageId: id,
+      payloadKind: "text",
+      artifactPaths: [],
+      state: "delivered",
+      generationId: conversation.generations.at(-1)!.id,
+      attempts: 1,
+      assignedAt: null,
+      deliveredAt: `2026-07-16T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+      error: null,
+    };
+  }
+  fs.writeFileSync(registryPath, JSON.stringify(snapshot));
+  const registryBytes = fs.readFileSync(registryPath);
   const previous = {
     transport: process.env.LLV_SPAWN_TRANSPORT,
     hosts: process.env.LLV_STRUCTURED_HOSTS,
@@ -74,12 +99,15 @@ test("structured spawn runtime fence preserves durable state", async () => {
   process.env.LLV_RUNTIME_EVENTS = "1";
   process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
   process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
-  const store = agentRegistry();
-  const before = store.snapshot();
+  let registryFactoryCalls = 0;
   let accountLookups = 0;
   let structuredSpawns = 0;
   const dependencies = {
     ...structuredRouteDependencies(cwd),
+    registry: () => {
+      registryFactoryCalls += 1;
+      return new AgentRegistry(registryPath, undefined, undefined, { sqliteMode: "off" });
+    },
     assertStructuredRuntime: () => {
       throw new StructuredRuntimeRequirementError("structured hosts on macOS require the Viewer server to run with Bun");
     },
@@ -107,11 +135,10 @@ test("structured spawn runtime fence preserves durable state", async () => {
 
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "structured hosts on macOS require the Viewer server to run with Bun" });
+    expect(registryFactoryCalls).toBe(0);
     expect(accountLookups).toBe(0);
     expect(structuredSpawns).toBe(0);
-    const after = store.snapshot();
-    expect(Object.keys(after.receipts)).toEqual(Object.keys(before.receipts));
-    expect(Object.keys(after.conversations)).toEqual(Object.keys(before.conversations));
+    expect(fs.readFileSync(registryPath)).toEqual(registryBytes);
   } finally {
     if (previous.transport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
     else process.env.LLV_SPAWN_TRANSPORT = previous.transport;
