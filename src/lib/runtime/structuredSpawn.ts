@@ -114,6 +114,9 @@ export async function reconcileStructuredSpawnReplay(
 ): Promise<SpawnReceipt & { initialMessage: "pending" | "queued" | "delivered" | "failed" }> {
   const current = registry.snapshot().receipts[launchId];
   if (!current) throw new Error("unknown spawn receipt");
+  if (current.state === "completed") {
+    return { ...current, initialMessage: "delivered" };
+  }
   const [operation, spawnOperation, runtime] = await Promise.all([
     client.operationStatus(`spawn_message_${launchId}`, { currentRetryLeaf: true }).catch(() => null),
     client.operationStatus(launchId, { currentRetryLeaf: true }).catch(() => null),
@@ -185,7 +188,6 @@ export async function reconcileStructuredSpawnReplay(
   let terminalReason = failedOperationReason(operation, "structured initial message")
     ?? failedOperationReason(spawnOperation, "structured spawn");
   if (!terminalReason
-    && current.state !== "completed"
     && current.state !== "failed"
     && runtime
     && !liveRegisteringSession
