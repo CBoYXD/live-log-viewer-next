@@ -54,6 +54,7 @@ export interface HeldStructuredMessageRequest {
   clientMessageId: string;
   text: string;
   imageRefs?: StructuredImageRef[];
+  command?: HeldDeliveryCommand;
 }
 
 export interface HeldStructuredMessageDependencies {
@@ -229,8 +230,7 @@ export async function deliverHeldStructuredMessage(
       ?? runtimeImageCapability(session.sessionKey.engine, false);
     if (refs.length > 0 && !imageCapability.supported) return "failed";
     const content = structuredContent(request.text, refs);
-    const result = await client.command({
-      kind: "send",
+    const command = request.command ?? {
       operationId: request.deliveryId,
       kind: "send" as const,
       policy: "interrupt-active" as const,
@@ -243,7 +243,8 @@ export async function deliverHeldStructuredMessage(
       text: content.content.text,
       ...(refs.length ? { images: refs } : {}),
       contentDigest: content.contentDigest,
-      policy: "interrupt-active",
+      policy: command.policy,
+      ...(command.turnId !== undefined ? { turnId: command.turnId } : {}),
     });
     try {
       await (dependencies.kick ?? kickStructuredDeliveryQueue)();

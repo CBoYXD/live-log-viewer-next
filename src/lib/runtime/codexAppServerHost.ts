@@ -16,8 +16,14 @@ import type {
   QueueEntry,
   RuntimeEvent,
 } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError } from "./engineHost";
-import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  FileRuntimeEventStore,
+  nextRuntimeEventSequence,
+  reconcileRuntimeEventCursor,
+  type RuntimeEventCursorRecoveryReporter,
+  type RuntimeEventStore,
+} from "./eventStore";
 
 type JsonObject = Record<string, unknown>;
 type PendingRpc = {

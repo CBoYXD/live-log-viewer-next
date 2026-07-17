@@ -12,8 +12,14 @@ import { procBackend } from "@/lib/proc";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import type { DeliveryReceipt, EngineHost, HostState, NormalizedQueueEntry, QueueEntry, RuntimeEvent } from "./engineHost";
-import { normalizeQueueEntry, RuntimeReplayGapError } from "./engineHost";
-import { FileRuntimeEventStore, type RuntimeEventStore } from "./eventStore";
+import { normalizeQueueEntry, RuntimeReplayGapError, StructuredHostAdoptionCleanupError } from "./engineHost";
+import {
+  FileRuntimeEventStore,
+  nextRuntimeEventSequence,
+  reconcileRuntimeEventCursor,
+  type RuntimeEventCursorRecoveryReporter,
+  type RuntimeEventStore,
+} from "./eventStore";
 import { MAX_STRUCTURED_IMAGE_ENCODED_BYTES, runtimeImageStore } from "./runtimeImageStore";
 import {
   STRUCTURED_IMAGE_CAPABILITY,

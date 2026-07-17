@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 
 import type { FileEntry } from "@/lib/types";
 import { setLocale } from "@/lib/i18n";
+import { FILES_CHANGED_EVENT } from "@/lib/filesEvents";
 
 import { DraftAgentPane } from "./DraftAgentPane";
 

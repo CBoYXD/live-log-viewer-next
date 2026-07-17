@@ -1062,7 +1062,12 @@ export class RuntimeJournal {
     };
   }
 
-  private operationReceipt(command: RuntimeOperationCommand, operationId: string): RuntimeOperationReceipt {
+  private operationReceipt(
+    command: RuntimeOperationCommand,
+    operationId: string,
+    retryOfOperationId?: string,
+    retryParent: RuntimeOperationReceipt | null = null,
+  ): RuntimeOperationReceipt {
     const session = this.entity<RuntimeSession>("session", command.conversationId);
     let status: RuntimeReceiptStatus;
     let reason: string | null = null;
