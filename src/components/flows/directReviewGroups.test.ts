@@ -337,6 +337,52 @@ describe("directReviewFlows", () => {
     expect(projected[0]!.state).toBe("done_comment");
   });
 
+  test("a stopped verdict-less LATEST reviewer is terminal and its group parks as compact history (production regression)", () => {
+    /* Production acceptance on 66ef346: days-old one-shot reviewers whose
+       transcripts stopped without a parsed verdict kept every historical group
+       state=reviewing («Round N · in progress»), forcing quiet reviewed
+       anchors back onto the board and crowding the map with actionable-looking
+       decks. A latest round that stopped before producing a verdict failed,
+       exactly like an earlier round. */
+    const builder = entry({ path: "/builder", conversationId: "conversation-builder" });
+    /* Idle for days: every working signal is absent and the tail carries no verdict. */
+    const stale = directReviewer("/reviewer-stale", { id: "conversation-r1", reviews: "conversation-builder", mtime: 1_000, activity: "idle" });
+
+    const idleGroup = directReviewFlows({ files: [builder, stale], flows: [], tasks: [] });
+    expect(idleGroup).toHaveLength(1);
+    expect(idleGroup[0]!.rounds[0]!.error).toBe("no verdict");
+    expect(idleGroup[0]!.state).toBe("done_comment");
+
+    /* A finished process behind a merely-recent mtime is terminal too. */
+    const recentStopped = { ...stale, activity: "recent" as const, proc: "done" as const };
+    const recentGroup = directReviewFlows({ files: [builder, recentStopped], flows: [], tasks: [] });
+    expect(recentGroup[0]!.rounds[0]!.error).toBe("no verdict");
+    expect(recentGroup[0]!.state).toBe("done_comment");
+
+    /* Genuinely working latest rounds keep the actionable loop: live pane,
+       stalled turn, a running process, or a pending question/input prompt. */
+    for (const working of [
+      { ...stale, activity: "live" as const },
+      { ...stale, activity: "stalled" as const },
+      { ...stale, proc: "running" as const },
+      { ...stale, pendingQuestion: { kind: "question" as const, toolUseId: "t", transcriptPath: "/reviewer-stale", pid: 1, paneTarget: null, askedAt: "2026-07-10T00:00:00.000Z" } },
+      { ...stale, waitingInput: { since: 1, screenTail: "…", target: "%1", menu: null } },
+    ]) {
+      const flows = directReviewFlows({ files: [builder, working], flows: [], tasks: [] });
+      expect(flows[0]!.rounds[0]!.error).toBeNull();
+      expect(flows[0]!.state).toBe("reviewing");
+    }
+
+    /* A verdict-bearing latest round stays terminal history, unchanged. */
+    const approved = {
+      ...stale,
+      review: { verdict: "APPROVE" as const, findingsCount: 0, observedAt: "2026-07-10T02:00:00.000Z" },
+    };
+    const approvedGroup = directReviewFlows({ files: [builder, approved], flows: [], tasks: [] });
+    expect(approvedGroup[0]!.rounds[0]!.error).toBeNull();
+    expect(approvedGroup[0]!.state).toBe("done_comment");
+  });
+
   test("an active managed flow on the reviewed conversation keeps its deck — the direct group yields", () => {
     /* One node hosts one deck: a builder that is ALSO an implementer of a live
        managed loop keeps that loop's deck and controls; direct reviewers stay

@@ -78,12 +78,13 @@ export function directReviewFlows(input: DirectReviewGroupsInput): Flow[] {
     if (input.flows.some((flow) => isActiveFlow(flow) && flow.implementerPath === anchor.path)) continue;
     const rounds = members.map<Round>((member, index) => {
       const { file } = member;
-      const isLatest = index === members.length - 1;
       const outcome = file.review ?? null;
-      /* A verdict-less reviewer that stopped working failed before its verdict.
-         Only history rounds take the aborted read — the latest one stays the
-         actionable front card whatever its state. */
-      const failed = !outcome && !isLatest && !reviewerStillWorking(file);
+      /* A verdict-less reviewer that stopped working failed before its verdict —
+         the LATEST round included (production regression on 66ef346): a
+         days-old stopped reviewer parks its group as compact history, keeping
+         quiet reviewed anchors off the board. Anything live, mid-turn, or
+         waiting on input stays the actionable front card. */
+      const failed = !outcome && !reviewerStillWorking(file);
       return {
         n: index + 1,
         reviewerPath: file.path,
