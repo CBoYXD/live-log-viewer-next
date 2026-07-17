@@ -4,9 +4,11 @@ import { agentRegistry, type AgentRegistry, type AgentRegistryEntry } from "@/li
 import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
+import type { RuntimeEventInput } from "./contracts";
 import type { EngineHost, HostState } from "./engineHost";
 import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { projectEngineHostEvent } from "./engineHostEvents";
+import { publishFilesRevision } from "./filesRevision";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { runtimeImageCapability } from "./runtimeImageStore";
 import { STRUCTURED_IMAGE_CAPABILITY } from "./structuredContent";
@@ -60,6 +62,14 @@ function hostProjectionKey(state: HostState): string {
   return JSON.stringify([state.status, state.activeTurnRef, state.pendingAttention]);
 }
 
+export async function publishStructuredHostProjection(
+  client: RuntimeHostClient,
+  event: RuntimeEventInput,
+): Promise<void> {
+  await client.append(event);
+  await publishFilesRevision(client);
+}
+
 function hostResolver(
   registry: AgentRegistry,
   hosts: ReadonlyMap<string, EngineHost>,
@@ -85,7 +95,7 @@ async function publishHostState(
   if (!conversationId) return;
   const host = state.status === "dead" ? "dead" : state.status === "unhosted" ? "unhosted" : "hosted";
   const turn = state.activeTurnRef ? "running" : "idle";
-  await client.append({
+  await publishStructuredHostProjection(client, {
     scope: { type: "session", id: conversationId },
     kind: "session-status",
     producer: {
