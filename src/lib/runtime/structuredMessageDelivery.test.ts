@@ -308,8 +308,9 @@ test("an image send to a dead session recovers ownership first and enqueues exac
   expect(commands).toHaveLength(1);
 });
 
-test("a text-only recovered model returns a typed 409 with zero storage or admission effects", async () => {
+test("a recovered Codex host with unknown image capability reaches the command queue for a fresh probe", async () => {
   const { registry, conversation } = registryWithConversation();
+  const imageRef: StructuredImageRef = { sha256: "c".repeat(64), mime: "image/png", bytes: 67 };
   const deadSnapshot = snapshot(conversation.id);
   deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
   let snapshots = 0;
@@ -317,12 +318,30 @@ test("a text-only recovered model returns a typed 409 with zero storage or admis
   let previews = 0;
   let commands = 0;
   const client = {
-    /* The recovered projection is hosted but its model stays text-only. */
+    /* The recovered projection is hosted while image capability remains
+       unconfirmed. The host performs the authoritative retry. */
     snapshot: async () => {
       snapshots += 1;
       return snapshots === 1 ? deadSnapshot : snapshot(conversation.id, "codex", false);
     },
-    command: async () => { commands += 1; throw new Error("unexpected command"); },
+    command: async (command: { operationId: string; idempotencyKey: string }) => {
+      commands += 1;
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          text: "",
+          imageCount: 1,
+          at: "2026-07-17T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
   } as unknown as RuntimeHostClient;
 
   const result = await enqueueStructuredMessage({
@@ -336,20 +355,16 @@ test("a text-only recovered model returns a typed 409 with zero storage or admis
     client: () => client,
     registry: () => registry,
     recover: async () => ({ target: null, path: artifactPath, conversationId: conversation.id as never, spawned: true }),
-    storeImages: () => { stores += 1; return []; },
-    previewImageRefs: () => { previews += 1; return []; },
+    storeImages: () => { stores += 1; return [imageRef]; },
+    previewImageRefs: () => { previews += 1; return [imageRef]; },
+    kick: () => {},
   });
 
-  expect(result).toMatchObject({
-    ok: false,
-    outcome: "failed",
-    status: 409,
-    error: "The selected Codex model does not advertise image input through app-server.",
-  });
-  expect(stores).toBe(0);
-  expect(previews).toBe(0);
-  expect(commands).toBe(0);
-  expect(Object.values(registry.snapshot().heldDeliveries)).toEqual([]);
+  expect(result).toMatchObject({ ok: true, outcome: "queued" });
+  expect(stores).toBe(1);
+  expect(previews).toBe(1);
+  expect(commands).toBe(1);
+  expect(Object.values(registry.snapshot().heldDeliveries)).toHaveLength(1);
 });
 
 test("a changed payload rejects before any blob publication even at full quota", async () => {
@@ -468,6 +483,49 @@ test("a conflicting reservation raced in behind the preflight rolls the publishe
   const reservation = Object.values(new AgentRegistry(registry.filename).snapshot().heldDeliveries)
     .find((held) => held.clientMessageId === "raced-admission");
   expect(reservation).toMatchObject({ runtimeImages: [winnerRef] });
+});
+
+test("a failed cross-process publication rollback surfaces a retryable delivery failure", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const winnerRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  const loserRef: StructuredImageRef = { sha256: "b".repeat(64), mime: "image/png", bytes: 91 };
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async () => { throw new Error("unexpected command"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "raced-admission-rollback-failure",
+    text: "",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    previewImageRefs: () => [loserRef],
+    storeImages: () => {
+      new AgentRegistry(registry.filename).holdDelivery(
+        conversation.id,
+        "",
+        "raced-admission-rollback-failure",
+        "runtime-images",
+        [winnerRef],
+        structuredContentDigest({ text: "", images: [winnerRef] }),
+      );
+      return [loserRef];
+    },
+    discardImages: () => { throw new Error("runtime image writer lock timed out"); },
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    status: 503,
+    error: expect.stringContaining("publication rollback failed"),
+  });
 });
 
 test("one UTF-8 envelope bound rejects an oversized multibyte caption before storage, recovery, and reservation", async () => {

@@ -407,6 +407,44 @@ test("structured delivery preserves ordered image refs and their content digest"
   ]);
 });
 
+test("an image effect reaches the host when capability discovery is still pending", async () => {
+  const transitions: Array<[string, string, string | null | undefined]> = [];
+  let sends = 0;
+  const images: StructuredImageRef[] = [{ sha256: "c".repeat(64), mime: "image/png", bytes: 67 }];
+  const contentDigest = structuredContentDigest({ text: "probe again", images });
+  const imageHost = host(async () => {
+    sends += 1;
+    throw new Error("Codex image capability discovery is temporarily unavailable; retry shortly.");
+  });
+  imageHost.health = async () => ({ ...idleState(), activeFlags: [] });
+  const queue = new StructuredDeliveryQueue({
+    effects: async () => [{
+      id: "effect:op-image-probe",
+      kind: "runtime.send",
+      eventSeq: 22,
+      payload: {
+        operationId: "op-image-probe",
+        conversationId: "conversation-one",
+        text: "probe again",
+        images,
+        contentDigest,
+        policy: "queue",
+      },
+    }],
+    transition: async (operationId, status, details) => {
+      transitions.push([operationId, status, details?.reason]);
+    },
+  }, () => imageHost);
+
+  await queue.drain();
+
+  expect(sends).toBe(1);
+  expect(transitions).toEqual([
+    ["op-image-probe", "delivering", undefined],
+    ["op-image-probe", "failed", "Codex image capability discovery is temporarily unavailable; retry shortly."],
+  ]);
+});
+
 test("an invalid durable image effect is terminalized instead of disappearing from the queue", async () => {
   const transitions: Array<[string, string, string | null | undefined]> = [];
   let hostResolutions = 0;

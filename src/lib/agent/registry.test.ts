@@ -247,8 +247,8 @@ describe("agent registry", () => {
       [{ sha256: "not-a-digest", mime: "image/png", bytes: 67 }];
     fs.writeFileSync(store.filename, JSON.stringify(snapshot));
 
-    /* Normalization must not silently reclassify the image message as text:
-       the reservation surfaces as a recoverable failure instead. */
+    /* Normalization keeps the image reservation in a recoverable failure
+       state and blocks caption-only actuation. */
     const restarted = new AgentRegistry(store.filename);
     expect(restarted.snapshot().heldDeliveries[held.id]).toMatchObject({
       state: "failed",
@@ -268,6 +268,45 @@ describe("agent registry", () => {
     const changed = structuredContent("annotate the diagram", [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }]);
     expect(() => restarted.holdDelivery(conversation.id, changed.content.text, "corrupt-image-key", "runtime-images", changed.content.images, changed.contentDigest))
       .toThrow(DeliveryReservationConflictError);
+  });
+
+  for (const scenario of [
+    { label: "missing", runtimeImages: undefined },
+    { label: "null", runtimeImages: null },
+    { label: "empty", runtimeImages: [] },
+  ] as const) {
+    test(`runtime-images reservation with ${scenario.label} refs becomes a recoverable failure`, () => {
+      const store = registry();
+      const conversation = store.ensureConversation("claude", `/missing-image-refs-${scenario.label}.jsonl`, "default");
+      const refs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+      const content = structuredContent("keep the image", refs);
+      const held = store.holdDelivery(conversation.id, content.content.text, null, "runtime-images", refs, content.contentDigest);
+      const snapshot = store.snapshot();
+      if (scenario.runtimeImages === undefined) delete (snapshot.heldDeliveries[held.id] as Partial<typeof held>).runtimeImages;
+      else (snapshot.heldDeliveries[held.id] as { runtimeImages: unknown }).runtimeImages = scenario.runtimeImages;
+      fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+      expect(new AgentRegistry(store.filename).snapshot().heldDeliveries[held.id]).toMatchObject({
+        state: "failed",
+        runtimeImages: [],
+        generationId: null,
+        error: CORRUPT_HELD_DELIVERY_IMAGES_ERROR,
+      });
+    });
+  }
+
+  test("new runtime-images reservations require at least one valid image ref", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/empty-image-reservation.jsonl", "default");
+
+    expect(() => store.holdDelivery(
+      conversation.id,
+      "caption",
+      "empty-runtime-images",
+      "runtime-images",
+      [],
+      structuredContent("caption", []).contentDigest,
+    )).toThrow("runtime-images delivery requires image references");
   });
 
   test("held delivery captions share one UTF-8 envelope bound across payload kinds", () => {

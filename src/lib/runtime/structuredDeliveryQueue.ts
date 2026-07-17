@@ -1,7 +1,6 @@
 import type { DeliveryReceipt, EngineHost, QueueEntry } from "./engineHost";
 import type { RuntimeHostClient } from "./client";
 import {
-  STRUCTURED_IMAGE_CAPABILITY,
   parseStructuredImageRefs,
   structuredContent,
   type StructuredMessageContent,
@@ -242,10 +241,6 @@ export class StructuredDeliveryQueue {
       if (health.status === "dead" || health.status === "unhosted") {
         await this.port.transition(effect.operationId, "queued", { reason: "dead-host" });
         return true;
-      }
-      if (effect.content.images.length > 0 && !health.activeFlags.includes(STRUCTURED_IMAGE_CAPABILITY)) {
-        await this.port.transition(effect.operationId, "failed", { reason: "structured host image capability is unavailable" });
-        continue;
       }
       const maySteer = health.status === "active"
         && (effect.kind === "steer" || effect.policy === "steer-if-active");

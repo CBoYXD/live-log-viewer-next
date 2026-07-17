@@ -60,6 +60,13 @@ export interface StructuredMessageDependencies {
   discardImages?: (refs: readonly StructuredImageRef[]) => void;
 }
 
+class DeliveryPublicationRollbackError extends Error {
+  constructor(error: unknown) {
+    super(`structured image publication rollback failed: ${error instanceof Error ? error.message : String(error)}`);
+    this.name = "DeliveryPublicationRollbackError";
+  }
+}
+
 /** Serializes preflight → publication → reservation per (conversation,
     client message id) within this process — the only blob publisher — so two
     racing changed payloads cannot both observe an empty reservation: the
@@ -269,7 +276,7 @@ export async function deliverHeldStructuredMessage(
     const refs = request.imageRefs ?? [];
     const imageCapability = session.capabilities.imageInput
       ?? runtimeImageCapability(session.sessionKey.engine, false);
-    if (refs.length > 0 && !imageCapability.supported) return "failed";
+    if (refs.length > 0 && !imageCapability.supported && session.sessionKey.engine !== "codex") return "failed";
     const content = structuredContent(request.text, refs);
     const command = request.command ?? {
       operationId: request.deliveryId,
@@ -390,7 +397,7 @@ export async function enqueueStructuredMessage(
   }
   const imageCapability = activeSession.capabilities.imageInput
     ?? runtimeImageCapability(activeSession.sessionKey.engine, false);
-  if (wantsImages && !imageCapability.supported) {
+  if (wantsImages && !imageCapability.supported && activeSession.sessionKey.engine !== "codex") {
     return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
   }
   const encodedImageBytes = rawImages.reduce((total, image) => total + Buffer.byteLength(image.base64), 0);
@@ -401,10 +408,10 @@ export async function enqueueStructuredMessage(
   if (!conversation) return ownershipUnavailable();
   try {
     if (rawImages.length > 0 && suppliedRefs.length > 0) throw new Error("structured image payload is ambiguous");
-    /* Conflict preflight: candidate refs and digest are computed WITHOUT
-       writing, so a changed payload under an already-reserved client message
-       id rejects with zero blob publication, GC, or registry effects. First
-       admissions still publish before the reservation references them. */
+    /* Conflict preflight computes candidate refs and digest before writing.
+       A changed payload under an existing client message id rejects with zero
+       blob publication, GC, or registry effects. First admissions publish
+       before the reservation references them. */
     const refs = suppliedRefs.length > 0
       ? suppliedRefs
       : (dependencies.previewImageRefs ?? runtimeImageRefsForUploads)(rawImages);
@@ -440,8 +447,8 @@ export async function enqueueStructuredMessage(
         if (error instanceof DeliveryReservationConflictError && published.length) {
           try {
             (dependencies.discardImages ?? ((toDiscard) => runtimeImageStore().discardUnreferenced(toDiscard)))(published);
-          } catch {
-            /* Best-effort rollback; bounded GC retires any remainder. */
+          } catch (rollbackError) {
+            throw new DeliveryPublicationRollbackError(rollbackError);
           }
         }
         throw error;

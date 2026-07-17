@@ -197,10 +197,9 @@ async function postSpawn(
       fast: reasoning.fast,
     });
     if (gap) return NextResponse.json({ error: gap }, { status: 409 });
-    /* The scaffold-composed prompt rides structured first-message delivery,
-       so its UTF-8 envelope bound must reject HERE — before the durable
-       receipt, blob storage, and the deferred launch — not asynchronously
-       after a 202 already promised the spawn. */
+    /* The scaffold-composed prompt rides structured first-message delivery.
+       Enforce its UTF-8 envelope before the durable receipt, blob storage,
+       deferred launch, and 202 response. */
     try {
       assertStructuredTextEnvelope(prompt);
     } catch (error) {
@@ -384,9 +383,8 @@ async function postSpawn(
           let imageRefs;
           try { imageRefs = dependencies.storeImages(images); }
           catch (error) {
-            /* Nothing was deferred yet, so the claimed lease must not stay
-               with this live process: a compare-and-set release lets the next
-               retry re-claim instead of waiting out the orphan fence. */
+            /* No deferred work exists after this rejection. A compare-and-set
+               release lets the next retry claim the lease immediately. */
             if (admission.receipt.admissionOwner) {
               registry.releaseStartingStructuredSpawn(receipt.launchId, admission.receipt.admissionOwner);
             }

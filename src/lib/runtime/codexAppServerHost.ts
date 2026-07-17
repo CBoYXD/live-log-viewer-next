@@ -298,10 +298,9 @@ export class CodexAppServerHost implements EngineHost {
   private account: HostState["account"] = null;
   private engineStatus: "active" | "idle" | "unhosted" | "dead" = "idle";
   private activeFlags: string[] = [];
-  /** Image capability learned from `model/list`. "unknown" means the probe
-      itself failed (RPC fault, not a model verdict): admission stays fail-
-      closed, but the probe is retried on the next image send instead of
-      condemning the host to text-only for its lifetime. */
+  /** Image capability learned from `model/list`. An RPC fault leaves the
+      value unknown, keeps admission fail-closed, and schedules discovery on
+      the next image send. */
   private imageInputSupport: "supported" | "unsupported" | "unknown" = "unknown";
   private requestedModel: string | undefined;
   private releasing = false;
@@ -401,8 +400,8 @@ export class CodexAppServerHost implements EngineHost {
           options.model,
         ) ? "supported" : "unsupported";
       } catch {
-        /* A probe fault is not a model verdict: stay unknown (fail-closed
-           for admission) and retry discovery when an image send arrives. */
+        /* A probe fault leaves capability unknown and admission fail-closed.
+           An image send triggers another discovery attempt. */
         provisional.imageInputSupport = "unknown";
       }
       const config = headlessCodexThreadConfig(

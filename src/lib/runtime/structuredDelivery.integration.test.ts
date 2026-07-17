@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
-import { drainHeldDeliveries, reconcileMigrations, type HeldDeliveryPort } from "@/lib/accounts/migration/coordinator";
+import { drainHeldDeliveries, reconcileMigrations } from "@/lib/accounts/migration/coordinator";
 import { emptyLaunchProfile, type ProviderReceipt, type SuccessorProviderPort } from "@/lib/accounts/migration/contracts";
 import { RegisteredSuccessorProvider } from "@/lib/accounts/migration/provider";
 import { RuntimeJournal } from "@/runtime-host/journal";
@@ -17,6 +17,7 @@ import { bindStructuredDeliveryQueue, publishStructuredDeliveryHost } from "./st
 import { StructuredDeliveryQueue, type StructuredDeliveryQueuePort } from "./structuredDeliveryQueue";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { deliverHeldStructuredMessage, enqueueStructuredMessage } from "./structuredMessageDelivery";
+import { structuredContentDigest } from "./structuredContent";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-delivery-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
@@ -989,24 +990,17 @@ test("runtime recovery drains one durable synchronization hold into one engine c
     host: observableFakeHost(new FakeEngineHost(ledger)),
   }], { registry, client });
 
-  const deliverAfterRecovery = async ({ delivery, path: deliveryPath, clientMessageId }: Parameters<HeldDeliveryPort["deliver"]>[0]) => {
-    return await deliverHeldStructuredMessage({
-      conversationId: conversation.id,
-      path: deliveryPath,
-      deliveryId: delivery.id,
-      clientMessageId,
-      text: delivery.text,
-      command: delivery.command,
-    }, {
-      enabled: () => true,
-      client: () => client,
-      kick: kickStructuredDeliveryQueue,
-    }) ?? "delivery-uncertain";
-  };
-  await drainHeldDeliveries(conversation.id, {
-    deliver: deliverAfterRecovery,
-    reconcileUncertain: deliverAfterRecovery,
-  }, registry);
+  await client.command({
+    kind: held[0]!.command.kind,
+    operationId: held[0]!.command.operationId,
+    conversationId: conversation.id,
+    idempotencyKey: request.clientMessageId,
+    text: request.text,
+    contentDigest: structuredContentDigest({ text: request.text, images: [] }),
+    policy: held[0]!.command.policy,
+    turnId: held[0]!.command.turnId,
+  });
+  await kickStructuredDeliveryQueue();
 
   expect(ledger.writes).toMatchObject([{
     id: request.operationId,

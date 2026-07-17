@@ -48,7 +48,7 @@ test("runtime images are validated and stored as private content-addressed blobs
   expect(second).toEqual(first);
   expect(store.read(first!)).toEqual(PNG);
   expect(fs.statSync(store.pathFor(first!)).mode & 0o777).toBe(0o600);
-  expect(fs.readdirSync(root)).toEqual([`${sha256}.png`]);
+  expect(fs.readdirSync(root).filter((entry) => !entry.startsWith("."))).toEqual([`${sha256}.png`]);
 });
 
 test("runtime image admission rejects malformed data, MIME mismatches, and excess images", () => {
@@ -329,9 +329,14 @@ test("discardUnreferenced removes only blobs nothing durable references", () => 
   expect(fs.existsSync(store.pathFor(droppedRef))).toBe(false);
 });
 
-test("stale-lock reclamation restores a lock that was replaced behind its back", () => {
+test("stale-lock reclamation restores a replacement before a third writer can enter", async () => {
   const root = sandbox();
+  const controls = sandbox();
   const lock = path.join(root, ".writer-lock");
+  const ready = path.join(controls, "ready-third");
+  const start = path.join(controls, "start");
+  fs.writeFileSync(start, "go");
+  let third: ReturnType<typeof Bun.spawn> | null = null;
   const replacementOwner = {
     pid: 2_147_483_646,
     startIdentity: "replacement-owner",
@@ -347,12 +352,23 @@ test("stale-lock reclamation restores a lock that was replaced behind its back",
   const base = Date.now();
   let calls = 0;
   const swapLock = () => {
-    /* Another contender reclaims and replaces the lock between this
-       process's lstat and its rename: same path, different inode. */
+    /* A replacement lands between observation and rename. A third process
+       starts contending while the reclaimer holds the acquisition gate. */
     fs.rmSync(lock, { recursive: true, force: true });
     fs.mkdirSync(lock, { mode: 0o700 });
     fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(replacementOwner), { mode: 0o600 });
     fs.utimesSync(lock, new Date(base), new Date(base));
+    third = Bun.spawn([
+      process.execPath,
+      WRITER_FIXTURE,
+      root,
+      String(8 * 1024 * 1024),
+      "third",
+      ready,
+      start,
+      "50",
+    ], { stdout: "pipe", stderr: "pipe" });
+    while (!fs.existsSync(ready)) Bun.sleepSync(2);
   };
 
   expect(() => new RuntimeImageStore(root, {
@@ -367,6 +383,10 @@ test("stale-lock reclamation restores a lock that was replaced behind its back",
 
   /* The displaced replacement lock was restored intact, never destroyed. */
   expect(JSON.parse(fs.readFileSync(path.join(lock, "owner.json"), "utf8"))).toEqual(replacementOwner);
+  if (third === null) throw new Error("third writer launch is missing");
+  const thirdProcess = third as unknown as { exited: Promise<number>; stderr: ReadableStream<Uint8Array> };
+  expect(await thirdProcess.exited).toBe(1);
+  expect(await new Response(thirdProcess.stderr).text()).toContain("runtime image writer lock timed out");
 });
 
 test("concurrent runtime image writers cannot exceed the global byte quota", async () => {
@@ -498,7 +518,7 @@ test("runtime image writes remove partial and published files after every inject
 
     expect(() => store.putMany([{ base64: taggedPng(failedStage).toString("base64"), mime: "image/png" }]))
       .toThrow(`injected ${failedStage} failure`);
-    expect(fs.readdirSync(root)).toEqual([]);
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith("."))).toEqual([]);
   }
 });
 
@@ -598,7 +618,7 @@ test("the Darwin path removes partial and published files after injected failure
 
     expect(() => store.putMany([{ base64: taggedPng(failedStage).toString("base64"), mime: "image/png" }]))
       .toThrow(`injected ${failedStage} failure`);
-    expect(fs.readdirSync(root)).toEqual([]);
+    expect(fs.readdirSync(root).filter((entry) => !entry.startsWith("."))).toEqual([]);
   }
 });
 

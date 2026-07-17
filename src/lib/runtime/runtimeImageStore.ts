@@ -137,14 +137,13 @@ const REF_DIGEST = /^[a-f0-9]{64}$/;
 const BLOB_NAME = /^([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
 
 /** How long a terminally delivered reservation's refs stay reachable after
-    delivery. Bounded retirement is what lets the store's quota breathe: an
-    append-only ledger or delivered tombstone must not pin its blobs forever,
-    while the grace still covers the delivered-replay window. Non-terminal
-    reservations (held/assigned/uncertain/pending) never retire. */
+    delivery. Bounded retirement releases store quota after the grace period,
+    which still covers the delivered-replay window. Active reservations retain
+    every referenced blob. */
 export const DELIVERED_REF_RETIREMENT_GRACE_MS = 24 * 60 * 60 * 1000;
 
-/** The moment a delivered reservation record became terminal, or null for any
-    record that is not a terminally delivered image reservation. */
+/** The moment a delivered image reservation became terminal. Other records
+    return null. */
 function deliveredRecordTerminalAt(record: Record<string, unknown>): number | null {
   if (record.state !== "delivered" || !Array.isArray(record.runtimeImages)) return null;
   const at = typeof record.deliveredAt === "string"
@@ -385,10 +384,10 @@ interface WriterLockOwner {
   token: string;
 }
 
-function readWriterLockOwner(lock: string): WriterLockOwner | null {
+function readOwnerFile(filename: string): WriterLockOwner | null {
   let value: unknown;
   try {
-    const fd = fs.openSync(path.join(lock, "owner.json"), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try { value = JSON.parse(fs.readFileSync(fd, "utf8")); }
     finally { fs.closeSync(fd); }
   } catch (error) {
@@ -402,6 +401,10 @@ function readWriterLockOwner(lock: string): WriterLockOwner | null {
     || (owner.startIdentity !== null && (typeof owner.startIdentity !== "string" || !owner.startIdentity))
     || typeof owner.token !== "string" || !owner.token) return null;
   return owner as WriterLockOwner;
+}
+
+function readWriterLockOwner(lock: string): WriterLockOwner | null {
+  return readOwnerFile(path.join(lock, "owner.json"));
 }
 
 function writerLockOwnerIsAlive(owner: WriterLockOwner | null): boolean {
@@ -454,9 +457,8 @@ export class RuntimeImageStore {
     if (total > MAX_STRUCTURED_IMAGE_TOTAL_BYTES) throw new Error("runtime image request is too large");
     return this.withWriterLock("write", (root) => {
       this.assertQuota(root, decoded);
-      /* Batch rollback: a failure on image N must not strand the images this
-         call newly published before it. Blobs that already existed (dedup
-         hits) are someone else's and stay. */
+      /* Batch rollback removes images newly published by this call after a
+         later image fails. Existing deduplicated blobs remain in place. */
       const published: string[] = [];
       const refs: StructuredImageRef[] = [];
       try {
@@ -474,11 +476,9 @@ export class RuntimeImageStore {
     });
   }
 
-  /** Rollback half of the delivery admission protocol: removes the given
-      blobs when nothing durable references them, so a payload that lost its
-      reservation conflict after publication stops consuming quota
-      immediately instead of waiting out the GC grace. A digest that IS
-      referenced (e.g. shared with the winning payload) survives. */
+  /** Rollback half of delivery admission removes blobs with no durable
+      references. A losing publication releases quota immediately. Shared
+      digests referenced by the winning payload remain available. */
   discardUnreferenced(refs: readonly StructuredImageRef[]): void {
     if (!refs.length) return;
     this.withWriterLock("write", (root) => {
@@ -539,40 +539,40 @@ export class RuntimeImageStore {
     };
     let acquired = false;
     try {
-      while (true) {
-        this.assertRootPinned(root);
-        let created = false;
-        try {
-          fs.mkdirSync(lock, { mode: 0o700 });
-          created = true;
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        }
-        if (created) {
+      while (!acquired) {
+        this.withWriterAcquisitionGate(root, deadline, () => {
+          this.assertRootPinned(root);
+          let created = false;
           try {
-            fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { flag: "wx", mode: 0o600 });
-            acquired = true;
-            break;
+            fs.mkdirSync(lock, { mode: 0o700 });
+            created = true;
           } catch (error) {
-            /* EEXIST means the directory under this path is no longer the one
-               this process created (a reclamation restored a displaced lock):
-               it belongs to someone else, so wait instead of destroying it. */
-            if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-            fs.rmSync(lock, { recursive: true, force: true });
-            throw error;
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           }
-        }
-        try {
-          const stat = fs.lstatSync(lock);
-          if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("runtime image writer lock is unsafe");
-          if (this.now() - stat.mtimeMs > this.writerLockStaleMs && !writerLockOwnerIsAlive(readWriterLockOwner(lock))) {
-            this.reclaimStaleWriterLock(root, lock, stat);
-            continue;
+          if (created) {
+            try {
+              fs.writeFileSync(path.join(lock, "owner.json"), JSON.stringify(owner), { flag: "wx", mode: 0o600 });
+              acquired = true;
+              return;
+            } catch (error) {
+              /* A restored displaced lock can replace the directory created
+                 by this process. The current owner remains authoritative. */
+              if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+              fs.rmSync(lock, { recursive: true, force: true });
+              throw error;
+            }
           }
-        } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
-          continue;
-        }
+          try {
+            const stat = fs.lstatSync(lock);
+            if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("runtime image writer lock is unsafe");
+            if (this.now() - stat.mtimeMs > this.writerLockStaleMs && !writerLockOwnerIsAlive(readWriterLockOwner(lock))) {
+              this.reclaimStaleWriterLock(root, lock, stat);
+            }
+          } catch (statError) {
+            if ((statError as NodeJS.ErrnoException).code !== "ENOENT") throw statError;
+          }
+        });
+        if (acquired) break;
         if (this.now() >= deadline) throw new Error("runtime image writer lock timed out");
         sleepSync(5);
       }
@@ -590,12 +590,64 @@ export class RuntimeImageStore {
     }
   }
 
-  /** Single-winner reclamation of a stale writer lock. The atomic rename
-      admits exactly one reclaimer among contenders that observed the SAME
-      dead lock (the losers see ENOENT); the inode comparison then detects the
-      time-of-check/time-of-use case where the lock was replaced between the
-      staleness check and the rename, and restores the displaced lock instead
-      of destroying a possibly live owner's tenure. */
+  private withWriterAcquisitionGate<T>(root: OpenRoot, deadline: number, run: () => T): T {
+    const queue = path.join(root.path, ".writer-lock-gate.queue");
+    const gate = path.join(root.path, ".writer-lock-gate");
+    const owner: WriterLockOwner = {
+      pid: process.pid,
+      startIdentity: procBackend.processIdentity(process.pid),
+      token: crypto.randomUUID(),
+    };
+    fs.mkdirSync(queue, { recursive: true, mode: 0o700 });
+    const ticket = path.join(
+      queue,
+      `${String(this.now()).padStart(16, "0")}-${process.pid}-${crypto.randomUUID()}.json`,
+    );
+    fs.writeFileSync(ticket, JSON.stringify(owner), { flag: "wx", mode: 0o600 });
+    let acquired = false;
+    try {
+      while (!acquired) {
+        this.assertRootPinned(root);
+        const liveTickets: string[] = [];
+        for (const entry of fs.readdirSync(queue).filter((candidate) => candidate.endsWith(".json")).sort()) {
+          const candidate = path.join(queue, entry);
+          const candidateOwner = readOwnerFile(candidate);
+          if (!candidateOwner || !writerLockOwnerIsAlive(candidateOwner)) {
+            fs.rmSync(candidate, { force: true });
+            continue;
+          }
+          liveTickets.push(candidate);
+        }
+        if (liveTickets[0] === ticket) {
+          try {
+            fs.mkdirSync(gate, { mode: 0o700 });
+            fs.writeFileSync(path.join(gate, "owner.json"), JSON.stringify(owner), { flag: "wx", mode: 0o600 });
+            acquired = true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+            if (!writerLockOwnerIsAlive(readWriterLockOwner(gate))) {
+              fs.rmSync(gate, { recursive: true, force: true });
+            }
+          }
+        }
+        if (!acquired) {
+          if (this.now() >= deadline) throw new Error("runtime image writer lock timed out");
+          sleepSync(5);
+        }
+      }
+      return run();
+    } finally {
+      if (acquired && readWriterLockOwner(gate)?.token === owner.token) {
+        fs.rmSync(gate, { recursive: true, force: true });
+      }
+      fs.rmSync(ticket, { force: true });
+    }
+  }
+
+  /** Stale writer-lock reclamation runs inside the cross-process acquisition
+      gate. The inode comparison detects replacement between observation and
+      rename, then restores the displaced owner's lock before releasing the
+      gate to another contender. */
   private reclaimStaleWriterLock(root: OpenRoot, lock: string, observed: fs.Stats): void {
     const graveyard = path.join(root.path, `.writer-lock-reclaim.${crypto.randomUUID()}`);
     try {
@@ -617,8 +669,7 @@ export class RuntimeImageStore {
     try {
       fs.renameSync(graveyard, lock);
     } catch (error) {
-      /* A third contender created a fresh lock inside the displacement gap.
-         Failing loudly is the only outcome that cannot admit a second writer. */
+      /* Restoration failure preserves a visible safety fault. */
       throw new Error("runtime image writer lock reclamation raced", { cause: error });
     }
   }

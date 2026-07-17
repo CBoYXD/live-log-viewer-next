@@ -5,7 +5,7 @@ import { sessionKeyId, type SessionKey } from "@/lib/agent/sessionKey";
 
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { EngineHost, HostState } from "./engineHost";
-import { runtimeClientDeliveryPort, StructuredDeliveryQueue } from "./structuredDeliveryQueue";
+import { StructuredDeliveryQueue } from "./structuredDeliveryQueue";
 import { projectEngineHostEvent } from "./engineHostEvents";
 import { setStructuredDeliveryKick } from "./structuredDeliverySignal";
 import { runtimeImageCapability } from "./runtimeImageStore";
@@ -141,7 +141,21 @@ export async function bindStructuredDeliveryQueue(
   const hosts = new Map<string, EngineHost>();
   let scheduleAutomaticRetry = () => {};
   const queue = new StructuredDeliveryQueue(
-    runtimeClientDeliveryPort(client),
+    {
+      effects: (kinds, afterEventSeq) => client.effectBatch(kinds, afterEventSeq),
+      transition: async (operationId, status, details) => {
+        const result = await client.transitionOperation(operationId, status, details);
+        if (status !== "delivered" && status !== "failed") return;
+        const conversationId = result.receipt.conversationId;
+        if (!conversationId?.startsWith("conversation_")) return;
+        registry.recordDeliveryOutcomeForOperation(
+          conversationId as `conversation_${string}`,
+          operationId,
+          status,
+          details?.reason ?? null,
+        );
+      },
+    },
     hostResolver(registry, hosts),
     async (conversationId, expectedKey) => {
       if (await state.terminateActiveHost?.(expectedKey)) return true;

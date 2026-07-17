@@ -2,7 +2,7 @@ import fs from "node:fs";
 
 import { RuntimeImageStore } from "../runtimeImageStore";
 
-const [root, maxBytesValue, tag, readyFile, startFile] = process.argv.slice(2);
+const [root, maxBytesValue, tag, readyFile, startFile, writerLockWaitValue] = process.argv.slice(2);
 if (!root || !maxBytesValue || !tag || !readyFile || !startFile) process.exit(64);
 
 const header = Buffer.from(
@@ -14,7 +14,10 @@ fs.writeFileSync(readyFile, "ready");
 while (!fs.existsSync(startFile)) Bun.sleepSync(2);
 
 try {
-  new RuntimeImageStore(root, { maxBytes: Number(maxBytesValue) }).putMany([{
+  new RuntimeImageStore(root, {
+    maxBytes: Number(maxBytesValue),
+    ...(writerLockWaitValue ? { writerLockWaitMs: Number(writerLockWaitValue) } : {}),
+  }).putMany([{
     base64: data.toString("base64"),
     mime: "image/png",
   }]);

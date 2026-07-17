@@ -936,11 +936,13 @@ function normalizeHeldDelivery(value: HeldDelivery): HeldDelivery {
     : null;
   const payloadKind = value.payloadKind ?? "text";
   const parsedImages = parseStructuredImageRefs(value.runtimeImages ?? [], 16);
-  /* Malformed persisted refs must never quietly reclassify an image message
-     as text: the reservation enters a visible, recoverable failed state with
-     zero host actuation instead of delivering the bare caption. Delivered
-     tombstones keep their terminal state — nothing actuates from them. */
-  const imagesCorrupt = parsedImages === null && state !== "delivered";
+  /* Malformed, missing, and empty persisted refs keep an image reservation in
+     a visible recoverable failure state with zero host actuation. Delivered
+     tombstones retain their terminal state. */
+  const imagesCorrupt = state !== "delivered"
+    && (parsedImages === null
+      || (payloadKind === "runtime-images"
+        && (!Array.isArray(value.runtimeImages) || parsedImages.length === 0)));
   if (imagesCorrupt) state = "failed";
   const runtimeImages = parsedImages ?? [];
   let contentDigest = typeof value.contentDigest === "string" ? value.contentDigest : null;
@@ -3885,8 +3887,10 @@ export class AgentRegistry {
     commandInput: HeldDeliveryCommandInput = {},
   ): HeldDelivery {
     if (payloadKind === "text" && !text) throw new Error("held delivery must contain at most 32000 characters");
-    /* One UTF-8 bound for every payload kind: an image caption is envelope
-       text too and must not bypass the gate the text kind always had. */
+    if (payloadKind === "runtime-images" && runtimeImages.length === 0) {
+      throw new Error("runtime-images delivery requires image references");
+    }
+    /* One UTF-8 bound covers every payload kind, including image captions. */
     assertStructuredTextEnvelope(text);
     return this.mutate((file) => {
       const canonicalId = resolveConversationAlias(file, conversationId);
@@ -3924,14 +3928,14 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) {
-        /* Same client message id with different content (e.g. changed images)
-           is a reservation conflict, not an operational fault: the typed error
-           maps to HTTP 409 and the original reservation stays authoritative. */
+        /* Same client message id with different content is a reservation
+           conflict. The typed error maps to HTTP 409 and the original
+           reservation stays authoritative. */
         if (existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
           throw new DeliveryReservationConflictError();
         }
-        /* A corrupt-image reservation stays a visible recoverable failure: a
-           replay must not revive it into an assignable text-only delivery. */
+        /* A corrupt-image reservation stays a visible recoverable failure.
+           Exact replay preserves that failed state. */
         if (existing.error === CORRUPT_HELD_DELIVERY_IMAGES_ERROR) return clone(existing);
         return place(existing);
       }
@@ -4071,6 +4075,33 @@ export class AgentRegistry {
       if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
       const settled = clone(delivery);
       if (state === "delivered" || state === "failed") compactDeliveryReservations(file, delivery.conversationId);
+      return settled;
+    });
+  }
+
+  recordDeliveryOutcomeForOperation(
+    conversationId: ViewerConversationId,
+    operationId: string,
+    state: Extract<HeldDelivery["state"], "delivered" | "failed">,
+    error: string | null = null,
+  ): HeldDelivery | null {
+    return this.mutate((file) => {
+      const canonicalId = resolveConversationAlias(file, conversationId);
+      const delivery = Object.values(file.heldDeliveries).find((candidate) =>
+        resolveConversationAlias(file, candidate.conversationId) === canonicalId
+        && candidate.command.operationId === operationId);
+      if (!delivery || delivery.state === "delivered") return delivery ? clone(delivery) : null;
+      if (delivery.state !== "delivery-uncertain") return null;
+      const conversation = file.conversations[canonicalId];
+      const paths = new Set([conversation?.generations.at(-1)?.path].filter((pathname): pathname is string => Boolean(pathname)));
+      const signature = conversation ? migrationReadinessSignature(file, conversation.engine, paths) : "";
+      delivery.state = state;
+      delivery.deliveredAt = state === "delivered" ? now() : null;
+      delivery.error = error?.slice(0, 240) ?? null;
+      if (state === "delivered") delivery.text = "";
+      if (conversation) advanceMigrationScopeRevision(file, conversation.engine, signature, paths);
+      const settled = clone(delivery);
+      compactDeliveryReservations(file, delivery.conversationId);
       return settled;
     });
   }
