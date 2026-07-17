@@ -55,6 +55,26 @@ export interface StructuredMessageDependencies {
   /** The refs `storeImages` would publish, computed without writing — used by
       the same-key conflict preflight so a changed payload rejects blob-free. */
   previewImageRefs?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
+  /** Rollback for blobs published by an admission that then lost its
+      reservation conflict (e.g. to a concurrent writer in another process). */
+  discardImages?: (refs: readonly StructuredImageRef[]) => void;
+}
+
+/** Serializes preflight → publication → reservation per (conversation,
+    client message id) within this process — the only blob publisher — so two
+    racing changed payloads cannot both observe an empty reservation: the
+    loser sees the winner's reservation BEFORE publishing anything. */
+const admissionSections = new Map<string, Promise<unknown>>();
+
+async function withAdmissionSection<T>(key: string | null, run: () => T | Promise<T>): Promise<T> {
+  if (!key) return run();
+  const queued = (admissionSections.get(key) ?? Promise.resolve()).catch(() => {}).then(run);
+  admissionSections.set(key, queued);
+  try {
+    return await queued;
+  } finally {
+    if (admissionSections.get(key) === queued) admissionSections.delete(key);
+  }
 }
 
 export interface HeldStructuredMessageRequest {
@@ -390,22 +410,43 @@ export async function enqueueStructuredMessage(
       : (dependencies.previewImageRefs ?? runtimeImageRefsForUploads)(rawImages);
     const content = structuredContent(request.text, refs);
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
-    if (request.clientMessageId?.trim()
-      && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
-      throw new DeliveryReservationConflictError();
-    }
-    if (rawImages.length > 0) {
-      (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
-    }
-    let reservation = registry.holdDelivery(
-      conversation.id,
-      content.content.text,
-      idempotencyKey,
-      refs.length ? "runtime-images" : "text",
-      refs,
-      content.contentDigest,
-      commandInput(request),
-    );
+    const admissionKey = request.clientMessageId?.trim()
+      ? `${conversation.id} ${request.clientMessageId.trim()}`
+      : null;
+    let reservation = await withAdmissionSection(admissionKey, () => {
+      if (admissionKey
+        && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
+        throw new DeliveryReservationConflictError();
+      }
+      let published: StructuredImageRef[] = [];
+      if (rawImages.length > 0) {
+        published = (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
+      }
+      try {
+        return registry.holdDelivery(
+          conversation.id,
+          content.content.text,
+          idempotencyKey,
+          refs.length ? "runtime-images" : "text",
+          refs,
+          content.contentDigest,
+          commandInput(request),
+        );
+      } catch (error) {
+        /* A writer in another process reserved this key between the preflight
+           and the reservation: roll the just-published blobs back (digests the
+           winner also references survive) so the losing payload never
+           consumes quota until GC. */
+        if (error instanceof DeliveryReservationConflictError && published.length) {
+          try {
+            (dependencies.discardImages ?? ((toDiscard) => runtimeImageStore().discardUnreferenced(toDiscard)))(published);
+          } catch {
+            /* Best-effort rollback; bounded GC retires any remainder. */
+          }
+        }
+        throw error;
+      }
+    });
     let claimedReservationId: string | null = null;
     if (reservation.state === "delivery-uncertain") {
       reservation = registry.retryUncertainDelivery(reservation.id);

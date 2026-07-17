@@ -474,6 +474,25 @@ export class RuntimeImageStore {
     });
   }
 
+  /** Rollback half of the delivery admission protocol: removes the given
+      blobs when nothing durable references them, so a payload that lost its
+      reservation conflict after publication stops consuming quota
+      immediately instead of waiting out the GC grace. A digest that IS
+      referenced (e.g. shared with the winning payload) survives. */
+  discardUnreferenced(refs: readonly StructuredImageRef[]): void {
+    if (!refs.length) return;
+    this.withWriterLock("write", (root) => {
+      const reachable = this.reachableDigests();
+      let removed = false;
+      for (const ref of refs) {
+        if (reachable.has(ref.sha256)) continue;
+        fs.rmSync(path.join(root.path, path.basename(this.pathFor(ref))), { force: true });
+        removed = true;
+      }
+      if (removed) syncDirectory(root.path);
+    });
+  }
+
   read(ref: StructuredImageRef): Buffer {
     const root = this.openRoot("read");
     try { return this.readFromRoot(root, ref); }

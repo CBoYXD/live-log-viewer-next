@@ -419,6 +419,57 @@ test("a changed payload rejects before any blob publication even at full quota",
   expect(stores).toBe(2);
 });
 
+test("a conflicting reservation raced in behind the preflight rolls the published blobs back", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const winnerRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  const loserRef: StructuredImageRef = { sha256: "b".repeat(64), mime: "image/png", bytes: 91 };
+  const discarded: StructuredImageRef[][] = [];
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async () => { commands += 1; throw new Error("unexpected command"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "raced-admission",
+    text: "",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    previewImageRefs: () => [loserRef],
+    storeImages: () => {
+      /* Simulate a concurrent writer in another process: it lands its own
+         reservation for this key AFTER our preflight, DURING our blob
+         publication. */
+      new AgentRegistry(registry.filename).holdDelivery(
+        conversation.id, "", "raced-admission", "runtime-images", [winnerRef],
+        structuredContentDigest({ text: "", images: [winnerRef] }),
+      );
+      return [loserRef];
+    },
+    discardImages: (refs) => { discarded.push([...refs]); },
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    status: 409,
+    error: "client message id is already reserved for another request",
+  });
+  expect(commands).toBe(0);
+  /* The losing payload's publication was rolled back immediately. */
+  expect(discarded).toEqual([[loserRef]]);
+  /* The winner's reservation is untouched. */
+  const reservation = Object.values(new AgentRegistry(registry.filename).snapshot().heldDeliveries)
+    .find((held) => held.clientMessageId === "raced-admission");
+  expect(reservation).toMatchObject({ runtimeImages: [winnerRef] });
+});
+
 test("one UTF-8 envelope bound rejects an oversized multibyte caption before storage, recovery, and reservation", async () => {
   const { registry, conversation } = registryWithConversation("default", "claude");
   const deadSnapshot = snapshot(conversation.id, "claude", true);

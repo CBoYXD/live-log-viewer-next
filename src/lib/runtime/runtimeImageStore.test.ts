@@ -312,6 +312,23 @@ test("a multi-image batch failure rolls back its newly published blobs and keeps
   expect(fs.readdirSync(root).filter((entry) => !entry.startsWith("."))).toEqual([`${sha(preexisting)}.png`]);
 });
 
+test("discardUnreferenced removes only blobs nothing durable references", () => {
+  const root = sandbox();
+  const kept = taggedPng("discard-kept");
+  const dropped = taggedPng("discard-dropped");
+  let reachable = new Set<string>();
+  const store = new RuntimeImageStore(root, { reachableDigests: () => reachable });
+  const [keptRef] = store.putMany([{ base64: kept.toString("base64"), mime: "image/png" }]);
+  const [droppedRef] = store.putMany([{ base64: dropped.toString("base64"), mime: "image/png" }]);
+  if (!keptRef || !droppedRef) throw new Error("refs missing");
+  reachable = new Set([keptRef.sha256]);
+
+  store.discardUnreferenced([keptRef, droppedRef]);
+
+  expect(store.read(keptRef)).toEqual(kept);
+  expect(fs.existsSync(store.pathFor(droppedRef))).toBe(false);
+});
+
 test("stale-lock reclamation restores a lock that was replaced behind its back", () => {
   const root = sandbox();
   const lock = path.join(root, ".writer-lock");
