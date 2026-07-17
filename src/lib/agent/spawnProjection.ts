@@ -4,6 +4,8 @@ import type { RegistryFile, SpawnReceipt } from "./registry";
 import { projectInfoFromCwd, projectRootForCwd } from "@/lib/scanner/describe";
 import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 
+const TERMINAL_SPAWN_RECENT_MS = 15 * 60 * 1_000;
+
 function initialDelivery(snapshot: RegistryFile, receipt: SpawnReceipt) {
   return Object.values(snapshot.heldDeliveries).find((delivery) =>
     delivery.conversationId === receipt.conversationId
@@ -59,9 +61,19 @@ function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: Registry
   return [...byConversation.values()];
 }
 
+function projectedActivity(spawn: StructuredSpawnCardState, createdAt: string, nowMs: number): FileEntry["activity"] {
+  const terminal = spawn.state === "failed" || spawn.state === "recovered";
+  const createdMs = Date.parse(createdAt);
+  if (terminal && Number.isFinite(createdMs) && nowMs - createdMs >= TERMINAL_SPAWN_RECENT_MS) return "idle";
+  if (spawn.state === "failed") return "stalled";
+  if (spawn.state === "recovered") return "recent";
+  return "live";
+}
+
 export function preallocatedStructuredSpawnCards(
   files: readonly FileEntry[],
   snapshot: RegistryFile,
+  nowMs = Date.now(),
 ): FileEntry[] {
   const scannedPaths = new Set(files.map((file) => file.path));
   return newestUnscannedReceipts(files, snapshot).map((receipt) => {
@@ -89,7 +101,7 @@ export function preallocatedStructuredSpawnCards(
       ...(parentPath && scannedPaths.has(parentPath) ? { handoff: true } : {}),
       mtime: Date.parse(receipt.createdAt) / 1000,
       size: 0,
-      activity: spawn.state === "failed" ? "stalled" : spawn.state === "recovered" ? "recent" : "live",
+      activity: projectedActivity(spawn, receipt.createdAt, nowMs),
       activityReason: `structured_spawn_${spawn.state}`,
       proc: null,
       pid: null,

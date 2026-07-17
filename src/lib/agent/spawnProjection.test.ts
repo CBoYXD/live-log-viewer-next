@@ -80,6 +80,59 @@ test("a settled artifact stays projected across restart until inventory observes
   }
 });
 
+test("terminal synthetic spawn cards join compact history after the scanner freshness horizon", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-terminal-age-"));
+  const filename = path.join(directory, "agent-registry.json");
+  const artifactPath = path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe4.jsonl");
+  try {
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const recovered = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      clientAttemptId: "terminal_age_recovered_20260717_a1",
+      requestDigest: "1".repeat(64),
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    const failed = registry.beginSpawnRequest({
+      engine: "claude",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      clientAttemptId: "terminal_age_failed_20260717_a1",
+      requestDigest: "2".repeat(64),
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (recovered.kind !== "created" || failed.kind !== "created") throw new Error("expected structured launch creation");
+    registry.settleSpawn(recovered.receipt.launchId, {
+      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe4" },
+      artifactPath,
+      cwd: directory,
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+      status: "unhosted",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    registry.failSpawn(failed.receipt.launchId, "runtime host request timed out");
+
+    const createdMs = Math.max(Date.parse(recovered.receipt.createdAt), Date.parse(failed.receipt.createdAt));
+    const fresh = preallocatedStructuredSpawnCards([], registry.snapshot(), createdMs + 14 * 60 * 1_000);
+    expect(fresh.find((card) => card.path === `spawn:${recovered.receipt.launchId}`)?.activity).toBe("recent");
+    expect(fresh.find((card) => card.path === `spawn:${failed.receipt.launchId}`)?.activity).toBe("stalled");
+
+    const historical = preallocatedStructuredSpawnCards([], registry.snapshot(), createdMs + 16 * 60 * 1_000);
+    expect(historical.find((card) => card.path === `spawn:${recovered.receipt.launchId}`)?.activity).toBe("idle");
+    expect(historical.find((card) => card.path === `spawn:${failed.receipt.launchId}`)?.activity).toBe("idle");
+    expect(historical.map((card) => card.spawn?.retrySafe)).toContain(true);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("a legacy completed receipt with a recorded transcript stays materialized after restart", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-legacy-materialized-"));
   const filename = path.join(directory, "agent-registry.json");
