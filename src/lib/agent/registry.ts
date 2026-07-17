@@ -3892,8 +3892,11 @@ export class AgentRegistry {
         return clone(delivery);
       };
       if (existing) {
+        /* Same client message id with different content (e.g. changed images)
+           is a reservation conflict, not an operational fault: the typed error
+           maps to HTTP 409 and the original reservation stays authoritative. */
         if (existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest) {
-          throw new Error("held delivery idempotency conflict");
+          throw new DeliveryReservationConflictError();
         }
         return place(existing);
       }

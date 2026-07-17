@@ -177,6 +177,74 @@ test("Claude image-only admission stores refs and journals their content digest"
   });
 });
 
+test("a changed-image replay of one client message id maps to a 409 reservation conflict", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const originalRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  const changedRef: StructuredImageRef = { sha256: "b".repeat(64), mime: "image/png", bytes: 91 };
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async (value: { operationId: string; idempotencyKey: string }) => {
+      commands += 1;
+      return {
+        operationId: value.operationId,
+        replayed: false,
+        receipt: {
+          operationId: value.operationId,
+          idempotencyKey: value.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          text: "",
+          imageCount: 1,
+          at: "2026-07-17T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  const request = (ref: StructuredImageRef) => enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "changed-image-replay",
+    text: "",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    storeImages: () => [ref],
+    kick: () => {},
+  });
+
+  const first = await request(originalRef);
+  expect(first).toMatchObject({ ok: true, outcome: "queued" });
+  expect(commands).toBe(1);
+
+  /* Same client message id, different image content: a typed reservation
+     conflict surfaces as HTTP 409 and never reaches the host command plane. */
+  const conflict = await request(changedRef);
+  expect(conflict).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    status: 409,
+    error: "client message id is already reserved for another request",
+  });
+  expect(commands).toBe(1);
+
+  /* The original reservation survives the conflict untouched. */
+  const reservation = Object.values(registry.snapshot().heldDeliveries)
+    .find((held) => held.clientMessageId === "changed-image-replay");
+  expect(reservation).toMatchObject({
+    contentDigest: structuredContentDigest({ text: "", images: [originalRef] }),
+    runtimeImages: [originalRef],
+  });
+
+  /* The exact replay stays idempotent after the rejected conflict. */
+  const replay = await request(originalRef);
+  expect(replay).toMatchObject({ ok: true });
+});
+
 test("stale structured image capability rejects before blob storage or command admission", async () => {
   const { registry, conversation } = registryWithConversation("default", "claude");
   let stores = 0;

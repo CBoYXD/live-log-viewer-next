@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, spyOn, test } from "bun:test";
 
-import { AgentRegistry, conversationLookupFromSnapshot, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
+import { AgentRegistry, conversationLookupFromSnapshot, DeliveryReservationConflictError, SPAWN_STARTING_ADMISSION_LEASE_MS } from "@/lib/agent/registry";
 import { emptyLaunchProfile } from "@/lib/accounts/migration/contracts";
 import { structuredContent } from "@/lib/runtime/structuredContent";
 
@@ -175,6 +175,41 @@ describe("agent registry", () => {
       [],
       changedContent.contentDigest,
     )).toThrow("client message id is already reserved for another request");
+  });
+
+  test("a changed-image replay of one client message id raises a typed 409 reservation conflict", () => {
+    const store = registry();
+    const conversation = store.ensureConversation("claude", "/changed-image-conflict.jsonl", "default");
+    const originalRefs = [{ sha256: "a".repeat(64), mime: "image/png" as const, bytes: 67 }];
+    const original = structuredContent("ship the screenshot", originalRefs);
+    const held = store.holdDelivery(
+      conversation.id, original.content.text, "image-client-message", "runtime-images", originalRefs, original.contentDigest,
+    );
+    expect(held.state).toBe("assigned");
+
+    /* The exact replay (same text and image digests) stays idempotent. */
+    const replay = store.holdDelivery(
+      conversation.id, original.content.text, "image-client-message", "runtime-images", originalRefs, original.contentDigest,
+    );
+    expect(replay.id).toBe(held.id);
+
+    /* Same client message id and text, different image set: a reservation
+       conflict typed for HTTP 409, with the original reservation untouched. */
+    const changedRefs = [{ sha256: "b".repeat(64), mime: "image/png" as const, bytes: 91 }];
+    const changed = structuredContent("ship the screenshot", changedRefs);
+    expect(() => store.holdDelivery(
+      conversation.id, changed.content.text, "image-client-message", "runtime-images", changedRefs, changed.contentDigest,
+    )).toThrow(DeliveryReservationConflictError);
+    expect(store.snapshot().heldDeliveries[held.id]).toMatchObject({
+      contentDigest: original.contentDigest,
+      runtimeImages: originalRefs,
+      state: "assigned",
+    });
+
+    /* And the exact replay still works after the rejected conflict. */
+    expect(store.holdDelivery(
+      conversation.id, original.content.text, "image-client-message", "runtime-images", originalRefs, original.contentDigest,
+    ).id).toBe(held.id);
   });
 
   test("startup compaction bounds abandoned failed reservations and leaves capacity", () => {
