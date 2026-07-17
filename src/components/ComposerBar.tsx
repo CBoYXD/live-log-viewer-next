@@ -249,14 +249,21 @@ export function ComposerBar({
             attachments.handlePaste(event);
           }}
           onDragOver={(event) => {
-            if (imageDisabled && Array.from(event.dataTransfer.items).some((item) => item.type.startsWith("image/"))) {
+            /* A file drop only fires when its dragover was cancelled — without
+               this the browser navigates to the dropped image instead of
+               attaching it. Image drags are claimed whether the picker is
+               enabled (copy) or disabled (none, keeping the rejection); other
+               drag payloads keep their default behavior. */
+            if (Array.from(event.dataTransfer.items).some((item) => item.type.startsWith("image/"))) {
               event.preventDefault();
+              event.dataTransfer.dropEffect = imageDisabled ? "none" : "copy";
             }
           }}
           onDrop={(event) => {
             const files = Array.from(event.dataTransfer.files).filter((file) => file.type.startsWith("image/"));
             if (!files.length) return;
             event.preventDefault();
+            event.stopPropagation();
             if (!imageDisabled) (onImageFiles ?? attachments.addFiles)(files);
           }}
           onKeyDown={(event) => {

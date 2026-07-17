@@ -63,21 +63,105 @@ test("unsupported image capability disables picker, paste, and drop before admis
   const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
   const props = (textarea as unknown as Record<string, {
     onPaste(event: unknown): void;
+    onDragOver(event: unknown): void;
     onDrop(event: unknown): void;
   }>)[propsKey]!;
   let pastePrevented = false;
+  let dragOverPrevented = false;
   let dropPrevented = false;
   props.onPaste({
     clipboardData: { items: [{ type: "image/png", getAsFile: () => ({ type: "image/png" }) }] },
     preventDefault: () => { pastePrevented = true; },
   });
+  const dragTransfer = { items: [{ type: "image/png" }], dropEffect: "" };
+  props.onDragOver({
+    dataTransfer: dragTransfer,
+    preventDefault: () => { dragOverPrevented = true; },
+  });
   props.onDrop({
     dataTransfer: { files: [{ type: "image/png" }] },
     preventDefault: () => { dropPrevented = true; },
+    stopPropagation: () => {},
   });
   expect(pastePrevented).toBe(true);
+  expect(dragOverPrevented).toBe(true);
+  expect(dragTransfer.dropEffect).toBe("none");
   expect(dropPrevented).toBe(true);
   expect(host.textContent).toContain("Capability unavailable");
+  flushSync(() => root.unmount());
+});
+
+test("an enabled image dragover is claimed so the drop delivers the files exactly once", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const delivered: File[][] = [];
+  const composerHarness = () => {
+    function EnabledHarness() {
+      const composer = useComposer({ initialText: () => "", persistText: () => {}, submit: () => {} });
+      return <ComposerBar
+        composer={composer}
+        placeholder="Prompt"
+        textareaAriaLabel="Prompt"
+        imageAriaLabel="Add images"
+        leftSlot={null}
+        sendLabelIdle="Send"
+        sendLabelRecording="Stop"
+        sendIdleClassName="bg-accent"
+        onImageFiles={(files) => { delivered.push(files); }}
+      />;
+    }
+    return <EnabledHarness />;
+  };
+  flushSync(() => root.render(composerHarness()));
+
+  const textarea = host.querySelector("textarea")!;
+  const propsKey = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+  const props = (textarea as unknown as Record<string, {
+    onDragOver(event: unknown): void;
+    onDrop(event: unknown): void;
+  }>)[propsKey]!;
+
+  /* The enabled image dragover must be cancelled — otherwise the browser
+     never fires the drop and navigates to the image instead. */
+  const imageDrag = { items: [{ type: "image/png" }], dropEffect: "" };
+  let dragOverPrevented = false;
+  props.onDragOver({
+    dataTransfer: imageDrag,
+    preventDefault: () => { dragOverPrevented = true; },
+  });
+  expect(dragOverPrevented).toBe(true);
+  expect(imageDrag.dropEffect).toBe("copy");
+
+  /* The drop consumes the event (no parent double-handling) and delivers the
+     image files exactly once. */
+  const imageFile = { name: "shot.png", type: "image/png" } as File;
+  let dropPrevented = false;
+  let dropStopped = false;
+  props.onDrop({
+    dataTransfer: { files: [imageFile, { name: "notes.txt", type: "text/plain" }] },
+    preventDefault: () => { dropPrevented = true; },
+    stopPropagation: () => { dropStopped = true; },
+  });
+  expect(dropPrevented).toBe(true);
+  expect(dropStopped).toBe(true);
+  expect(delivered).toEqual([[imageFile]]);
+
+  /* Non-image drags keep their default behavior end to end. */
+  let textDragPrevented = false;
+  props.onDragOver({
+    dataTransfer: { items: [{ type: "text/plain" }], dropEffect: "" },
+    preventDefault: () => { textDragPrevented = true; },
+  });
+  let textDropPrevented = false;
+  props.onDrop({
+    dataTransfer: { files: [{ name: "notes.txt", type: "text/plain" }] },
+    preventDefault: () => { textDropPrevented = true; },
+    stopPropagation: () => {},
+  });
+  expect(textDragPrevented).toBe(false);
+  expect(textDropPrevented).toBe(false);
+  expect(delivered).toHaveLength(1);
   flushSync(() => root.unmount());
 });
 
@@ -191,7 +275,7 @@ test("structured picker, paste, and drop reject an over-count batch before submi
     preventDefault() {},
   }));
   expect(host.textContent).toContain("Up to 2 images");
-  flushSync(() => textareaProps.onDrop({ dataTransfer: { files }, preventDefault() {} }));
+  flushSync(() => textareaProps.onDrop({ dataTransfer: { files }, preventDefault() {}, stopPropagation() {} }));
   expect(host.textContent).toContain("Up to 2 images");
 
   const picker = host.querySelector('input[type="file"]')!;
