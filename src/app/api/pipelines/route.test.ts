@@ -7,13 +7,13 @@ import { NextRequest } from "next/server";
 
 process.env.LLV_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "llv-pipeline-route-"));
 const { GET, POST } = await import("./route");
-const { registerFileControllerTick } = await import("@/lib/scanner/controllerSignal");
+const { registerPipelineTick } = await import("@/lib/pipelines/controllerSignal");
 
 afterAll(() => fs.rmSync(process.env.LLV_STATE_DIR!, { recursive: true, force: true }));
 
 test("pipeline collection route mirrors flow GET and POST shapes", async () => {
   let ticks = 0;
-  const unregister = registerFileControllerTick(async () => { ticks += 1; });
+  const unregister = registerPipelineTick(async () => { ticks += 1; });
   expect(await (await GET()).json()).toEqual({ pipelines: [] });
   const request = new NextRequest("http://127.0.0.1/api/pipelines", {
     method: "POST",
@@ -41,7 +41,7 @@ test("pipeline collection route mirrors flow GET and POST shapes", async () => {
 
 test("pipeline POST returns a persisted draft id for autoStart false", async () => {
   let ticks = 0;
-  const unregister = registerFileControllerTick(async () => { ticks += 1; });
+  const unregister = registerPipelineTick(async () => { ticks += 1; });
   const request = new NextRequest("http://127.0.0.1/api/pipelines", {
     method: "POST",
     headers: { host: "127.0.0.1", "content-type": "application/json" },
