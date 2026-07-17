@@ -368,8 +368,11 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
   markTiming("files-stores");
+  const projectsStartedAt = performance.now();
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
+  markTiming("files-project-rate-limits");
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
+  markTiming("files-project-catalog");
   const projectCwds = projectDirectoryFallbacks([
     ...projected.files.map((file) => file.project),
     ...effectiveProjectCatalog.map((entry) => entry.project),
@@ -378,7 +381,10 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     ...workflows.map((workflow) => workflow.project),
     ...tasks.tasks.map((task) => task.project),
   ]);
-  markTiming("files-projects");
+  markTiming("files-project-cwds");
+  const projectsFinishedAt = performance.now();
+  timings.push(`files-projects;dur=${(projectsFinishedAt - projectsStartedAt).toFixed(1)}`);
+  timingMark = projectsFinishedAt;
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
