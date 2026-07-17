@@ -310,7 +310,8 @@ test("a bounded receipt summary keeps retry while withholding lossy edit", () =>
 
 /* ── Exact draft clearing on accepted delivery ──────────────────────────── */
 
-import { draftAfterDelivery, settlePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
+import type { PendingImage } from "./imageAttachments";
+import { attachmentsAfterDelivery, draftAfterDelivery, settlePendingDeliveries, type PendingDelivery } from "./TmuxComposer";
 
 function deliveredReceipt(key: string, status: RuntimeReceipt["status"] = "delivered", text?: string): RuntimeReceipt {
   return {
@@ -340,24 +341,28 @@ test("draftAfterDelivery leaves a rewritten draft untouched on a stale delivery"
   expect(draftAfterDelivery("ship the fix", "")).toBe("ship the fix");
 });
 
+function pendingImage(tag: string): PendingImage {
+  return { base64: Buffer.from(tag).toString("base64"), mime: "image/png", preview: `data:image/png;base64,${tag}` };
+}
+
 test("settlePendingDeliveries clears exactly the delivered keys and keeps the rest", () => {
   const pending: PendingDelivery[] = [
-    { key: "key-a", text: "first ask" },
-    { key: "key-b", text: "second ask" },
+    { key: "key-a", text: "first ask", images: [pendingImage("a")] },
+    { key: "key-b", text: "second ask", images: [] },
   ];
-  const { deliveredTexts, remaining } = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
-  expect(deliveredTexts).toEqual(["first ask"]);
-  expect(remaining).toEqual([{ key: "key-b", text: "second ask" }]);
+  const { delivered, remaining } = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
+  expect(delivered).toEqual([{ entry: pending[0]!, text: "first ask" }]);
+  expect(remaining).toEqual([{ key: "key-b", text: "second ask", images: [] }]);
 });
 
 test("settlePendingDeliveries ignores non-delivered and unknown receipts", () => {
-  const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask" }];
-  const { deliveredTexts, remaining } = settlePendingDeliveries(pending, [
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask", images: [] }];
+  const { delivered, remaining } = settlePendingDeliveries(pending, [
     deliveredReceipt("key-a", "queued"),
     deliveredReceipt("key-a", "failed"),
     deliveredReceipt("key-unknown"),
   ]);
-  expect(deliveredTexts).toEqual([]);
+  expect(delivered).toEqual([]);
   expect(remaining).toEqual(pending);
 });
 
@@ -365,16 +370,27 @@ test("settlePendingDeliveries prefers the receipt's own delivered text over the 
   /* A replayed key can deliver the ORIGINAL turn's text while the local
      attempt carried a rewritten draft — the server's record is what actually
      reached the agent, so clearing keys off the receipt text. */
-  const pending: PendingDelivery[] = [{ key: "key-a", text: "rewritten draft" }];
-  const { deliveredTexts } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "delivered", "old turn ask")]);
-  expect(deliveredTexts).toEqual(["old turn ask"]);
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "rewritten draft", images: [] }];
+  const { delivered } = settlePendingDeliveries(pending, [deliveredReceipt("key-a", "delivered", "old turn ask")]);
+  expect(delivered.map((settled) => settled.text)).toEqual(["old turn ask"]);
+});
+
+test("attachmentsAfterDelivery removes exactly the sent snapshot and keeps later attachments", () => {
+  const sent = [pendingImage("sent-one"), pendingImage("sent-two")];
+  const later = pendingImage("added-in-flight");
+  expect(attachmentsAfterDelivery([...sent, later], sent)).toEqual([later]);
+  /* Duplicate content removes one instance per delivered entry, not all. */
+  expect(attachmentsAfterDelivery([pendingImage("dup"), pendingImage("dup")], [pendingImage("dup")]))
+    .toEqual([pendingImage("dup")]);
+  /* A stale delivery for attachments the composer no longer holds is a no-op. */
+  expect(attachmentsAfterDelivery([later], sent)).toEqual([later]);
 });
 
 test("settlePendingDeliveries is idempotent across repeated delivered receipts", () => {
-  const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask" }];
+  const pending: PendingDelivery[] = [{ key: "key-a", text: "first ask", images: [] }];
   const first = settlePendingDeliveries(pending, [deliveredReceipt("key-a")]);
   const second = settlePendingDeliveries(first.remaining, [deliveredReceipt("key-a")]);
-  expect(first.deliveredTexts).toEqual(["first ask"]);
-  expect(second.deliveredTexts).toEqual([]);
+  expect(first.delivered.map((settled) => settled.text)).toEqual(["first ask"]);
+  expect(second.delivered).toEqual([]);
   expect(second.remaining).toEqual([]);
 });

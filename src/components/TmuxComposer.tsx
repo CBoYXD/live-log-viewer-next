@@ -20,7 +20,7 @@ import type { FileEntry } from "@/lib/types";
 import type { RuntimeReceipt } from "@/components/runtime/runtimeModel";
 
 import { ComposerBar } from "./ComposerBar";
-import { ImagePickerButton } from "./imageAttachments";
+import { ImagePickerButton, type PendingImage } from "./imageAttachments";
 import { ReceiptChip, runtimeReceiptStatusText } from "./runtime/ReceiptChip";
 import { mintIdempotencyKey, receiptIsTerminal } from "./runtime/runtimeModel";
 
@@ -393,33 +393,52 @@ export interface PendingDelivery {
   /** The draft text this attempt carried, the clearing fallback when the
       delivered receipt omits its own text. */
   text: string;
+  /** Immutable snapshot of the attachments this attempt carried: a late
+      delivered receipt removes exactly these from the composer, so images
+      attached after the send stay put. */
+  images: readonly PendingImage[];
 }
 
 const PENDING_DELIVERY_LIMIT = 8;
 
 /**
  * Settle pending deliveries against the current receipt set: a `delivered`
- * receipt for a pending key yields its delivered text (the receipt's own text
- * is the server's record of what actually reached the agent, so it wins over
- * the local attempt's) and drops the entry, so repeated delivered receipts
- * clear at most once. Non-delivered and unknown receipts change nothing.
+ * receipt for a pending key yields the attempt with its delivered text (the
+ * receipt's own text is the server's record of what actually reached the
+ * agent, so it wins over the local attempt's) and drops the entry, so repeated
+ * delivered receipts clear at most once. Non-delivered and unknown receipts
+ * change nothing.
  */
 export function settlePendingDeliveries(
   pending: readonly PendingDelivery[],
   receipts: readonly RuntimeReceipt[],
-): { deliveredTexts: string[]; remaining: PendingDelivery[] } {
+): { delivered: { entry: PendingDelivery; text: string }[]; remaining: PendingDelivery[] } {
   const deliveredByKey = new Map<string, RuntimeReceipt>();
   for (const receipt of receipts) {
     if (receipt.status === "delivered") deliveredByKey.set(receipt.idempotencyKey, receipt);
   }
-  const deliveredTexts: string[] = [];
+  const delivered: { entry: PendingDelivery; text: string }[] = [];
   const remaining: PendingDelivery[] = [];
   for (const entry of pending) {
     const receipt = deliveredByKey.get(entry.key);
-    if (receipt) deliveredTexts.push(typeof receipt.text === "string" && receipt.text ? receipt.text : entry.text);
+    if (receipt) delivered.push({ entry, text: typeof receipt.text === "string" && receipt.text ? receipt.text : entry.text });
     else remaining.push(entry);
   }
-  return { deliveredTexts, remaining };
+  return { delivered, remaining };
+}
+
+/** Removes one attachment per delivered snapshot entry (matched by content,
+    not position), so attachments added while the send was in flight survive. */
+export function attachmentsAfterDelivery(
+  current: readonly PendingImage[],
+  delivered: readonly PendingImage[],
+): PendingImage[] {
+  const remaining = [...current];
+  for (const sent of delivered) {
+    const index = remaining.findIndex((image) => image.base64 === sent.base64 && image.mime === sent.mime);
+    if (index >= 0) remaining.splice(index, 1);
+  }
+  return remaining;
 }
 
 /** A receipt still awaiting durable delivery (a migration hold) must never be
@@ -583,14 +602,20 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
      a rewritten draft for the next turn stays untouched). */
   useEffect(() => {
     if (!pendingDeliveries.current.length) return;
-    const { deliveredTexts, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
-    if (!deliveredTexts.length) return;
+    const { delivered, remaining } = settlePendingDeliveries(pendingDeliveries.current, displayedRuntimeReceipts);
+    if (!delivered.length) return;
     pendingDeliveries.current = remaining;
-    for (const delivered of deliveredTexts) {
-      const next = draftAfterDelivery(textRef.current, delivered);
+    let remainingImages: readonly PendingImage[] = attachments.images;
+    for (const settled of delivered) {
+      const next = draftAfterDelivery(textRef.current, settled.text);
       if (next !== textRef.current) setText(next);
+      remainingImages = attachmentsAfterDelivery(remainingImages, settled.entry.images);
+      /* The delivered attempt consumed its key: minting a fresh one keeps the
+         next message from being replay-deduped into silence server-side. */
+      if (settled.entry.key === idempotencyKey.current) idempotencyKey.current = mintIdempotencyKey();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef are hook-stable
+    if (remainingImages.length !== attachments.images.length) attachments.replace([...remainingImages]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- setText/textRef/attachments are hook-stable
   }, [displayedRuntimeReceipts]);
 
   /* A link-arrow drop appended to the stored draft; reload it and put the
@@ -711,12 +736,15 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
           if (json.receipt.status === "delivered") {
             /* An idempotent replay: this key's FIRST attempt already reached
                the agent and the turn ran. The accepted delivery clears its
-               exact text (the receipt's record wins) instead of stranding the
-               message as a visible draft. */
+               exact text (the receipt's record wins) and exactly the FIRST
+               attempt's attachment snapshot — images attached after that
+               attempt stay put for the next message. */
             const delivered = typeof json.receipt.text === "string" && json.receipt.text ? json.receipt.text : payloadText;
             setText(draftAfterDelivery(textRef.current, delivered));
+            const attempt = pendingDeliveries.current.find((entry) => entry.key === clientMessageId);
             pendingDeliveries.current = pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId);
-            attachments.clear();
+            if (attempt) attachments.replace(attachmentsAfterDelivery(attachments.images, attempt.images));
+            else attachments.clear();
             setStatus({ kind: "ok", text: t("common.sent") });
             inputRef.current?.focus();
             return;
@@ -724,9 +752,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
         }
         if (!receiptIsTerminal(json.receipt?.status ?? "pending")) {
           /* The response was lost or the delivery is still moving server-side:
-             remember the attempt so a later delivered receipt clears the draft. */
+             remember the attempt (text AND attachment snapshot) so a later
+             delivered receipt clears exactly what was sent. */
           pendingDeliveries.current = [
-            { key: clientMessageId, text: payloadText },
+            { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
             ...pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId),
           ].slice(0, PENDING_DELIVERY_LIMIT);
         }
@@ -781,9 +810,10 @@ export function TmuxComposer({ file, pollPaused = false }: { file: FileEntry; po
       inputRef.current?.focus();
     } catch {
       /* The request died on the wire AFTER the server may have accepted it:
-         remember the attempt so a delivered receipt still clears the draft. */
+         remember the attempt (text AND attachment snapshot) so a delivered
+         receipt still clears exactly what was sent. */
       pendingDeliveries.current = [
-        { key: clientMessageId, text: payloadText },
+        { key: clientMessageId, text: payloadText, images: attachments.images.map((image) => ({ ...image })) },
         ...pendingDeliveries.current.filter((entry) => entry.key !== clientMessageId),
       ].slice(0, PENDING_DELIVERY_LIMIT);
       setStatus({ kind: "err", text: t("common.serverUnavailable") });
