@@ -9,6 +9,7 @@ import { statePath } from "@/lib/configDir";
 import { applyClaudeSpawnPolicy } from "@/lib/agent/spawnPolicy";
 import { claudeTranscriptPath } from "@/lib/agent/transcript";
 import { procBackend } from "@/lib/proc";
+import { signalDetachedProcessGroup, type ProcessSignal } from "@/lib/processGroup";
 import { hardenedRedact } from "@/lib/view/compactText";
 
 import type { DeliveryReceipt, EngineHost, HostState, NormalizedQueueEntry, QueueEntry, RuntimeEvent } from "./engineHost";
@@ -189,6 +190,7 @@ export interface ClaudeStreamBrokerHostOptions {
   initialEventCursor?: number;
   onEventCursorRecovery?: RuntimeEventCursorRecoveryReporter;
   spawnProcess?: (command: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+  signalProcess?: ProcessSignal;
   readAuthStatus?: () => ClaudeAuthStatus | Promise<ClaudeAuthStatus>;
   readTranscript?: (cwd: string, sessionId: string) => ClaudeTranscriptUser[];
   eventStore?: RuntimeEventStore;
@@ -405,6 +407,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
   private readonly requestTimeoutMs: number;
   private readonly shutdownGraceMs: number;
   private readonly onEventCursorRecovery: RuntimeEventCursorRecoveryReporter | undefined;
+  private readonly signalProcess: ProcessSignal;
   private readonly subscribers = new Set<Subscriber>();
   private readonly events: RuntimeEvent[] = [];
   private readonly deliveries: ClaudeDeliveryState[] = [];
@@ -448,6 +451,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
     this.onEventCursorRecovery = options.onEventCursorRecovery;
+    this.signalProcess = options.signalProcess ?? process.kill;
     this.cursor = options.initialEventCursor ?? 0;
     this.protocolVersion = auth.version ?? null;
     this.account = { type: auth.authMethod, planType: auth.subscriptionType };
@@ -521,7 +525,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (options.tools) args.push("--tools", options.tools.join(","));
     const spawnProcess = options.spawnProcess ?? ((command, childArgs, spawnOptions) =>
       spawn(command, childArgs, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }));
-    const child = spawnProcess(binary, args, { cwd: options.cwd, env });
+    const child = spawnProcess(binary, args, { cwd: options.cwd, env, detached: true });
     const host = new ClaudeStreamBrokerHost(child, { sessionId }, auth, options);
     try {
       host.restore();
@@ -834,8 +838,8 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     }
     if (type === "user") {
       const content = messageContent(message);
-      const userRoleReplay = message.isReplay === true && stringField(message.message, "role") === "user";
-      const delivery = userRoleReplay
+      const directUserEcho = stringField(message.message, "role") === "user" && content !== null;
+      const delivery = directUserEcho
         ? this.deliveries.find((candidate) => !candidate.delivered && candidate.entry.contentDigest === content?.contentDigest)
         : undefined;
       if (delivery) {
@@ -956,7 +960,7 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     this.rejectPending(new Error("Claude stream host released"));
     this.startTermination();
     if (!await this.waitForReap(this.shutdownGraceMs * 2)) {
-      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
       if (!await this.waitForReap(this.shutdownGraceMs)) throw new Error("Claude child could not be reaped");
     }
     this.finishRelease();
@@ -1021,11 +1025,11 @@ export class ClaudeStreamBrokerHost implements EngineHost {
     if (this.terminationStarted || this.reaped) return;
     this.terminationStarted = true;
     try { this.child.stdin.end(); } catch { /* already closed */ }
-    try { this.child.kill("SIGTERM"); } catch { /* already closed */ }
+    signalDetachedProcessGroup(this.child, "SIGTERM", this.signalProcess);
     this.terminationTimer = setTimeout(() => {
       this.terminationTimer = null;
       if (this.reaped) return;
-      try { this.child.kill("SIGKILL"); } catch { /* already closed */ }
+      signalDetachedProcessGroup(this.child, "SIGKILL", this.signalProcess);
     }, this.shutdownGraceMs);
   }
 

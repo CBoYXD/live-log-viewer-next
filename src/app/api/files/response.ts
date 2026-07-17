@@ -169,6 +169,19 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       file.predecessorLabel = predecessor?.accountId ?? undefined;
     }
     if (latest?.path === file.path) {
+      const registryEntry = generation
+        ? registrySnapshot.entries[`${file.engine}:${generation.id}`]
+        : undefined;
+      if (registryEntry?.status === "dead" && file.pid === null) {
+        file.activity = Date.now() / 1000 - file.mtime < 900 ? "recent" : "idle";
+        file.activityReason = "registry_terminal";
+        file.proc = "killed";
+        file.authoritativeTurn = {
+          state: "terminal",
+          source: "lifecycle",
+          terminalAt: registryEntry.updatedAt,
+        };
+      }
       const profile = latest.launchProfile;
       file.title = profile.title ?? file.title;
       file.project = projectInfoFromCwd(profile.cwd)?.project ?? profile.project ?? file.project;

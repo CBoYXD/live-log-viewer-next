@@ -181,6 +181,7 @@ describe("ClaudeStreamBrokerHost", () => {
 
     const modeIndex = captured.args!.indexOf("--permission-mode");
     expect(captured.args?.slice(modeIndex, modeIndex + 2)).toEqual(["--permission-mode", "bypassPermissions"]);
+    expect(captured.options?.detached).toBe(true);
     await host.release();
   });
 
@@ -635,7 +636,7 @@ describe("ClaudeStreamBrokerHost", () => {
     await legacy.release();
   });
 
-  test("confirms delivery only from replayed user-role frames", async () => {
+  test("confirms delivery from an exact direct user echo without a replay marker", async () => {
     const ledger = new RecordingDeliveryLedger();
     const child = new FakeClaude(ledger);
     const host = await ClaudeStreamBrokerHost.start({
@@ -648,14 +649,48 @@ describe("ClaudeStreamBrokerHost", () => {
     let settled = false;
     const sent = host.send({ id: "replay-only", text: "match me" }).finally(() => { settled = true; });
 
-    child.emitJson({ type: "user", isReplay: false, session_id: host.identity.sessionId, uuid: "ordinary", message: { role: "user", content: [{ type: "text", text: "match me" }] } });
-    await Bun.sleep(0);
-    expect(settled).toBeFalse();
     child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "wrong-role", message: { role: "tool", content: [{ type: "text", text: "match me" }] } });
     await Bun.sleep(0);
     expect(settled).toBeFalse();
-    child.emitJson({ type: "user", isReplay: true, session_id: host.identity.sessionId, uuid: "replay", message: { role: "user", content: [{ type: "text", text: "match me" }] } });
+    child.emitJson({ type: "user", session_id: host.identity.sessionId, uuid: "ordinary", message: { role: "user", content: [{ type: "text", text: "match me" }] } });
     expect(await sent).toEqual({ outcome: "turn-started", turnId: "replay-only" });
+    await host.release();
+  });
+
+  test("confirms image delivery from the provider user echo without timing out the host", async () => {
+    const ledger = new RecordingDeliveryLedger();
+    const child = new FakeClaude(ledger);
+    const host = await ClaudeStreamBrokerHost.start({
+      cwd: "/repo",
+      deliveryLedger: ledger,
+      eventStore: new MemoryEventStore(),
+      readImage: () => IMAGE_BYTES,
+      readAuthStatus: () => ({ loggedIn: true, authMethod: "claude.ai", subscriptionType: "max" }),
+      spawnProcess: fakeSpawn(child, {}),
+    });
+    const content = structuredContent("inspect this", [IMAGE_REF]);
+    const sent = host.send({ id: "image-echo", ...content });
+
+    child.emitJson({
+      type: "user",
+      session_id: host.identity.sessionId,
+      uuid: "image-user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: IMAGE_BYTES.toString("base64") },
+          },
+          { type: "text", text: "inspect this" },
+        ],
+      },
+    });
+
+    expect(await sent).toEqual({ outcome: "turn-started", turnId: "image-echo" });
+    expect(await host.health()).toMatchObject({ status: "active", activeTurnRef: "image-echo" });
+    expect(ledger.order).toContain("confirmed:image-echo");
+    child.emitJson({ type: "result", subtype: "success", session_id: host.identity.sessionId });
     await host.release();
   });
 

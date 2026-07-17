@@ -992,6 +992,47 @@ test("pinned response projection cannot mutate the shared global scan rows", asy
   expect(ordinaryBody.files.find((entry) => entry.path === sharedPath)?.conversationId).toBeUndefined();
 });
 
+test("a dead registry generation closes an interrupted transcript after its process exits", async () => {
+  const sessionId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const pathname = `/sessions/${sessionId}.jsonl`;
+  scannedFiles = [{
+    ...file(pathname),
+    root: "claude-projects",
+    engine: "claude",
+    fmt: "claude",
+    activity: "live",
+    activityReason: "jsonl_turn_open",
+    authoritativeTurn: { state: "busy", source: "lifecycle", terminalAt: null },
+    mtime: Date.now() / 1000,
+    pid: null,
+    proc: null,
+  }];
+  const registry = agentRegistry();
+  registry.ensureConversation("claude", pathname, null);
+  registry.upsert({
+    key: { engine: "claude", sessionId },
+    artifactPath: pathname,
+    cwd: "/repo",
+    accountId: null,
+    launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    status: "dead",
+    host: null,
+    claimEpoch: 0,
+    claimOwner: null,
+    pendingAction: null,
+  });
+
+  const response = await GET(new Request("http://127.0.0.1/api/files"));
+  const body = await response.json() as { files: FileEntry[] };
+
+  expect(body.files.find((entry) => entry.path === pathname)).toMatchObject({
+    activity: "recent",
+    activityReason: "registry_terminal",
+    proc: "killed",
+    authoritativeTurn: { state: "terminal", source: "lifecycle" },
+  });
+});
+
 test("unique pinned snapshots use bounded LRU retention while recent pins stay warm", async () => {
   const global = file("/sessions/global.jsonl");
   scannedFiles = [global];
