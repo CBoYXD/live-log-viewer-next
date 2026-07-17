@@ -8,6 +8,8 @@ import { claudeOauthMetadata, refreshClaudeOauth } from "./claudeOauth";
 
 export type ClaudeValidityProbeResult = "valid" | "invalid" | "unknown";
 
+const CLAUDE_SPAWN_HEALTH_TIMEOUT_MS = 600;
+
 export interface ClaudeSpawnHealthDependencies {
   now(): number;
   probe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult>;
@@ -59,7 +61,11 @@ export function claudeValidityFromLimitRead(
 }
 
 async function liveValidityProbe(account: ClaudeAccount): Promise<ClaudeValidityProbeResult> {
-  const result = await fetchClaudeLimits(path.join(account.home, ".credentials.json"));
+  const result = await fetchClaudeLimits(
+    path.join(account.home, ".credentials.json"),
+    Date.now,
+    CLAUDE_SPAWN_HEALTH_TIMEOUT_MS,
+  );
   return claudeValidityFromLimitRead(result);
 }
 
