@@ -147,6 +147,18 @@ export function RoundDeck({
     latest && front.key !== latest.key && latest.round.verdict === null && !latest.round.error
       ? latest
       : null;
+  const collapseControl = (
+    <button
+      type="button"
+      data-review-deck-collapse
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] border border-border bg-canvas text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
+      aria-label={t("roundDeck.collapseStack", { count: rounds.length })}
+      title={t("roundDeck.collapseStack", { count: rounds.length })}
+      onClick={() => setDeckCollapsed(true)}
+    >
+      <FoldVertical className="h-3.5 w-3.5" aria-hidden />
+    </button>
+  );
 
   if (collapsed) {
     return (
@@ -171,16 +183,6 @@ export function RoundDeck({
 
   return (
     <div className="deck-3d relative h-full" style={{ paddingBottom: Math.min(stacked.length, TAB_MAX + (hidden ? 1 : 0)) * TAB_STEP }}>
-      <button
-        type="button"
-        data-review-deck-collapse
-        className="absolute right-9 top-1.5 z-[30] inline-flex h-7 w-7 items-center justify-center rounded-full border border-border bg-card/95 text-muted shadow-1 hover:border-accent/45 hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
-        aria-label={t("roundDeck.collapseStack", { count: rounds.length })}
-        title={t("roundDeck.collapseStack", { count: rounds.length })}
-        onClick={() => setDeckCollapsed(true)}
-      >
-        <FoldVertical className="h-3.5 w-3.5" aria-hidden />
-      </button>
       {/* Front card. Key by round: swapping rounds remounts the pane with the
           scheme fade instead of morphing one feed into another. */}
       <div key={front.key} className="scheme-enter relative z-[11] flex h-full flex-col">
@@ -191,6 +193,7 @@ export function RoundDeck({
             isRoot={false}
             dormant={dormant}
             noComposer={flow.reviewerMode === "headless" || finished}
+            headerActions={collapseControl}
             banner={
               <div
                 className="flex h-6 shrink-0 items-center gap-1.5 border-b border-border px-2.5 text-[10.5px] font-bold"
@@ -209,7 +212,8 @@ export function RoundDeck({
             }
           />
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-1 rounded-[10px] border border-border bg-card shadow-1">
+          <div className="relative flex h-full flex-col items-center justify-center gap-1 rounded-[10px] border border-border bg-card shadow-1">
+            <div className="absolute right-1.5 top-1.5">{collapseControl}</div>
             <span className="text-[12px] font-semibold text-muted">{roundLabel(t, front.round)}</span>
             <span className="text-[11px] text-muted">
               {front.round.error ? front.round.error : t("roundDeck.spawningReviewer")}

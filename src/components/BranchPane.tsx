@@ -102,6 +102,8 @@ interface Props {
   noComposer?: boolean;
   /** Slim context bar pinned under the header (e.g. «Round 2 · ✖ REQUEST_CHANGES»). */
   banner?: React.ReactNode;
+  /** Owner-provided controls that belong beside the pane's native header actions. */
+  headerActions?: React.ReactNode;
   /** Header control that opens this conversation full-window; the same control
       collapses it back when the pane already is the overlay (`expanded`). */
   onToggleExpand?: () => void;
@@ -121,7 +123,7 @@ interface Props {
   showFavorite?: boolean;
 }
 
-export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, onToggleExpand, expanded, dormant, autoEditToken, showFavorite }: Props) {
+export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noComposer, banner, headerActions, onToggleExpand, expanded, dormant, autoEditToken, showFavorite }: Props) {
   const { t } = useLocale();
   const isMobile = useIsMobile();
   const paneRef = useRef<HTMLElement | null>(null);
@@ -255,6 +257,7 @@ export function BranchPane({ file, tasks, isRoot, onClose, dragHandle, noCompose
                 {expanded ? <Minimize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden /> : <Maximize2 className={isMobile ? "h-4 w-4" : "h-3 w-3"} aria-hidden />}
               </button>
             ) : null}
+            {headerActions}
             {file.spawn ? null : <DeleteFileButton file={file} onDeleted={onClose} />}
             {onClose ? (
               <button
