@@ -73,10 +73,18 @@ function projectedProjectCatalog(
 }
 
 export async function buildFilesResponse(request: Request, dependencies: FilesRouteDependencies): Promise<NextResponse> {
+  const timings: string[] = [];
+  let timingMark = performance.now();
+  const markTiming = (name: string) => {
+    const now = performance.now();
+    timings.push(`${name};dur=${(now - timingMark).toFixed(1)}`);
+    timingMark = now;
+  };
   const url = new URL(request.url);
   const selectedProject = url.searchParams.get("project")?.trim() || undefined;
   const pinnedPath = url.searchParams.get("path")?.trim() || undefined;
   const { files, projectCatalog, pinOverlayPaths } = await dependencies.listFilesWithProjectCatalog(selectedProject, pinnedPath);
+  markTiming("files-source");
   const responsePinOverlayPaths = new Set(pinOverlayPaths ?? []);
   const visibilityPinnedPaths = new Set([...pinnedPathsFor(pinnedPath), ...responsePinOverlayPaths]);
   // A scan is a read model. Runtime reconciliation and notifications belong to
@@ -234,6 +242,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       };
     }
   }
+  markTiming("files-registry");
   /* Custom session titles (issue #33) are the last word on `title`. The shared
      projection runs after the registry has stamped `conversationId` and the
      launch profile, so an override filed under the stable conversation identity
@@ -261,6 +270,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      explicit user rename keeps final precedence (the role title becomes its
      Reset base), and never rewrites native transcripts. */
   overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
+  markTiming("files-flows");
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
      #112): the reaper's sticky evidence (PR #125) marks any transcript that
      carries a real user message. Both authorship and fail-closed freshness span
@@ -333,6 +343,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     });
     if (unverified) file.authorshipUnverified = true;
   }
+  markTiming("files-authorship");
   const tasks = reconcileTasks(files, storedTasks, {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
@@ -360,6 +371,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
+  markTiming("files-stores");
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const projectCwds = projectDirectoryFallbacks([
@@ -370,6 +382,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     ...workflows.map((workflow) => workflow.project),
     ...tasks.tasks.map((task) => task.project),
   ]);
+  markTiming("files-projects");
   const body = JSON.stringify({
     files: projected.files,
     ...(responsePinOverlayPaths.size ? { pinOverlayPaths: [...responsePinOverlayPaths] } : {}),
@@ -388,11 +401,13 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      unchanged response come back as a bodyless 304. force-dynamic still holds
      — the body is recomputed every request, only its transfer is skipped. */
   const etag = `"${createHash("sha1").update(body).digest("hex")}"`;
+  markTiming("files-json");
+  const responseHeaders = { ETag: etag, "server-timing": timings.join(", ") };
   if (request.headers.get("if-none-match") === etag) {
-    return new NextResponse(null, { status: 304, headers: { ETag: etag } });
+    return new NextResponse(null, { status: 304, headers: responseHeaders });
   }
   return new NextResponse(body, {
     status: 200,
-    headers: { "content-type": "application/json", ETag: etag },
+    headers: { "content-type": "application/json", ...responseHeaders },
   });
 }
