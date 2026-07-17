@@ -110,6 +110,7 @@ async function spawnPipelineAgent(
     model: input.role.model,
     effort: input.role.effort,
     readOnly: input.role.access === "read-only",
+    permissionMode: input.role.engine === "claude" && input.role.access === "read-only" ? "dontAsk" : null,
     codexHome: input.role.engine === "codex" ? account.home : null,
     claudeConfigDir: input.role.engine === "claude" ? account.home : null,
     claudeProjectsDir: input.role.engine === "claude" ? account.transcriptRoot : null,
