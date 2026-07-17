@@ -374,7 +374,15 @@ async function postSpawn(
         if (admission.claimed) {
           let imageRefs;
           try { imageRefs = dependencies.storeImages(images); }
-          catch (error) { throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error)); }
+          catch (error) {
+            /* Nothing was deferred yet, so the claimed lease must not stay
+               with this live process: a compare-and-set release lets the next
+               retry re-claim instead of waiting out the orphan fence. */
+            if (admission.receipt.admissionOwner) {
+              registry.releaseStartingStructuredSpawn(receipt.launchId, admission.receipt.admissionOwner);
+            }
+            throw new RuntimeImageStorageError(error instanceof Error ? error.message : String(error));
+          }
           deferStructuredSpawn(receipt, runtimeClient, imageRefs);
         }
       }

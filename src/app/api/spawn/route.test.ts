@@ -540,6 +540,92 @@ test("structured spawn maps operational image storage failures to 503", async ()
   }
 });
 
+test("an orphan replay whose image storage fails releases its admission lease for the retry", async () => {
+  const cwd = fs.mkdtempSync(path.join(routeSandbox, "replay-storage-release-"));
+  const previousTransport = process.env.LLV_SPAWN_TRANSPORT;
+  const previousHosts = process.env.LLV_STRUCTURED_HOSTS;
+  const previousEvents = process.env.LLV_RUNTIME_EVENTS;
+  const previousSocket = process.env.LLV_RUNTIME_HOST_SOCKET;
+  const previousUi = process.env.NEXT_PUBLIC_RUNTIME_UI;
+  process.env.LLV_SPAWN_TRANSPORT = "structured";
+  process.env.LLV_STRUCTURED_HOSTS = "1";
+  process.env.LLV_RUNTIME_EVENTS = "1";
+  process.env.LLV_RUNTIME_HOST_SOCKET = path.join(cwd, "runtime.sock");
+  process.env.NEXT_PUBLIC_RUNTIME_UI = "1";
+  const store = agentRegistry();
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489", "hex").toString("base64");
+  const attemptId = `attempt_${crypto.randomUUID()}`;
+  const request = () => new NextRequest("http://127.0.0.1:8898/api/spawn", {
+    method: "POST",
+    headers: {
+      host: "127.0.0.1:8898",
+      origin: "http://127.0.0.1:8898",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      engine: "claude",
+      cwd,
+      prompt: "own the retry",
+      clientAttemptId: attemptId,
+      images: [{ base64: png, mime: "image/png" }],
+    }),
+  });
+  const deferred: Array<() => Promise<void>> = [];
+  const dependencies = (storeImages: SpawnRouteTestDependencies["storeImages"]): SpawnRouteTestDependencies => ({
+    ...structuredRouteDependencies(cwd),
+    defer: (work) => { deferred.push(work); },
+    storeImages,
+  });
+  try {
+    const admitted = await POST.withDependencies(request(), dependencies((images) => structuredRouteDependencies(cwd).storeImages(images)));
+    expect(admitted.status).toBe(202);
+    const { launchId } = await admitted.json() as { launchId: string };
+    expect(deferred).toHaveLength(1);
+
+    /* The admitting process dies before its deferred launch ran: the durable
+       receipt keeps starting with no live admission owner. */
+    const orphanOwner = store.snapshot().receipts[launchId]!.admissionOwner!;
+    expect(store.releaseStartingStructuredSpawn(launchId, orphanOwner)).toMatchObject({ released: true });
+
+    /* The replay claims the orphan, then image storage fails before anything
+       was deferred: the claimed lease must be handed back, not kept by this
+       live process with no pending work. */
+    const failed = await POST.withDependencies(request(), dependencies(() => {
+      throw new Error("runtime image storage quota exceeded");
+    }));
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "runtime image storage quota exceeded" });
+    expect(deferred).toHaveLength(1);
+    expect(store.snapshot().receipts[launchId]).toMatchObject({ state: "starting", admissionOwner: null });
+
+    /* The retry re-claims the released lease and defers the launch. */
+    const retried = await POST.withDependencies(request(), dependencies((images) => structuredRouteDependencies(cwd).storeImages(images)));
+    expect(retried.status).toBe(202);
+    expect(await retried.json()).toMatchObject({ launchId, state: "starting" });
+    expect(deferred).toHaveLength(2);
+    expect(store.snapshot().receipts[launchId]!.admissionOwner).toMatchObject({ pid: process.pid });
+
+    /* A concurrent replay during the retry's live claim cannot double-defer. */
+    const concurrent = await POST.withDependencies(request(), dependencies((images) => structuredRouteDependencies(cwd).storeImages(images)));
+    expect(concurrent.status).toBe(202);
+    expect(deferred).toHaveLength(2);
+
+    await Promise.all(deferred.map((work) => work()));
+  } finally {
+    if (previousTransport === undefined) delete process.env.LLV_SPAWN_TRANSPORT;
+    else process.env.LLV_SPAWN_TRANSPORT = previousTransport;
+    if (previousHosts === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previousHosts;
+    if (previousEvents === undefined) delete process.env.LLV_RUNTIME_EVENTS;
+    else process.env.LLV_RUNTIME_EVENTS = previousEvents;
+    if (previousSocket === undefined) delete process.env.LLV_RUNTIME_HOST_SOCKET;
+    else process.env.LLV_RUNTIME_HOST_SOCKET = previousSocket;
+    if (previousUi === undefined) delete process.env.NEXT_PUBLIC_RUNTIME_UI;
+    else process.env.NEXT_PUBLIC_RUNTIME_UI = previousUi;
+  }
+});
+
 test("agent-initiated spawn without lineage returns a teaching 400", async () => {
   const response = await POST(new NextRequest("http://127.0.0.1:8898/api/spawn", {
     method: "POST",

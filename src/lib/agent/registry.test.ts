@@ -1255,6 +1255,51 @@ describe("agent registry", () => {
     });
   });
 
+  test("a claimed structured admission releases only through its exact owner", () => {
+    const store = registry((owner) => owner.pid === process.pid && owner.startIdentity === null);
+    const begun = store.beginSpawnRequest({
+      engine: "claude",
+      cwd: "/repo",
+      accountId: "work",
+      clientAttemptId: "attempt_admission_release",
+      requestDigest: "digest",
+      transport: "structured",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const launchId = begun.receipt.launchId;
+    const claimedOwner = begun.receipt.admissionOwner!;
+
+    /* A raced release from another process identity is a no-op: the lease
+       stays with its claimant. */
+    expect(store.releaseStartingStructuredSpawn(launchId, { pid: 987_654, startIdentity: "987654:other" }))
+      .toMatchObject({ released: false, receipt: { admissionOwner: { pid: process.pid } } });
+
+    /* The exact owner hands the lease back and the receipt stays starting. */
+    expect(store.releaseStartingStructuredSpawn(launchId, claimedOwner))
+      .toMatchObject({ released: true, receipt: { admissionOwner: null, state: "starting" } });
+
+    /* A released lease is immediately re-claimable — the retry path. */
+    const reclaimed = store.claimStartingStructuredSpawn(launchId);
+    expect(reclaimed).toMatchObject({ claimed: true, receipt: { admissionOwner: { pid: process.pid } } });
+
+    /* A double release with the stale first-claim owner cannot strip the new
+       claimant's lease when identities differ, and a settled receipt refuses
+       release outright. */
+    store.settleSpawn(launchId, {
+      key: { engine: "claude", sessionId: "019f4906-3f67-7b72-9fbc-9ec3b5ad1327" },
+      artifactPath: "/sessions/019f4906-3f67-7b72-9fbc-9ec3b5ad1327.jsonl",
+      cwd: "/repo",
+      accountId: "work",
+      status: "starting",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: "spawn",
+    });
+    expect(store.releaseStartingStructuredSpawn(launchId, reclaimed.receipt.admissionOwner!))
+      .toMatchObject({ released: false });
+  });
+
   test("spawn capability digest durably resolves its reserved conversation", () => {
     const store = registry();
     const digest = "a".repeat(64);

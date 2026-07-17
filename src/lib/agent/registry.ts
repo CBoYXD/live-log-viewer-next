@@ -2235,6 +2235,25 @@ export class AgentRegistry {
     });
   }
 
+  /** Compare-and-set release of a starting structured admission: only the
+      exact claimed owner may hand the lease back, so a retry can re-claim
+      after a pre-deferral failure (e.g. image storage) without a live-owner
+      standoff — and a lease raced away to another claimant stays theirs. */
+  releaseStartingStructuredSpawn(launchId: string, owner: ProcessIdentity): { released: boolean; receipt: SpawnReceipt } {
+    return this.mutate((file) => {
+      const receipt = file.receipts[launchId];
+      if (!receipt) throw new Error("unknown spawn receipt");
+      if (receipt.transport !== "structured" || receipt.state !== "starting" || receipt.key || receipt.pane
+        || !receipt.admissionOwner
+        || receipt.admissionOwner.pid !== owner.pid
+        || receipt.admissionOwner.startIdentity !== owner.startIdentity) {
+        return { released: false, receipt: clone(receipt) };
+      }
+      receipt.admissionOwner = null;
+      return { released: true, receipt: clone(receipt) };
+    });
+  }
+
   rememberMembership(conversationId: ViewerConversationId, membership: DurableMembershipInput): DurableConversationMembership {
     return this.mutate((file) => clone(recordMembership(file, conversationId, membership, now())));
   }
