@@ -6,7 +6,7 @@ import { readHead } from "./head";
 import { recordValue, stringValue } from "./json";
 
 globalCache<unknown>("codex-native-parent-thread").clear();
-type CachedNativeParent = { size: number; mtimeMs: number; bytesRead: number; parent: string | null };
+type CachedNativeParent = { size: number; mtimeMs: number; parent: string | null };
 const codexNativeParentCache = globalCache<CachedNativeParent>("codex-native-parent-thread-v2");
 
 export const CODEX_NATIVE_HEAD_BYTES = 64 * 1024;
@@ -24,10 +24,6 @@ export interface NativeCodexParentResult {
 export function nativeCodexParentThreadIdResult(pathname: string, size: number, mtimeMs: number): NativeCodexParentResult {
   const cached = codexNativeParentCache.get(pathname);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return { value: cached.parent, complete: true };
-  if (cached && size > cached.size && (cached.parent !== null || cached.bytesRead >= CODEX_NATIVE_HEAD_BYTES)) {
-    codexNativeParentCache.set(pathname, { ...cached, size, mtimeMs });
-    return { value: cached.parent, complete: true };
-  }
 
   let parent: string | null = null;
   const head = readHead(pathname, size, mtimeMs, { maxBytes: CODEX_NATIVE_HEAD_BYTES });
@@ -54,7 +50,7 @@ export function nativeCodexParentThreadIdResult(pathname: string, size: number, 
       continue;
     }
   }
-  codexNativeParentCache.set(pathname, { size, mtimeMs, bytesRead: head.value.read, parent });
+  codexNativeParentCache.set(pathname, { size, mtimeMs, parent });
   return { value: parent, complete: true };
 }
 
