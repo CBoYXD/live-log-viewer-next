@@ -137,6 +137,8 @@ export interface SpawnReceipt {
   createdAt: string;
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
   artifactPath: string | null;
+  /** Tracks whether inventory has ever materialized the reserved artifact. */
+  artifactLifecycle: "pending" | "materialized";
   key: SessionKey | null;
   pane: TmuxSpawnBinding | null;
   verifiedHost: TmuxHostEvidence | null;
@@ -1263,6 +1265,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
       ? value.parentConversationId as ViewerConversationId
       : null,
     state,
+    artifactLifecycle: value.artifactLifecycle === "materialized" ? "materialized" : "pending",
     key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex") && typeof value.key.sessionId === "string" ? value.key : null,
     pane,
     verifiedHost: value.verifiedHost && typeof value.verifiedHost === "object" && value.verifiedHost.kind === "tmux" ? value.verifiedHost : null,
@@ -2125,6 +2128,7 @@ export class AgentRegistry {
         createdAt,
         state: "starting",
         artifactPath: input.expectedArtifactPath ?? null,
+        artifactLifecycle: "pending",
         key: null,
         pane: null,
         verifiedHost: null,
@@ -3068,7 +3072,18 @@ export class AgentRegistry {
           migrationReceiptByPath.set(receiptPath, receipt);
         }
       }
+      const pendingStructuredReceiptsByPath = new Map<string, SpawnReceipt[]>();
+      for (const receipt of Object.values(file.receipts)) {
+        if (receipt.transport !== "structured" || receipt.artifactLifecycle !== "pending" || !receipt.artifactPath) continue;
+        const pathKey = `${receipt.engine}:${receipt.artifactPath}`;
+        const receipts = pendingStructuredReceiptsByPath.get(pathKey) ?? [];
+        receipts.push(receipt);
+        pendingStructuredReceiptsByPath.set(pathKey, receipts);
+      }
       for (const observation of observations) {
+        for (const receipt of pendingStructuredReceiptsByPath.get(`${observation.engine}:${observation.path}`) ?? []) {
+          receipt.artifactLifecycle = "materialized";
+        }
         const nativeId = sessionKeyFromTranscript(observation.engine, observation.path)?.sessionId ?? null;
         const pathPendingLaunchId = pathPendingLaunches.get(observation.path);
         if (nativeId && pathPendingLaunchId) {

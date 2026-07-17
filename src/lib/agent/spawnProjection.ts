@@ -50,6 +50,7 @@ function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: Registry
   const byConversation = new Map<string, SpawnReceipt>();
   for (const receipt of Object.values(snapshot.receipts)) {
     if (receipt.transport !== "structured" || receipt.purpose !== "launch") continue;
+    if (receipt.artifactLifecycle !== "pending") continue;
     if (scannedConversations.has(receipt.conversationId)) continue;
     if (receipt.artifactPath && scannedPaths.has(receipt.artifactPath)) continue;
     const current = byConversation.get(receipt.conversationId);

@@ -2643,7 +2643,7 @@ describe("agent registry", () => {
     }));
     const restarted = new AgentRegistry(store.filename).snapshot();
     expect(restarted.version).toBe(2);
-    expect(restarted.receipts.legacy).toMatchObject({ clientAttemptId: null, pane: null, key: null, state: "starting" });
+    expect(restarted.receipts.legacy).toMatchObject({ clientAttemptId: null, pane: null, key: null, state: "starting", artifactLifecycle: "pending" });
     expect(restarted.receipts.legacy?.conversationId.startsWith("conversation_")).toBe(true);
   });
 
