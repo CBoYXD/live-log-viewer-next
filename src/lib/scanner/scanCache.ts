@@ -77,6 +77,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isTurnState(value: unknown): value is TurnState {
+  if (!isRecord(value)) return false;
+  return (value.state === "busy" || value.state === "terminal" || value.state === "idle" || value.state === "unknown")
+    && (value.source === "lifecycle" || value.source === "tool" || value.source === "assistant" || value.source === "empty")
+    && (value.terminalAt === null || typeof value.terminalAt === "string");
+}
+
 function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
   if (!isRecord(value) || value.complete !== true || !Array.isArray(value.files) || !Array.isArray(value.projectCatalog)) return false;
   const filesValid = value.files.every((candidate) => {
@@ -93,6 +100,7 @@ function isFileScanSnapshot(value: unknown): value is FileScanSnapshot {
       && typeof candidate.mtime === "number" && Number.isFinite(candidate.mtime)
       && typeof candidate.size === "number" && Number.isFinite(candidate.size)
       && (candidate.activity === "live" || candidate.activity === "recent" || candidate.activity === "stalled" || candidate.activity === "idle")
+      && (candidate.authoritativeTurn === undefined || isTurnState(candidate.authoritativeTurn))
       && (candidate.proc === null || candidate.proc === "running" || candidate.proc === "done" || candidate.proc === "killed")
       && (candidate.pid === null || typeof candidate.pid === "number")
       && (candidate.model === null || typeof candidate.model === "string")
@@ -157,7 +165,16 @@ function primePersistedFileDerivations(snapshot: FileScanSnapshot): void {
           composerReleased: entry.activityReason === "pane_at_composer",
         },
       );
-      if (entry.engine === "codex" || turnState.state !== "terminal") {
+      if (entry.authoritativeTurn) {
+        primeTranscriptTurnEvidence(
+          entry.path,
+          entry.size,
+          mtimeMs,
+          entry.engine === "codex",
+          entry.authoritativeTurn,
+          { composerReleased: entry.activityReason === "pane_at_composer" },
+        );
+      } else if (entry.engine === "codex" || turnState.state !== "terminal") {
         primeTranscriptTurnEvidence(
           entry.path,
           entry.size,

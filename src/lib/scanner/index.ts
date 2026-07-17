@@ -8,7 +8,7 @@ import { overlaySessionTitles, sessionProjectProjection } from "../session/title
 import { tickTaskInbox } from "../tasks/inboxScanner";
 import { panePidMap, resolveTarget } from "../tmux";
 import { tickWorkflows } from "../workflows/engine";
-import { activityVerdict } from "./activity";
+import { activityVerdict, transcriptTurnResult } from "./activity";
 import { ctxFor } from "./context";
 import { lastTurnFor } from "./turnDuration";
 import { discoverFiles, discoverFilesWithProjectCatalog } from "./discover";
@@ -237,6 +237,11 @@ async function listFilesInternal(
     entry.activity = verdict.state;
     entry.activityReason = verdict.reason;
     entry.derivationComplete = verdict.complete;
+    if (entry.path.endsWith(".jsonl") && (entry.engine === "claude" || entry.engine === "codex")) {
+      const authoritative = transcriptTurnResult(entry.path, entry.size, entry.mtime * 1000, entry.engine === "codex");
+      entry.derivationComplete &&= authoritative.complete;
+      if (authoritative.complete) entry.authoritativeTurn = authoritative.turn;
+    }
     const models = entryModelsResult(entry);
     entry.model = models.value.display;
     entry.launchModel = models.value.launch;

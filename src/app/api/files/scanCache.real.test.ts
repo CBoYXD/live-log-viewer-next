@@ -19,7 +19,7 @@ fs.mkdirSync(sessions, { recursive: true });
 const { listFilesWithProjectCatalog } = await import("@/lib/scanner");
 const { ROOTS } = await import("@/lib/scanner/roots");
 const { cachedFileScan, currentFileScan, resetFilesRouteCacheForTests } = await import("@/lib/scanner/scanCache");
-const { activityVerdict } = await import("@/lib/scanner/activity");
+const { activityVerdict, transcriptTurnResult } = await import("@/lib/scanner/activity");
 const { entryEffort } = await import("@/lib/scanner/effort");
 const { entryModels } = await import("@/lib/scanner/model");
 const { planFor, goalFor } = await import("@/lib/scanner/plan");
@@ -318,6 +318,102 @@ test("persisted Claude question state hydrates without transcript reads and stay
     expect(pendingQuestionFor(changedPending)).toMatchObject({ toolUseId: "toolu_persisted_question" });
 
     expect({ warm, failed, recovered: transcriptReads }).toEqual({ warm: 0, failed: 1, recovered: 2 });
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.readSync = originalRead;
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    process.env.LLV_STATE_DIR = previousTestStateDir;
+    resetFilesRouteCacheForTests();
+    fs.rmSync(testStateDir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("a persisted Claude result hydrates authoritative turn evidence without transcript reads", async () => {
+  const previousTestStateDir = process.env.LLV_STATE_DIR;
+  const testStateDir = path.join(sandbox, "durable-claude-result-state");
+  const projectDir = path.join(process.env.LLV_CLAUDE_HOME!, "projects", "-repo-claude-result-hydration");
+  const resultPath = path.join(projectDir, "authoritative-result.jsonl");
+  const assistantPath = path.join(projectDir, "assistant-only.jsonl");
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalRead = fs.readSync;
+  const tracked = new Map<number, string>();
+  let transcriptReads = 0;
+  let failPath: string | null = null;
+  const assistant = JSON.stringify({
+    type: "assistant",
+    timestamp: "2026-07-16T12:00:01.000Z",
+    message: { model: "claude-sonnet-4-20250514", stop_reason: "end_turn", content: [{ type: "text", text: "Complete" }] },
+  });
+  try {
+    process.env.LLV_STATE_DIR = testStateDir;
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(resultPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Done" } }),
+      assistant,
+      JSON.stringify({ type: "result", timestamp: "2026-07-16T12:00:02.000Z", subtype: "success", result: "Complete" }),
+      "",
+    ].join("\n"));
+    fs.writeFileSync(assistantPath, [
+      JSON.stringify({ type: "user", timestamp: "2026-07-16T12:00:00.000Z", cwd: "/repo", message: { role: "user", content: "Done" } }),
+      assistant,
+      "",
+    ].join("\n"));
+    resetFilesRouteCacheForTests();
+    const initial = await currentFileScan({ fresh: true });
+    expect(initial.snapshot.files.find((entry) => entry.path === resultPath)?.activityReason).toBe("jsonl_turn_completed");
+    expect(initial.snapshot.files.find((entry) => entry.path === assistantPath)?.activityReason).toBe("jsonl_turn_completed");
+
+    const cacheStore = globalThis as typeof globalThis & { __llvCaches?: Record<string, Map<string, unknown>> };
+    for (const cache of Object.values(cacheStore.__llvCaches ?? {})) cache.clear();
+    resetFilesRouteCacheForTests();
+    fs.openSync = ((filename: fs.PathLike, flags: fs.OpenMode, mode?: fs.Mode) => {
+      const fd = originalOpen(filename, flags, mode);
+      const resolved = path.resolve(String(filename));
+      if (resolved === resultPath || resolved === assistantPath) tracked.set(fd, resolved);
+      return fd;
+    }) as typeof fs.openSync;
+    fs.readSync = ((fd: number, buffer: NodeJS.ArrayBufferView, offset: number, length: number, position: fs.ReadPosition) => {
+      const pathname = tracked.get(fd);
+      if (pathname) {
+        transcriptReads += 1;
+        if (pathname === failPath) {
+          const error = new Error("persisted Claude result EIO") as NodeJS.ErrnoException;
+          error.code = "EIO";
+          throw error;
+        }
+      }
+      return originalRead(fd, buffer, offset, length, position);
+    }) as typeof fs.readSync;
+    fs.closeSync = ((fd: number) => {
+      tracked.delete(fd);
+      return originalClose(fd);
+    }) as typeof fs.closeSync;
+
+    const restarted = await cachedFileScan(undefined, undefined, 0);
+    const restartedResult = restarted.snapshot.files.find((entry) => entry.path === resultPath)!;
+    const restartedAssistant = restarted.snapshot.files.find((entry) => entry.path === assistantPath)!;
+    expect(transcriptTurnResult(resultPath, restartedResult.size, restartedResult.mtime * 1000, false)).toMatchObject({
+      complete: true,
+      turn: { state: "terminal", source: "lifecycle" },
+    });
+    expect(transcriptTurnResult(assistantPath, restartedAssistant.size, restartedAssistant.mtime * 1000, false)).toMatchObject({
+      complete: true,
+      turn: { state: "busy", source: "assistant" },
+    });
+    expect(transcriptReads).toBe(0);
+
+    fs.appendFileSync(resultPath, "\n");
+    const changed = fs.statSync(resultPath);
+    failPath = resultPath;
+    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, false).complete).toBe(false);
+    failPath = null;
+    expect(transcriptTurnResult(resultPath, changed.size, changed.mtimeMs, false)).toMatchObject({
+      complete: true,
+      turn: { state: "terminal", source: "lifecycle" },
+    });
+    expect(transcriptReads).toBe(2);
   } finally {
     fs.openSync = originalOpen;
     fs.closeSync = originalClose;

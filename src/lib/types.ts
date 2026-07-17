@@ -3,6 +3,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { TmuxEndpointHealth } from "@/lib/tmux";
 import type { Workflow } from "@/lib/workflows/types";
+import type { TurnState } from "@/lib/accounts/migration/contracts";
 
 export type RootKey =
   | "codex-sessions"
@@ -65,6 +66,8 @@ export interface FileEntry {
   activityReason?: string;
   /** Whether transcript-backed scanner derivations completed for this file identity. */
   derivationComplete?: boolean;
+  /** Complete provider-authoritative turn evidence retained independently from activity projection. */
+  authoritativeTurn?: TurnState;
   /** Real OS process state when the entry maps to a process, else null. */
   proc: "running" | "done" | "killed" | null;
   pid: number | null;
