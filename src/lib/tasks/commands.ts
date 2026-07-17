@@ -328,7 +328,7 @@ export function mergeAssignments(assignments: TaskAssignment[], patches: Assignm
   let next = assignments.slice();
   for (const patch of patches) {
     const index = next.findIndex((assignment) => {
-      if (patch.launchId && assignment.launchId === patch.launchId) return true;
+      if (patch.launchId && assignment.launchId) return assignment.launchId === patch.launchId;
       if (patch.path !== null && assignment.path === patch.path) return true;
       return patch.path === null && patch.panePid !== null && assignment.path === null && assignment.panePid === patch.panePid;
       });

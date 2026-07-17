@@ -320,6 +320,28 @@ describe("task delivery assembly", () => {
     expect(result.task.assignments).toEqual([{ path: "/one", panePid: null, state: "delivered", error: null, at: "new" }]);
   });
 
+  test("launch identity upgrades a legacy path assignment without duplicating it", () => {
+    const assignments = mergeAssignments([
+      { path: "/legacy", panePid: null, state: "spawning", error: null, at: "old" },
+    ], [{
+      launchId: "launch-attributed",
+      path: "/legacy",
+      panePid: 42,
+      state: "delivered",
+      error: null,
+      at: "new",
+    }]);
+
+    expect(assignments).toEqual([{
+      launchId: "launch-attributed",
+      path: "/legacy",
+      panePid: 42,
+      state: "delivered",
+      error: null,
+      at: "new",
+    }]);
+  });
+
   test("failed launch preserves ownership held by another active assignment", () => {
     for (const state of ["spawning", "delivered", "handoff"] as const) {
       const existing = task({

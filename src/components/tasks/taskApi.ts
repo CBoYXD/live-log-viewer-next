@@ -215,7 +215,13 @@ export interface SpawnAgentInput {
   cwd: string;
   effort?: string;
   fast?: boolean;
-  clientAttemptId?: string;
+  clientAttemptId: string;
+}
+
+/** Creates one launch identity for a user gesture. Keep the returned value
+    through retries whose response may have been lost. */
+export function createTaskSpawnGesture(input: Omit<SpawnAgentInput, "clientAttemptId">): SpawnAgentInput {
+  return { ...input, clientAttemptId: newClientRequestId() };
 }
 
 /** Spawns an agent with the task text as the brief; same stale-text guard

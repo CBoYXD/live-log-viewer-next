@@ -84,6 +84,15 @@ function stableTaskAttemptId(task: BoardTask, shape: Record<string, unknown>): s
   return `task_${digest.slice(0, 48)}`;
 }
 
+function nextTaskAttemptId(registry: AgentRegistry, task: BoardTask, shape: Record<string, unknown>): string {
+  const base = stableTaskAttemptId(task, shape);
+  for (let generation = 1; ; generation += 1) {
+    const candidate = generation === 1 ? base : `${base}_${generation}`;
+    const receipt = registry.spawnReceiptForClientAttempt(candidate);
+    if (!receipt || receipt.state !== "failed") return candidate;
+  }
+}
+
 function taskRequestDigest(task: BoardTask, shape: Record<string, unknown>): string {
   return crypto.createHash("sha256").update(JSON.stringify({ taskId: task.id, text: task.text, shape })).digest("hex");
 }
@@ -185,6 +194,7 @@ async function postTaskSpawn(
   const task = dependencies.loadTasks().find((item) => item.id === id);
   if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
+  const registry = dependencies.registry();
   const previous = pinnedAccountId(task.assignments, engine);
   let account: AccountContext;
   try {
@@ -202,7 +212,7 @@ async function postTaskSpawn(
   };
   const clientAttemptId = typeof body.clientAttemptId === "string"
     ? body.clientAttemptId
-    : stableTaskAttemptId(task, shape);
+    : nextTaskAttemptId(registry, task, shape);
   const specBase = freshSpecFor(engine, cwdResult.cwd, {
     model: selectedModel.model,
     effort: reasoning.effort,
@@ -221,7 +231,6 @@ async function postTaskSpawn(
       title: task.text.split("\n")[0]?.trim() || null,
     }),
   };
-  const registry = dependencies.registry();
   const begun = registry.beginSpawnRequest({
     engine,
     cwd: cwdResult.cwd,
