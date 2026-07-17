@@ -20,6 +20,7 @@ import { loadWorkflows } from "@/lib/workflows/store";
 import { filterWorkflowsForFileScan } from "@/lib/workflows/visibility";
 import { projectRateLimitReadModel } from "@/lib/rateLimit";
 import { readAuthorshipEvidence } from "@/lib/reaperAuthorship";
+import { overlayRoleSessionTitles } from "@/lib/session/roleTitles";
 import { overlaySessionTitles } from "@/lib/session/titleProjection";
 import { tmuxEndpointHealth } from "@/lib/tmux";
 import { claudeProjectRootFor, codexSessionRootFor } from "@/lib/scanner/roots";
@@ -234,6 +235,18 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
      on `autoTitle`; the `renamable` flag is projected too so the client never
      imports the Node-only store. */
   overlaySessionTitles(files);
+  const flows = projectRestoredFlows(loadFlows(), files, {
+    pinnedPaths: visibilityPinnedPaths,
+    memberships: registrySnapshot.memberships,
+  });
+  const storedTasks = loadTasks();
+  /* Role titles (issue #325): a Viewer-spawned worker whose scan/launch title
+     is machine boilerplate («Codex session», the spawn prompt head) presents
+     its durable identity instead — task subject + role for builders, reviewed
+     subject + round for reviewers. Runs after overlaySessionTitles so an
+     explicit user rename keeps final precedence (the role title becomes its
+     Reset base), and never rewrites native transcripts. */
+  overlayRoleSessionTitles({ files, flows, tasks: storedTasks, conversationAliases: registrySnapshot.conversationAliases });
   /* Human-authorship pin for the board's worker-class auto-collapse (issue
      #112): the reaper's sticky evidence (PR #125) marks any transcript that
      carries a real user message. Both authorship and fail-closed freshness span
@@ -306,7 +319,7 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     });
     if (unverified) file.authorshipUnverified = true;
   }
-  const tasks = reconcileTasks(files, loadTasks(), {
+  const tasks = reconcileTasks(files, storedTasks, {
     pathForPanePid: (panePid, entries) => pathForPanePid(entries, panePid, readPpid),
     panePidAlive: pidAlive,
     conversationIdForPath: (pathname) => conversationLookup.conversationForPath(pathname)?.id ?? null,
@@ -333,10 +346,6 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     pipelinesError = error instanceof Error ? error.message : "pipeline registry unreadable";
     console.error("[files] pipelines store unreadable; serving without pipelines", error);
   }
-  const flows = projectRestoredFlows(loadFlows(), files, {
-    pinnedPaths: visibilityPinnedPaths,
-    memberships: registrySnapshot.memberships,
-  });
   const projected = projectRateLimitReadModel(files, flows, registrySnapshot);
   const effectiveProjectCatalog = projectedProjectCatalog(projectCatalog, registrySnapshot);
   const projectCwds = projectDirectoryFallbacks([
