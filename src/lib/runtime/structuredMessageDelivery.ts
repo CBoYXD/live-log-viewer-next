@@ -12,9 +12,14 @@ import type { HeldDeliveryCommand, ViewerConversationId } from "@/lib/accounts/m
 import { runtimeHostClient, type RuntimeHostClient } from "./client";
 import type { RuntimeOperationReceipt } from "./contracts";
 import { recoverDeadStructuredConversation } from "./structuredRecovery";
-import { runtimeImageCapability, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
+import { runtimeImageCapability, runtimeImageRefsForUploads, runtimeImageStore, type RuntimeImageUpload } from "./runtimeImageStore";
 import { admitRuntimeImagePayload } from "./runtimeImageAdmission";
-import { structuredContent, type StructuredImageRef } from "./structuredContent";
+import {
+  assertStructuredTextEnvelope,
+  structuredContent,
+  StructuredEnvelopeTooLargeError,
+  type StructuredImageRef,
+} from "./structuredContent";
 import { kickStructuredDeliveryQueue } from "./structuredDeliverySignal";
 import { markStructuredHostStartupReady } from "./startupStatus";
 
@@ -47,6 +52,9 @@ export interface StructuredMessageDependencies {
   startupRecovered?: () => void;
   recover?: typeof recoverDeadStructuredConversation;
   storeImages?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
+  /** The refs `storeImages` would publish, computed without writing — used by
+      the same-key conflict preflight so a changed payload rejects blob-free. */
+  previewImageRefs?: (images: readonly RuntimeImageUpload[]) => StructuredImageRef[];
 }
 
 export interface HeldStructuredMessageRequest {
@@ -116,7 +124,11 @@ function deliveryFailure(error: unknown): StructuredMessageResult {
     structured: true,
     outcome: "failed",
     error: error instanceof Error ? error.message : "structured host delivery failed",
-    status: error instanceof DeliveryReservationConflictError ? 409 : 503,
+    status: error instanceof DeliveryReservationConflictError
+      ? 409
+      : error instanceof StructuredEnvelopeTooLargeError
+        ? 413
+        : 503,
   };
 }
 
@@ -172,6 +184,7 @@ function holdDuringRuntimeSynchronization(
     return { ok: false, structured: true, outcome: "failed", error: "structured host image delivery is unavailable", status: 409 };
   }
   try {
+    assertStructuredTextEnvelope(request.text);
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
     const refs = request.imageRefs ?? [];
     if (refs.length) {
@@ -311,23 +324,23 @@ export async function enqueueStructuredMessage(
   }
   if (session.hostKind === "tmux-legacy") return requiresStructuredCommand(request) ? legacyCommandUnavailable() : null;
   if (session.hostKind !== "codex-app-server" && session.hostKind !== "claude-broker") return ownershipUnavailable();
+  try {
+    assertStructuredTextEnvelope(request.text);
+  } catch (error) {
+    return deliveryFailure(error);
+  }
   const suppliedRefs = request.imageRefs ?? [];
   const wantsImages = request.hasImages === true || rawImages.length > 0 || suppliedRefs.length > 0;
-  const imageCapability = session.capabilities.imageInput
-    ?? runtimeImageCapability(session.sessionKey.engine, false);
-  if (wantsImages && !imageCapability.supported) {
-    return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
-  }
-  const encodedImageBytes = rawImages.reduce((total, image) => total + Buffer.byteLength(image.base64), 0);
-  if (encodedImageBytes > imageCapability.maxEncodedBytesPerRequest) {
-    return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
-  }
   if (request.hasImages && rawImages.length === 0 && suppliedRefs.length === 0) {
     return { ok: false, structured: true, outcome: "failed", error: "structured image payload is unavailable", status: 409 };
   }
   if (!session.conversationId.startsWith("conversation_")) return ownershipUnavailable();
   const registry = (dependencies.registry ?? agentRegistry)();
   let recoveredHost = false;
+  /* Ownership recovery comes BEFORE capability evaluation: a dead projection
+     carries no image capability, and judging the payload against it would 409
+     a session whose recovered host advertises image input. */
+  let activeSession = session;
   if (session.host === "dead" || session.host === "unhosted") {
     let recovered;
     try {
@@ -346,16 +359,44 @@ export async function enqueueStructuredMessage(
     }
     if (!recovered) return ownershipUnavailable();
     recoveredHost = recovered.spawned;
+    try {
+      const refreshed = await client.snapshot();
+      activeSession = refreshed.sessions.find((candidate) => candidate.conversationId === session.conversationId)
+        ?? refreshed.sessions.find((candidate) => candidate.artifactPath === session.artifactPath)
+        ?? session;
+    } catch {
+      /* The pre-recovery projection remains the conservative capability source. */
+    }
+  }
+  const imageCapability = activeSession.capabilities.imageInput
+    ?? runtimeImageCapability(activeSession.sessionKey.engine, false);
+  if (wantsImages && !imageCapability.supported) {
+    return { ok: false, structured: true, outcome: "failed", error: imageCapability.reason ?? "structured image delivery is unavailable", status: 409 };
+  }
+  const encodedImageBytes = rawImages.reduce((total, image) => total + Buffer.byteLength(image.base64), 0);
+  if (encodedImageBytes > imageCapability.maxEncodedBytesPerRequest) {
+    return { ok: false, structured: true, outcome: "failed", error: "runtime image request encoding is too large", status: 413 };
   }
   const conversation = registry.conversation(session.conversationId as ViewerConversationId);
   if (!conversation) return ownershipUnavailable();
   try {
     if (rawImages.length > 0 && suppliedRefs.length > 0) throw new Error("structured image payload is ambiguous");
+    /* Conflict preflight: candidate refs and digest are computed WITHOUT
+       writing, so a changed payload under an already-reserved client message
+       id rejects with zero blob publication, GC, or registry effects. First
+       admissions still publish before the reservation references them. */
     const refs = suppliedRefs.length > 0
       ? suppliedRefs
-      : (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
+      : (dependencies.previewImageRefs ?? runtimeImageRefsForUploads)(rawImages);
     const content = structuredContent(request.text, refs);
     const idempotencyKey = request.clientMessageId?.trim() || `queue_${crypto.randomUUID()}`;
+    if (request.clientMessageId?.trim()
+      && registry.deliveryReservationConflict(conversation.id, content.content.text, idempotencyKey, content.contentDigest, commandInput(request))) {
+      throw new DeliveryReservationConflictError();
+    }
+    if (rawImages.length > 0) {
+      (dependencies.storeImages ?? ((images) => runtimeImageStore().putMany(images)))(rawImages);
+    }
     let reservation = registry.holdDelivery(
       conversation.id,
       content.content.text,

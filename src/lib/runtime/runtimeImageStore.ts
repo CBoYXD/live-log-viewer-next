@@ -94,6 +94,25 @@ function decodeBase64(value: string): Buffer {
   return data;
 }
 
+function validateRuntimeImageUpload(upload: RuntimeImageUpload): { data: Buffer; mime: StructuredImageMime } {
+  const mime = normalizeStructuredImageMime(upload.mime);
+  if (!mime) throw new Error("runtime image MIME is unsupported");
+  const data = decodeBase64(upload.base64);
+  if (data.byteLength > MAX_STRUCTURED_IMAGE_BYTES) throw new Error("runtime image exceeds 10 MB");
+  if (!hasRuntimeImageSignature(data, mime)) throw new Error("runtime image signature does not match MIME");
+  return { data, mime };
+}
+
+/** The content-addressed refs `putMany` would publish for these uploads,
+    computed without touching the store — the conflict preflight compares them
+    against a durable reservation before any blob is written. */
+export function runtimeImageRefsForUploads(uploads: readonly RuntimeImageUpload[]): StructuredImageRef[] {
+  return uploads.map((upload) => {
+    const { data, mime } = validateRuntimeImageUpload(upload);
+    return { sha256: crypto.createHash("sha256").update(data).digest("hex"), mime, bytes: data.byteLength };
+  });
+}
+
 function syncDirectory(directory: string): void {
   const fd = fs.openSync(directory, "r");
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
@@ -432,12 +451,7 @@ export class RuntimeImageStore {
   }
 
   private validateUpload(upload: RuntimeImageUpload): { data: Buffer; mime: StructuredImageMime } {
-    const mime = normalizeStructuredImageMime(upload.mime);
-    if (!mime) throw new Error("runtime image MIME is unsupported");
-    const data = decodeBase64(upload.base64);
-    if (data.byteLength > MAX_STRUCTURED_IMAGE_BYTES) throw new Error("runtime image exceeds 10 MB");
-    if (!hasRuntimeImageSignature(data, mime)) throw new Error("runtime image signature does not match MIME");
-    return { data, mime };
+    return validateRuntimeImageUpload(upload);
   }
 
   private assertQuota(root: OpenRoot, decoded: readonly { data: Buffer; mime: StructuredImageMime }[]): void {

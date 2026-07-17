@@ -166,6 +166,7 @@ test("Claude image-only admission stores refs and journals their content digest"
     client: () => client,
     registry: () => registry,
     storeImages: () => [imageRef],
+    previewImageRefs: () => [imageRef],
     kick: () => {},
   });
 
@@ -214,6 +215,7 @@ test("a changed-image replay of one client message id maps to a 409 reservation 
     client: () => client,
     registry: () => registry,
     storeImages: () => [ref],
+    previewImageRefs: () => [ref],
     kick: () => {},
   });
 
@@ -243,6 +245,267 @@ test("a changed-image replay of one client message id maps to a 409 reservation 
   /* The exact replay stays idempotent after the rejected conflict. */
   const replay = await request(originalRef);
   expect(replay).toMatchObject({ ok: true });
+});
+
+test("an image send to a dead session recovers ownership first and enqueues exactly once", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const imageRef: StructuredImageRef = { sha256: "c".repeat(64), mime: "image/png", bytes: 67 };
+  /* The dead projection advertises no image capability — judging the payload
+     against it would 409 before recovery ever ran. */
+  const deadSnapshot = snapshot(conversation.id, "claude", false);
+  deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
+  let snapshots = 0;
+  let recoveries = 0;
+  let stores = 0;
+  const commands: unknown[] = [];
+  const client = {
+    snapshot: async () => {
+      snapshots += 1;
+      return snapshots === 1 ? deadSnapshot : snapshot(conversation.id, "claude", true);
+    },
+    command: async (command: { operationId: string; idempotencyKey: string }) => {
+      commands.push(command);
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          text: "",
+          imageCount: 1,
+          at: "2026-07-17T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "dead-recovery-image",
+    text: "",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => {
+      recoveries += 1;
+      return { target: null, path: artifactPath, conversationId: conversation.id as never, spawned: true };
+    },
+    storeImages: () => { stores += 1; return [imageRef]; },
+    previewImageRefs: () => [imageRef],
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, outcome: "queued", spawned: true });
+  expect(recoveries).toBe(1);
+  expect(stores).toBe(1);
+  expect(commands).toHaveLength(1);
+});
+
+test("a text-only recovered model returns a typed 409 with zero storage or admission effects", async () => {
+  const { registry, conversation } = registryWithConversation();
+  const deadSnapshot = snapshot(conversation.id);
+  deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
+  let snapshots = 0;
+  let stores = 0;
+  let previews = 0;
+  let commands = 0;
+  const client = {
+    /* The recovered projection is hosted but its model stays text-only. */
+    snapshot: async () => {
+      snapshots += 1;
+      return snapshots === 1 ? deadSnapshot : snapshot(conversation.id, "codex", false);
+    },
+    command: async () => { commands += 1; throw new Error("unexpected command"); },
+  } as unknown as RuntimeHostClient;
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "dead-recovery-text-only",
+    text: "",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => ({ target: null, path: artifactPath, conversationId: conversation.id as never, spawned: true }),
+    storeImages: () => { stores += 1; return []; },
+    previewImageRefs: () => { previews += 1; return []; },
+  });
+
+  expect(result).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    status: 409,
+    error: "The selected Codex model does not advertise image input through app-server.",
+  });
+  expect(stores).toBe(0);
+  expect(previews).toBe(0);
+  expect(commands).toBe(0);
+  expect(Object.values(registry.snapshot().heldDeliveries)).toEqual([]);
+});
+
+test("a changed payload rejects before any blob publication even at full quota", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const originalRef: StructuredImageRef = { sha256: "a".repeat(64), mime: "image/png", bytes: 67 };
+  const changedRef: StructuredImageRef = { sha256: "b".repeat(64), mime: "image/png", bytes: 91 };
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async (command: { operationId: string; idempotencyKey: string }) => {
+      commands += 1;
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          text: "",
+          imageCount: 1,
+          at: "2026-07-17T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  let stores = 0;
+  const request = (ref: StructuredImageRef, storeImages: () => StructuredImageRef[]) => enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "preflight-conflict",
+    text: "",
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    storeImages,
+    previewImageRefs: () => [ref],
+    kick: () => {},
+  });
+
+  const first = await request(originalRef, () => { stores += 1; return [originalRef]; });
+  expect(first).toMatchObject({ ok: true, outcome: "queued" });
+  expect(stores).toBe(1);
+  const reserved = structuredClone(registry.snapshot().heldDeliveries);
+
+  /* The changed payload must reject on the digest preflight without touching
+     the store at all: the stub simulates a full-quota store where any write
+     attempt would fail, and the 409 arrives with zero writes, GC, registry
+     mutation, or host commands. */
+  const conflict = await request(changedRef, () => { throw new Error("runtime image storage quota exceeded"); });
+  expect(conflict).toMatchObject({
+    ok: false,
+    outcome: "failed",
+    status: 409,
+    error: "client message id is already reserved for another request",
+  });
+  expect(commands).toBe(1);
+  expect(registry.snapshot().heldDeliveries).toEqual(reserved);
+
+  /* The exact replay stays idempotent and still publishes before reference. */
+  const replay = await request(originalRef, () => { stores += 1; return [originalRef]; });
+  expect(replay).toMatchObject({ ok: true });
+  expect(stores).toBe(2);
+});
+
+test("one UTF-8 envelope bound rejects an oversized multibyte caption before storage, recovery, and reservation", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const deadSnapshot = snapshot(conversation.id, "claude", true);
+  deadSnapshot.sessions[0] = { ...deadSnapshot.sessions[0]!, host: "dead" };
+  let recoveries = 0;
+  let stores = 0;
+  let commands = 0;
+  const client = {
+    snapshot: async () => deadSnapshot,
+    command: async () => { commands += 1; throw new Error("unexpected command"); },
+  } as unknown as RuntimeHostClient;
+  const dependencies = {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    recover: async () => {
+      recoveries += 1;
+      return { target: null, path: artifactPath, conversationId: conversation.id as never, spawned: false };
+    },
+    storeImages: () => { stores += 1; return []; },
+    previewImageRefs: () => { stores += 1; return []; },
+  };
+
+  /* 10667 three-byte characters = 32001 UTF-8 bytes while only 10667 UTF-16
+     units — the old length gate would have admitted this caption. */
+  const oversized = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "envelope-multibyte-overflow",
+    text: "€".repeat(10_667),
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, dependencies);
+
+  expect(oversized).toMatchObject({ ok: false, outcome: "failed", status: 413 });
+  expect(oversized).toMatchObject({ error: expect.stringContaining("32000-byte envelope") });
+  expect(recoveries).toBe(0);
+  expect(stores).toBe(0);
+  expect(commands).toBe(0);
+  expect(Object.values(registry.snapshot().heldDeliveries)).toEqual([]);
+});
+
+test("a caption at exactly the 32000-byte envelope boundary is admitted with images", async () => {
+  const { registry, conversation } = registryWithConversation("default", "claude");
+  const imageRef: StructuredImageRef = { sha256: "d".repeat(64), mime: "image/png", bytes: 67 };
+  let commands = 0;
+  const client = {
+    snapshot: async () => snapshot(conversation.id, "claude", true),
+    command: async (command: { operationId: string; idempotencyKey: string }) => {
+      commands += 1;
+      return {
+        operationId: command.operationId,
+        replayed: false,
+        receipt: {
+          operationId: command.operationId,
+          idempotencyKey: command.idempotencyKey,
+          conversationId: conversation.id,
+          kind: "send",
+          status: "queued",
+          text: "",
+          imageCount: 1,
+          at: "2026-07-17T00:00:00.000Z",
+          revision: 1,
+        },
+      };
+    },
+  } as unknown as RuntimeHostClient;
+  /* 10666 three-byte characters plus two ASCII = exactly 32000 UTF-8 bytes. */
+  const boundary = "€".repeat(10_666) + "aa";
+  expect(Buffer.byteLength(boundary, "utf8")).toBe(32_000);
+
+  const result = await enqueueStructuredMessage({
+    path: artifactPath,
+    conversationId: conversation.id,
+    clientMessageId: "envelope-boundary",
+    text: boundary,
+    images: [{ base64: PNG_BASE64, mime: "image/png" }],
+  }, {
+    enabled: () => true,
+    client: () => client,
+    registry: () => registry,
+    storeImages: () => [imageRef],
+    previewImageRefs: () => [imageRef],
+    kick: () => {},
+  });
+
+  expect(result).toMatchObject({ ok: true, outcome: "queued" });
+  expect(commands).toBe(1);
 });
 
 test("stale structured image capability rejects before blob storage or command admission", async () => {
@@ -702,7 +965,7 @@ test("structured runtime synchronization keeps images and oversized text request
   }, dependencies);
 
   expect(image).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 409 });
-  expect(oversized).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 503 });
+  expect(oversized).toMatchObject({ ok: false, structured: true, outcome: "failed", status: 413 });
   expect(registry.pendingDeliveries(conversation.id)).toEqual([]);
 });
 

@@ -3950,6 +3950,29 @@ export class AgentRegistry {
     });
   }
 
+  /** Read-only preflight of holdDelivery's same-key conflict checks: true when
+      admitting this payload under the client message id would raise a
+      reservation conflict. Lets callers reject a changed payload BEFORE
+      publishing blobs, keeping write-before-reference for first admissions. */
+  deliveryReservationConflict(
+    conversationId: ViewerConversationId,
+    text: string,
+    clientMessageId: string,
+    contentDigest: string | null,
+    commandInput: HeldDeliveryCommandInput = {},
+  ): boolean {
+    const snapshot = this.readOnlySnapshot();
+    const canonicalId = resolveConversationAlias(snapshot, conversationId);
+    const existing = Object.values(snapshot.heldDeliveries)
+      .find((item) => item.conversationId === canonicalId && item.clientMessageId === clientMessageId);
+    if (!existing) return false;
+    const requestedCommand = canonicalHeldDeliveryCommand(commandInput, existing.id);
+    if (existing.requestDigest && !heldDeliveryRequestDigests(snapshot, canonicalId, text, requestedCommand).has(existing.requestDigest)) {
+      return true;
+    }
+    return Boolean(existing.contentDigest && contentDigest && contentDigest !== existing.contentDigest);
+  }
+
   pendingDeliveries(conversationId: ViewerConversationId): HeldDelivery[] {
     const snapshot = this.readOnlySnapshot();
     const canonicalId = resolveConversationAlias(snapshot, conversationId);
