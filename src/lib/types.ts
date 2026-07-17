@@ -3,6 +3,7 @@ import type { Pipeline } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 import type { TmuxEndpointHealth } from "@/lib/tmux";
 import type { Workflow } from "@/lib/workflows/types";
+import type { TurnState } from "@/lib/accounts/migration/contracts";
 
 export type RootKey =
   | "codex-sessions"
@@ -42,6 +43,10 @@ export interface FileEntry {
   project: string;
   /** Working directory recorded by the conversation transcript. */
   cwd?: string | null;
+  /** Identity-bound session creation time parsed from the transcript header. */
+  sessionStartedAt?: string | null;
+  /** Native Codex parent thread parsed from the identity-bound transcript header. */
+  nativeParentThreadId?: string | null;
   /** Canonical parent-repository root when cwd belongs to a linked worktree. */
   projectRoot?: string | null;
   /** Git worktree name when cwd lives under <repo>/.claude/worktrees/<name>. */
@@ -73,6 +78,10 @@ export interface FileEntry {
   activity: Activity;
   /** Machine-readable reason behind `activity` (jsonl_turn_open, mtime_fresh…). */
   activityReason?: string;
+  /** Whether transcript-backed scanner derivations completed for this file identity. */
+  derivationComplete?: boolean;
+  /** Complete provider-authoritative turn evidence retained independently from activity projection. */
+  authoritativeTurn?: TurnState;
   /** Real OS process state when the entry maps to a process, else null. */
   proc: "running" | "done" | "killed" | null;
   pid: number | null;
