@@ -3,7 +3,15 @@
 set -euo pipefail
 
 PORT="${PORT:-8898}"
-REVISION="${LLV_DEPLOY_REVISION:-origin/main}"
+if [ "$#" -gt 1 ]; then
+  echo "usage: rebuild.sh [origin/main|full-commit-sha]" >&2
+  exit 1
+fi
+if [ "$#" -eq 1 ] && [ -n "${LLV_DEPLOY_REVISION:-}" ] && [ "$1" != "$LLV_DEPLOY_REVISION" ]; then
+  echo "revision argument conflicts with LLV_DEPLOY_REVISION" >&2
+  exit 1
+fi
+REVISION="${1:-${LLV_DEPLOY_REVISION:-origin/main}}"
 IDEMPOTENCY_KEY="${LLV_DEPLOY_IDEMPOTENCY_KEY:-deploy-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 
 if [[ "$REVISION" != "origin/main" && ! "$REVISION" =~ ^[0-9a-f]{40}$ ]]; then
