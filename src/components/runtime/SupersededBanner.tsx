@@ -71,6 +71,16 @@ export function SupersededBannerView({
   );
 }
 
+/** Primary navigation target of a superseded round (issue #383): the LIVE end
+    of the chain (A→B→C opens C), falling back to the immediate successor for
+    read models that predate the tail projection. The immediate edge itself
+    stays untouched — it is the round history, not the destination. */
+export function supersededNavigationTarget(
+  superseded: NonNullable<FileEntry["supersededBy"]>,
+): string {
+  return superseded.tailConversationId ?? superseded.conversationId;
+}
+
 /** Container wiring the superseded-round actions for a conversation. */
 export function SupersededBanner({ file }: { file: FileEntry }) {
   const { t } = useLocale();
@@ -82,9 +92,9 @@ export function SupersededBanner({ file }: { file: FileEntry }) {
   const sinceLabel = fmtAge(Number.isFinite(supersededAtSeconds) ? supersededAtSeconds : file.mtime);
 
   const openSuccessor = () => {
-    // The successor's stable id is the durable target; #c= survives path
+    // The chain tail's stable id is the durable target; #c= survives path
     // rotation and resolves through conversation aliases.
-    window.location.hash = "#c=" + encodeURIComponent(superseded.conversationId);
+    window.location.hash = "#c=" + encodeURIComponent(supersededNavigationTarget(superseded));
   };
 
   const resumeHere = async () => {

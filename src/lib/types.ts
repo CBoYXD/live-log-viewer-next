@@ -190,7 +190,17 @@ export interface FileEntry {
       card leaves Current Work, never projects working/waiting, and its
       composer is replaced by navigation to the live successor. Projection
       metadata only — never identity-bearing. */
-  supersededBy?: { conversationId: string; path: string | null; at: string; reason: string };
+  supersededBy?: {
+    /** Immediate successor — the next round in the chain; retained as history. */
+    conversationId: string;
+    path: string | null;
+    at: string;
+    reason: string;
+    /** Live end of the supersedence chain (A→B→C projects C on A): primary
+        navigation opens the tail, the immediate edge above stays the lineage. */
+    tailConversationId?: string;
+    tailPath?: string | null;
+  };
   /** Lineage of a supersedence-chain tail (issue #383): this card continues
       round N of the superseded predecessor named here. */
   continues?: { conversationId: string; path: string | null; round: number };

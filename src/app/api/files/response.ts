@@ -5,7 +5,7 @@ import path from "node:path";
 import { NextResponse } from "next/server";
 
 import { listFilesWithProjectCatalog, pinnedPathsFor } from "@/lib/scanner";
-import { agentRegistry, conversationLookupFromSnapshot } from "@/lib/agent/registry";
+import { agentRegistry, conversationLookupFromSnapshot, supersedenceChainTail } from "@/lib/agent/registry";
 import { preallocatedStructuredSpawnCards } from "@/lib/agent/spawnProjection";
 import { conversationCatalogSnapshot } from "@/lib/scanner/conversationCatalog";
 import { pidAlive, readPpid } from "@/lib/scanner/process";
@@ -228,11 +228,21 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
           ? registrySnapshot.conversations[successorId]?.generations.at(-1)
           : undefined;
         if (successorGeneration) {
+          /* Primary navigation resolves the live chain END (A→B→C opens C)
+             while the immediate edge stays the round history. A tail without a
+             materialized generation falls back to the immediate successor so
+             the affordance never points at a dangling round. */
+          const tailId = supersedenceChainTail(registrySnapshot, conversation.id);
+          const tailGeneration = tailId !== successorId
+            ? registrySnapshot.conversations[tailId]?.generations.at(-1)
+            : successorGeneration;
           file.supersededBy = {
             conversationId: successorId,
             path: successorGeneration.path,
             at: conversation.supersededBy.at,
             reason: conversation.supersededBy.reason,
+            tailConversationId: tailGeneration ? tailId : successorId,
+            tailPath: tailGeneration ? tailGeneration.path : successorGeneration.path,
           };
           file.activity = "idle";
           file.activityReason = "superseded";

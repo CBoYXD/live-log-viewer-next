@@ -1060,8 +1060,16 @@ test("a superseded round demotes terminally while the chain tail projects its li
   const body = await response.json() as { files: FileEntry[] };
   const byPath = new Map(body.files.map((entry) => [entry.path, entry]));
 
+  /* Primary navigation resolves the chain TAIL (A→B→C opens C) while the
+     immediate edge stays as the round history (#383 repair). */
   expect(byPath.get(paths[0])).toMatchObject({
-    supersededBy: { conversationId: second.id, path: paths[1], reason: "recovery-spawn" },
+    supersededBy: {
+      conversationId: second.id,
+      path: paths[1],
+      reason: "recovery-spawn",
+      tailConversationId: third.id,
+      tailPath: paths[2],
+    },
     activity: "idle",
     activityReason: "superseded",
     proc: "killed",
@@ -1070,7 +1078,13 @@ test("a superseded round demotes terminally while the chain tail projects its li
     waitingInput: null,
   });
   expect(byPath.get(paths[1])).toMatchObject({
-    supersededBy: { conversationId: third.id, path: paths[2], reason: "stage-retry" },
+    supersededBy: {
+      conversationId: third.id,
+      path: paths[2],
+      reason: "stage-retry",
+      tailConversationId: third.id,
+      tailPath: paths[2],
+    },
     activity: "idle",
   });
   /* The live tail is untouched by demotion and numbers its round from chain

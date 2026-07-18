@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { translate } from "@/lib/i18n";
 
-import { SupersededBannerView } from "./SupersededBanner";
+import { SupersededBannerView, supersededNavigationTarget } from "./SupersededBanner";
 
 const t = (key: Parameters<typeof translate>[1], params?: Parameters<typeof translate>[2]) => translate("en", key, params);
 
@@ -35,6 +35,25 @@ test("resume-here shows a spinner while busy and surfaces a failed fork", () => 
   );
   expect(failed).toContain('role="alert"');
   expect(failed).toContain("edge is busy");
+});
+
+test("primary navigation targets the live chain tail while the immediate edge stays history (#383 repair)", () => {
+  // A→B→C from A: the affordance opens C, not the retired middle round B.
+  expect(supersededNavigationTarget({
+    conversationId: "conversation_round_2",
+    path: "/round-2.jsonl",
+    at: "2026-07-18T13:37:51.000Z",
+    reason: "recovery-spawn",
+    tailConversationId: "conversation_round_3",
+    tailPath: "/round-3.jsonl",
+  })).toBe("conversation_round_3");
+  // A read model that predates the tail projection falls back one hop.
+  expect(supersededNavigationTarget({
+    conversationId: "conversation_round_2",
+    path: "/round-2.jsonl",
+    at: "2026-07-18T13:37:51.000Z",
+    reason: "recovery-spawn",
+  })).toBe("conversation_round_2");
 });
 
 test("uk and en localizations both render coherent banner copy", () => {
