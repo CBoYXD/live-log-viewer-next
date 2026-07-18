@@ -103,6 +103,33 @@ test("a compact overflowing card clamps with a fade and Expand — no internal s
   expect(dom.document.querySelector('[data-scheme-task="t1"]')!.className).not.toContain("z-30");
 });
 
+test("exactly 20 hard lines expose Expand; 19 keep the plain body (padding boundary, Finding)", async () => {
+  /* The compact clamp is a border-box max-height: the body's 16px vertical
+     padding (py-2) is spent inside TASK_BODY_MAX, so the plain preview holds
+     only 19 full 17px lines (339px padded). A 20th hard line (356px padded)
+     crosses the clamp and must render the fade + Expand disclosure — never a
+     silently clipped last line (issue #292 contract). */
+  const nineteen = Array.from({ length: 19 }, (_, i) => `l${i}`).join("\n");
+  const twenty = `${nineteen}\nl19`;
+
+  roots.push(mount(<TaskCard task={task(twenty)} files={[]} camRef={camRef} handlers={handlers} />));
+  await settle();
+  const body = dom.document.querySelector("[data-task-body]")!;
+  expect((body as unknown as HTMLElement).style.maxHeight).toBe(`${TASK_BODY_MAX - TASK_DISCLOSURE_H}px`);
+  expect(dom.document.querySelector("[data-task-fade]")).not.toBeNull();
+  expect(dom.document.querySelector("[data-task-disclosure]")).not.toBeNull();
+  expect(body.className).toContain("overflow-hidden");
+  expect(body.className).not.toContain("overflow-y-auto");
+  dom.document.body.replaceChildren();
+
+  roots.push(mount(<TaskCard task={task(nineteen)} files={[]} camRef={camRef} handlers={handlers} />));
+  await settle();
+  const plain = dom.document.querySelector("[data-task-body]")!;
+  expect((plain as unknown as HTMLElement).style.maxHeight).toBe(`${TASK_BODY_MAX}px`);
+  expect(dom.document.querySelector("[data-task-fade]")).toBeNull();
+  expect(dom.document.querySelector("[data-task-disclosure]")).toBeNull();
+});
+
 test("a short card keeps the plain body: no disclosure, no fade, full cap", async () => {
   expect(taskCardExpandable({ text: "short task" })).toBe(false);
   roots.push(mount(<TaskCard task={task("short task")} files={[]} camRef={camRef} handlers={handlers} />));

@@ -56,6 +56,12 @@ const CHARS_PER_LINE = Math.max(1, Math.floor(BODY_CONTENT_W / MAX_GLYPH_W));
    bound for any row count. */
 const CHIP_ROW_H = 28;
 const CHIP_PAD = 8;
+/* The compact body's own vertical padding (py-2 → 8px top + 8px bottom). The
+   preview clamp is a border-box max-height, so this padding lives INSIDE
+   TASK_BODY_MAX and the text itself gets only TASK_BODY_MAX − 16px: exactly 19
+   hard lines (19 × 17 + 16 = 339) fit the plain clamp, while a 20th line
+   crosses it and must expose the disclosure. */
+const BODY_PAD_Y = 16;
 
 /**
  * Worst-case rendered row count for one hard line under `whitespace-pre-wrap` +
@@ -119,13 +125,17 @@ export const TASK_DISCLOSURE_H = 24;
 /**
  * Whether the card's body text can outgrow the compact preview cap — the
  * disclosure gate (issue #292: compact cards clamp with a fade + Expand
- * control; they never scroll internally). Uses the same upper-bound wrap
- * simulation as the height estimate, so a genuinely overflowing card is always
+ * control; they never scroll internally). The clamp is a border-box
+ * max-height, so the body's 16px vertical padding is spent inside it and the
+ * gate compares padded content height — text alone against TASK_BODY_MAX let
+ * an exactly-20-hard-line card (340px of text + 16px padding) clip its last
+ * line with no fade and no Expand. Uses the same upper-bound wrap simulation
+ * as the height estimate, so a genuinely overflowing card is always
  * expandable; a borderline card may offer Expand for text that already fits,
  * which is harmless.
  */
 export function taskCardExpandable(task: Pick<BoardTask, "text">): boolean {
-  return taskTextRows(task.text) * LINE_H > TASK_BODY_MAX;
+  return taskTextRows(task.text) * LINE_H + BODY_PAD_Y > TASK_BODY_MAX;
 }
 
 /**
