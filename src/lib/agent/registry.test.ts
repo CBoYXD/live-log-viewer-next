@@ -3228,6 +3228,79 @@ describe("supersedence contract (issue #383)", () => {
     expect(restarted.conversation(predecessor.id)?.supersededBy).toBeNull();
   });
 
+  test("a live predecessor stages the retry edge durably and commits it when the host dies (#383 repair)", () => {
+    const store = registry();
+    const predecessorPath = "/repo/219f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+    store.upsert(spawnEntry(predecessorPath));
+
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "a",
+      supersedes: predecessor.id,
+      supersedesReason: "stage-retry",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    const settled = store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/319f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    expect(settled.kind).toBe("settled");
+
+    /* Live-host safety invariant: the actively hosted chain end is never
+       retired behind the edge... */
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+    /* ...and the edge is never silently discarded either: it stages durably. */
+    expect(Object.values(store.snapshot().pendingSupersedence)).toMatchObject([{
+      predecessorConversationId: predecessor.id,
+      successorConversationId: begun.receipt.conversationId,
+      reason: "stage-retry",
+    }]);
+
+    /* The transition that records the host's death retires the round in the
+       same transaction. */
+    store.upsert({ ...spawnEntry(predecessorPath), status: "dead" as const });
+    expect(store.conversation(predecessor.id)?.supersededBy).toMatchObject({
+      conversationId: begun.receipt.conversationId,
+      reason: "stage-retry",
+    });
+    expect(store.snapshot().pendingSupersedence).toEqual({});
+  });
+
+  test("a staged pending edge survives restart before committing (#383 repair)", () => {
+    const store = registry();
+    const predecessorPath = "/repo/419f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+    store.upsert(spawnEntry(predecessorPath));
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/519f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+
+    const restarted = new AgentRegistry(store.filename);
+    expect(Object.keys(restarted.snapshot().pendingSupersedence)).toHaveLength(1);
+    expect(restarted.conversation(predecessor.id)?.supersededBy).toBeNull();
+
+    restarted.upsert({ ...spawnEntry(predecessorPath), status: "dead" as const });
+    expect(restarted.conversation(predecessor.id)?.supersededBy?.conversationId).toBe(begun.receipt.conversationId);
+    expect(restarted.snapshot().pendingSupersedence).toEqual({});
+  });
+
+  test("an explicit resume-here fork discards the staged edge instead of re-retiring the round (#383 repair)", () => {
+    const store = registry();
+    const predecessorPath = "/repo/619f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl";
+    const predecessor = store.ensureConversation("codex", predecessorPath, "a");
+    store.upsert(spawnEntry(predecessorPath));
+    const begun = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "a", supersedes: predecessor.id, supersedesReason: "stage-retry" });
+    if (begun.kind !== "created") throw new Error("expected create");
+    store.settleSpawn(begun.receipt.launchId, spawnEntry("/sessions/719f4906-3f67-7b72-9fbc-9ec3b5ad1326.jsonl"));
+    expect(Object.keys(store.snapshot().pendingSupersedence)).toHaveLength(1);
+
+    store.clearSupersedence(predecessor.id);
+    expect(store.snapshot().pendingSupersedence).toEqual({});
+
+    /* The operator's decision is final: the later host death records nothing. */
+    store.upsert({ ...spawnEntry(predecessorPath), status: "dead" as const });
+    expect(store.conversation(predecessor.id)?.supersededBy).toBeNull();
+  });
+
   test("replays one supersedence spawn attempt and rejects a changed predecessor", () => {
     const store = registry();
     const predecessor = store.ensureConversation("codex", "/replay/predecessor.jsonl", "a");
