@@ -93,6 +93,9 @@ test("a flow reviewer reserves the canonical review edge before process launch",
   const begun = reserveReviewerSpawn(flow, round, flow.roles.reviewer, "terra", registry);
 
   expect(begun.kind).toBe("created");
+  /* Flow reviewer rounds are container-origin launches (#393): the reviewer
+     identity and its delegation depth are durable before any process exists. */
+  expect(begun.receipt).toMatchObject({ agentRole: "reviewer", delegationDepth: 1, rejection: null });
   expect(round).toMatchObject({ launchId: begun.receipt.launchId, reviewerConversationId: begun.receipt.conversationId });
   expect(registry.snapshot()).toMatchObject({
     lineageEdges: {

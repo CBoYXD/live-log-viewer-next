@@ -285,7 +285,8 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
       if (durableEdge || memberships.length) {
         file.durableLineage = {
           kind: durableEdge?.kind ?? "spawn",
-          role: durableEdge?.role ?? null,
+          role: conversation.agentRole ?? durableEdge?.role ?? null,
+          depth: conversation.delegationDepth,
           parentConversationId: durableEdge?.parentConversationId ?? profile.parentConversationId,
           /* Alias-canonical review subject (issue #325): an edge recorded
              against a provisional id must still resolve to the reviewed

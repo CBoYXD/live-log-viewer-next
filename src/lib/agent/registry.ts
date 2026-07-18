@@ -28,6 +28,16 @@ import {
 } from "@/lib/accounts/migration/contracts";
 
 import type { AgentEngine } from "./cli";
+import { loadSpawnNestingPolicy } from "./nestingPolicy";
+import {
+  SpawnAdmissionError,
+  isSpawnDeniedRole,
+  nestingDepthGuidance,
+  resolveSpawnOrigin,
+  reviewerOriginSpawnGuidance,
+  type SpawnOrigin,
+  type SpawnRejection,
+} from "./spawnAdmission";
 import { sessionKeyFromTranscript, sessionKeyId, type SessionKey } from "./sessionKey";
 import { SqliteAgentRegistryStore, type SqliteRegistrySnapshot } from "./sqliteRegistryStore";
 import type { ResumePaneRecord } from "@/lib/resumePanesFile";
@@ -153,6 +163,16 @@ export interface SpawnReceipt {
   target: string | null;
   completionMode: "route-completed" | "observed-completed" | "route-recovered" | null;
   error: string | null;
+  /** Role preset id of the launched agent (#393). Null for legacy and
+      role-less launches; successor receipts carry the conversation's value. */
+  agentRole: string | null;
+  /** Delegation depth computed at admission (#393): 0 for operator/external
+      roots, depth(origin)+1 for agent- and container-origin launches. */
+  delegationDepth: number | null;
+  /** Typed terminal admission rejection (#393). Non-null means this receipt
+      never launched: no conversation, lineage edge, membership, transcript,
+      or process exists for it. */
+  rejection: SpawnRejection | null;
   launchProfile: LaunchProfile;
   /** Validated explicit operator project. Becomes durable conversation
       ownership at admission; `launchProfile.project` stays a hint. */
@@ -219,6 +239,11 @@ export interface SpawnRequest {
   expectedArtifactPath?: string | null;
   /** Atomic direct-child admission guard for agent-initiated Viewer spawns. */
   liveChildrenCap?: number;
+  /** Initiating origin (#393). Agent- and container-origin launches pass
+      reviewer-isolation and nesting-depth admission inside the same mutation
+      that writes the receipt; operator/external origins are depth-0 roots and
+      successor origins are exempt identity-preserving relaunches. */
+  origin?: SpawnOrigin;
 }
 
 export class SpawnChildLimitError extends Error {
@@ -290,6 +315,12 @@ export interface RegistryConversation {
       #383). Null for every non-superseded conversation, including all legacy
       records. Cleared only by an explicit operator "resume here" fork. */
   supersededBy: ConversationSupersedence | null;
+  /** Durable role identity copied from the launch receipt at admission
+      (#393). Never re-derived by resume, migration, or restart adoption. */
+  agentRole: string | null;
+  /** Durable delegation depth recorded at birth (#393). Null for legacy
+      conversations; admission then falls back to membership/lineage evidence. */
+  delegationDepth: number | null;
   turn: TurnState & { observedAt: string | null };
   createdAt: string;
   updatedAt: string;
@@ -959,6 +990,8 @@ function normalizeConversation(value: RegistryConversation): RegistryConversatio
     migration,
     migrationOptOut,
     supersededBy,
+    agentRole: normalizeAgentRole((value as Partial<RegistryConversation>).agentRole),
+    delegationDepth: normalizeDelegationDepth((value as Partial<RegistryConversation>).delegationDepth),
     turn: value.turn && typeof value.turn === "object"
       ? { state: value.turn.state, source: value.turn.source, terminalAt: value.turn.terminalAt ?? null, observedAt: value.turn.observedAt ?? null }
       : { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
@@ -1522,6 +1555,8 @@ function adoptProvisionalOwner(
     && (!target.migrationOptOut || owner.migrationOptOut.updatedAt > target.migrationOptOut.updatedAt)) {
     target.migrationOptOut = { ...owner.migrationOptOut };
   }
+  target.agentRole ??= owner.agentRole;
+  target.delegationDepth ??= owner.delegationDepth;
   for (const receipt of Object.values(file.receipts)) {
     if (receipt.conversationId === owner.id) receipt.conversationId = target.id;
     if (receipt.parentConversationId === owner.id) receipt.parentConversationId = target.id;
@@ -1651,8 +1686,42 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     verifiedHost: value.verifiedHost && typeof value.verifiedHost === "object" && value.verifiedHost.kind === "tmux" ? value.verifiedHost : null,
     target: pane?.paneId ?? (typeof value.target === "string" && /^%\d+$/.test(value.target) ? value.target : null),
     completionMode: value.completionMode === "route-completed" || value.completionMode === "observed-completed" || value.completionMode === "route-recovered" ? value.completionMode : null,
+    agentRole: normalizeAgentRole(value.agentRole),
+    delegationDepth: normalizeDelegationDepth(value.delegationDepth),
+    rejection: normalizeSpawnRejection(value.rejection),
     launchProfile: emptyLaunchProfile({ ...(value.launchProfile ?? {}), cwd: value.launchProfile?.cwd ?? value.cwd }),
     explicitProject: validExplicitProject(value.explicitProject),
+  };
+}
+
+function normalizeAgentRole(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeDelegationDepth(value: unknown): number | null {
+  return Number.isInteger(value) && (value as number) >= 0 ? value as number : null;
+}
+
+function normalizeSpawnRejection(value: SpawnRejection | null | undefined): SpawnRejection | null {
+  if (!value || typeof value !== "object") return null;
+  if (value.code !== "reviewer_origin_spawn" && value.code !== "nesting_depth_exceeded") return null;
+  const origin = value.origin;
+  if (!origin || (origin.kind !== "agent" && origin.kind !== "container")) return null;
+  return {
+    code: value.code,
+    origin: {
+      kind: origin.kind,
+      conversationId: typeof origin.conversationId === "string" && origin.conversationId.startsWith("conversation_")
+        ? origin.conversationId
+        : null,
+      role: normalizeAgentRole(origin.role),
+      depth: Number.isInteger(origin.depth) && origin.depth >= 0 ? origin.depth : 0,
+    },
+    requestedRole: normalizeAgentRole(value.requestedRole),
+    childDepth: Number.isInteger(value.childDepth) && value.childDepth >= 0 ? value.childDepth : 0,
+    maxDepth: Number.isInteger(value.maxDepth) && value.maxDepth >= 1 ? value.maxDepth : 1,
+    guidance: typeof value.guidance === "string" ? value.guidance : "",
+    rejectedAt: typeof value.rejectedAt === "string" ? value.rejectedAt : now(),
   };
 }
 
@@ -2495,14 +2564,33 @@ export class AgentRegistry {
   }
 
   /** Create or replay a client-correlated durable launch receipt. Existing
-      internal callers use beginSpawn() and receive an uncorrelated receipt. */
+      internal callers use beginSpawn() and receive an uncorrelated receipt.
+      Throws SpawnAdmissionError (#393) after durably persisting a typed
+      terminal rejection receipt when the initiating origin is a denied role
+      or the child would exceed the nesting-depth ceiling. */
   beginSpawnRequest(input: SpawnRequest): SpawnBeginResult {
-    return this.mutate((file) => {
+    const result = this.mutate((file) => this.beginSpawnRequestInFile(file, input));
+    if (result.kind === "rejected") throw new SpawnAdmissionError(result.receipt, result.receipt.rejection!);
+    if (result.kind === "replay" && result.receipt.rejection) {
+      throw new SpawnAdmissionError(result.receipt, result.receipt.rejection);
+    }
+    return result;
+  }
+
+  private beginSpawnRequestInFile(
+    file: RegistryFile,
+    input: SpawnRequest,
+  ): SpawnBeginResult | { kind: "rejected"; receipt: SpawnReceipt } {
+    {
       const conversationId = input.conversationId ? resolveConversationAlias(file, input.conversationId) : null;
       const parentConversationId = input.parentConversationId ? resolveConversationAlias(file, input.parentConversationId) : null;
       const reviewsConversationId = input.reviewsConversationId ? resolveConversationAlias(file, input.reviewsConversationId) : null;
       const role = typeof input.role === "string" && input.role.trim() ? input.role.trim() : null;
-      if (role === "reviewer" && !reviewsConversationId) throw new Error("reviewer spawn requires reviewsConversationId");
+      /* Container-origin reviewer stages review their stage diff; membership
+         rows identify the subject, so the review edge needs no target id. */
+      if (role === "reviewer" && !reviewsConversationId && input.origin?.kind !== "container") {
+        throw new Error("reviewer spawn requires reviewsConversationId");
+      }
       if (reviewsConversationId && role !== "reviewer") throw new Error("reviewsConversationId requires reviewer role");
       const explicitProject = input.explicitProject == null ? null : validExplicitProject(input.explicitProject);
       if (input.explicitProject != null && !explicitProject) throw new Error("explicit project is not a valid project key");
@@ -2522,6 +2610,11 @@ export class AgentRegistry {
       const profile = input.purpose === "resume-successor" && currentProfile
         ? mergeResumeLaunchProfile(currentProfile, requestedProfile)
         : requestedProfile;
+      /* Reviewer/verifier conversations never regain native multi-agent
+         tooling (#393): the sticky-true resume merge and any historically
+         corrupted profile are both overridden here, so restart adoption and
+         resume successors re-derive their launch flags from a denying profile. */
+      if (isSpawnDeniedRole(existingConversation?.agentRole)) profile.allowSubagents = false;
       if (existingConversation && existingConversation.engine !== input.engine) {
         throw new Error("spawn conversation ownership is invalid");
       }
@@ -2541,7 +2634,43 @@ export class AgentRegistry {
           return { kind: compatible ? "replay" : "conflict", receipt: clone(existing) };
         }
       }
-      if (input.liveChildrenCap !== undefined) {
+      /* Origin admission (#393): reviewer isolation and bounded nesting run
+         inside the same mutation that writes the receipt, so no call site —
+         present or future MCP — can race or bypass it. Successor purposes are
+         identity-preserving relaunches, not child launches, and are exempt. */
+      const purpose = input.purpose ?? "launch";
+      const successorIdentity = purpose !== "launch" || input.origin?.kind === "successor";
+      const resolvedOrigin = !successorIdentity && input.origin ? resolveSpawnOrigin(file, input.origin) : null;
+      const childDepth = successorIdentity
+        ? existingConversation?.delegationDepth ?? null
+        : resolvedOrigin ? resolvedOrigin.depth + 1 : 0;
+      const childRole = successorIdentity ? existingConversation?.agentRole ?? null : role;
+      let rejection: SpawnRejection | null = null;
+      if (resolvedOrigin) {
+        const maxDepth = loadSpawnNestingPolicy().maxAgentNestingDepth;
+        if (isSpawnDeniedRole(resolvedOrigin.role)) {
+          rejection = {
+            code: "reviewer_origin_spawn",
+            origin: resolvedOrigin,
+            requestedRole: role,
+            childDepth: childDepth ?? 0,
+            maxDepth,
+            guidance: reviewerOriginSpawnGuidance(resolvedOrigin.role),
+            rejectedAt: now(),
+          };
+        } else if (childDepth !== null && childDepth > maxDepth) {
+          rejection = {
+            code: "nesting_depth_exceeded",
+            origin: resolvedOrigin,
+            requestedRole: role,
+            childDepth,
+            maxDepth,
+            guidance: nestingDepthGuidance(childDepth, maxDepth),
+            rejectedAt: now(),
+          };
+        }
+      }
+      if (!rejection && input.liveChildrenCap !== undefined) {
         if (!Number.isInteger(input.liveChildrenCap) || input.liveChildrenCap < 1) throw new Error("liveChildrenCap must be a positive integer");
         if (!parentConversationId) throw new Error("liveChildrenCap requires parentConversationId");
         if (liveViewerChildCount(file, parentConversationId) >= input.liveChildrenCap) {
@@ -2579,19 +2708,25 @@ export class AgentRegistry {
         accountId: input.accountId ?? null,
         parentConversationId,
         createdAt,
-        state: "starting",
-        artifactPath: input.expectedArtifactPath ?? null,
+        state: rejection ? "failed" : "starting",
+        artifactPath: rejection ? null : input.expectedArtifactPath ?? null,
         artifactLifecycle: "pending",
         key: null,
         pane: null,
         verifiedHost: null,
         target: null,
         completionMode: null,
-        error: null,
+        error: rejection ? rejection.guidance : null,
+        agentRole: childRole,
+        delegationDepth: childDepth,
+        rejection,
         launchProfile: profile,
         explicitProject,
       };
       file.receipts[receipt.launchId] = receipt;
+      /* A rejected launch persists exactly one terminal receipt: no lineage
+         edge, no membership, no conversation record, no process (#393). */
+      if (rejection) return { kind: "rejected", receipt: clone(receipt) };
       if (receipt.parentConversationId && receipt.parentConversationId !== receipt.conversationId) {
         const existingLineage = input.purpose === "resume-successor"
           ? file.lineageEdges[receipt.conversationId]
@@ -2619,7 +2754,7 @@ export class AgentRegistry {
             parentSessionKey: input.parentSessionKey ?? null,
             childArtifactPath: null,
             parentArtifactPath: input.parentArtifactPath ?? null,
-            kind: reviewsConversationId ? "review" : "spawn",
+            kind: reviewsConversationId || role === "reviewer" ? "review" : "spawn",
             role,
             reviewsConversationId,
             source: "viewer-spawn",
@@ -2632,7 +2767,7 @@ export class AgentRegistry {
         recordMembership(file, receipt.conversationId, membership, receipt.createdAt);
       }
       return { kind: "created", receipt: clone(receipt) };
-    });
+    }
   }
 
   /** Atomically adopts a structured receipt whose pre-host owner exited.
@@ -2873,10 +3008,17 @@ export class AgentRegistry {
       migration: null,
       migrationOptOut: null,
       supersededBy: null,
+      agentRole: null,
+      delegationDepth: null,
       turn: { state: "unknown" as const, source: "empty" as const, terminalAt: null, observedAt: null },
       createdAt,
       updatedAt: createdAt,
     };
+    /* Durable role/depth identity (#393): stamped once from the launch
+       receipt and conserved thereafter — successor and resume receipts never
+       re-derive or demote it. */
+    conversation.agentRole ??= receipt.agentRole;
+    conversation.delegationDepth ??= receipt.delegationDepth;
     if (conversation.engine !== receipt.engine) return conflict("spawn_identity_conflict");
     if (receipt.purpose === "resume-successor" && !resumeCanRebaseMigration(conversation.migration)) {
       return conflict("spawn_identity_conflict");
@@ -3519,6 +3661,8 @@ export class AgentRegistry {
         migration: null,
         migrationOptOut: null,
         supersededBy: null,
+        agentRole: null,
+        delegationDepth: null,
         turn: { state: "unknown", source: "empty", terminalAt: null, observedAt: null },
         createdAt,
         updatedAt: createdAt,
@@ -3688,6 +3832,8 @@ export class AgentRegistry {
             migration: null,
             migrationOptOut: null,
             supersededBy: null,
+            agentRole: null,
+            delegationDepth: null,
             turn: { ...observation.turn, observedAt: observation.observedAt },
             createdAt,
             updatedAt: createdAt,

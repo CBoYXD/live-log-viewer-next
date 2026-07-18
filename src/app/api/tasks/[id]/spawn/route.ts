@@ -236,6 +236,7 @@ async function postTaskSpawn(
     cwd: cwdResult.cwd,
     transport: "tmux",
     accountId: account.accountId,
+    origin: { kind: "operator" },
     launchProfile: spec.launchProfile,
     clientAttemptId,
     requestDigest: taskRequestDigest(task, shape),

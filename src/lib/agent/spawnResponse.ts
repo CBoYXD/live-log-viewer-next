@@ -1,4 +1,25 @@
 import type { SpawnReceipt } from "@/lib/agent/registry";
+import type { SpawnAdmissionError, SpawnRejection, SpawnRejectionCode } from "@/lib/agent/spawnAdmission";
+
+/** HTTP shape of a typed terminal admission rejection (#393). The receipt is
+    durable; `error` carries the actionable guidance for the caller. */
+export interface SpawnRejectionResponse {
+  error: string;
+  code: SpawnRejectionCode;
+  launchId: string;
+  conversationId: string;
+  rejection: SpawnRejection;
+}
+
+export function spawnRejectionResponse(error: SpawnAdmissionError): SpawnRejectionResponse {
+  return {
+    error: error.rejection.guidance,
+    code: error.rejection.code,
+    launchId: error.receipt.launchId,
+    conversationId: error.receipt.conversationId,
+    rejection: error.rejection,
+  };
+}
 
 export interface SpawnResponse {
   ok: true;

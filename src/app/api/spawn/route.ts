@@ -17,7 +17,8 @@ import { assertDarwinStructuredRuntime } from "@/lib/proc/darwinIdentity";
 import { spawnContentDigest, spawnParentSelector, spawnRequestDigest } from "@/lib/agent/spawnIdentity";
 import { sessionKeyFromTranscript, sessionKeyId } from "@/lib/agent/sessionKey";
 import { resolveSpawnLineage, SpawnParentError } from "@/lib/agent/spawnParent";
-import { spawnReplayStatus, spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
+import { SpawnAdmissionError, isSpawnDeniedRole } from "@/lib/agent/spawnAdmission";
+import { spawnRejectionResponse, spawnReplayStatus, spawnResponseForReceipt, type SpawnResponse } from "@/lib/agent/spawnResponse";
 import { applyClaudeSpawnPolicy, prepareManagedClaudeSpawnHome } from "@/lib/agent/spawnPolicy";
 import { resolveSpawnedTranscriptPath } from "@/lib/agent/spawnedTranscript";
 import { headCwd } from "@/lib/agent/transcript";
@@ -156,6 +157,13 @@ async function postSpawn(
   }
   if (role.value?.role !== "reviewer" && body.reviews !== undefined) {
     return NextResponse.json({ error: "reviews requires role: reviewer" }, { status: 400 });
+  }
+  /* Reviewer isolation (#393): reviewer/verifier launch profiles always carry
+     allowSubagents:false, so every engine denies native multi-agent tools on
+     fresh launch, resume, and restart adoption. Even the operator lane cannot
+     combine a denied role with subagent access. */
+  if (role.value && isSpawnDeniedRole(role.value.role) && body.allowSubagents === true) {
+    return NextResponse.json({ error: `${role.value.role} launches cannot enable subagents: reviewer and verifier sessions run every check in-session` }, { status: 400 });
   }
   const engine = body.engine === "claude" || body.engine === "codex"
     ? (body.engine as AgentEngine)
@@ -347,6 +355,12 @@ async function postSpawn(
       supersedes: supersedesConversationId,
       supersedesReason: "recovery-spawn",
       liveChildrenCap: authenticatedCaller?.liveChildrenCap,
+      /* Initiating origin (#393): the authenticated capability caller is the
+         origin of agent-lane launches; same-origin UI and operator-capability
+         launches are depth-0 roots. Lineage parents stay projection metadata. */
+      origin: authenticatedCaller?.kind === "agent"
+        ? { kind: "agent", conversationId: authenticatedCaller.conversationId }
+        : { kind: "operator" },
       launchProfile: spec.launchProfile,
       clientAttemptId,
       requestDigest: digest,
@@ -550,6 +564,9 @@ async function postSpawn(
       deleteInboxImages(imagePaths);
     }
     if (error instanceof SpawnParentError) return NextResponse.json({ error: error.message }, { status: error.status });
+    /* Typed terminal admission rejection (#393): the durable receipt already
+       exists and no transcript or process was created. */
+    if (error instanceof SpawnAdmissionError) return NextResponse.json(spawnRejectionResponse(error), { status: 403 });
     if (error instanceof SpawnChildLimitError) return NextResponse.json({ error: error.message }, { status: 429 });
     if (error instanceof RuntimeImageStorageError) return NextResponse.json({ error: error.message }, { status: 503 });
     if (error instanceof UnknownAccountError || error instanceof UnknownClaudeAccountError) return NextResponse.json({ error: error.message }, { status: 400 });

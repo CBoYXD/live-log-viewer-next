@@ -131,6 +131,7 @@ async function recoverCandidate(
       conversationId: current.conversationId,
       parentConversationId: current.parentConversationId,
       purpose: "resume-successor",
+      origin: { kind: "successor" },
       expectedArtifactPath: current.path,
       launchProfile: current.spec.launchProfile,
     });

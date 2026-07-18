@@ -153,6 +153,9 @@ export interface FileEntry {
   durableLineage?: {
     kind: "spawn" | "review";
     role: string | null;
+    /** Recorded delegation depth (#393): 0 for operator/external roots,
+        depth(origin)+1 for delegated launches; absent/null for legacy records. */
+    depth?: number | null;
     parentConversationId: string | null;
     reviewsConversationId: string | null;
     memberships: Array<{

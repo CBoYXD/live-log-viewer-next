@@ -186,6 +186,9 @@ export function reserveReviewerSpawn(
     parentArtifactPath: parentPath,
     role: "reviewer",
     reviewsConversationId: owner.id,
+    /* Container origin (#393): the flow controller initiates reviewer rounds,
+       not the implementer — the implementer is only the lineage parent. */
+    origin: { kind: "container", container: "flow", containerId: flow.id, creatorConversationId: null },
     memberships: [{
       kind: "flow",
       containerId: flow.id,

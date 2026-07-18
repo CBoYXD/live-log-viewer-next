@@ -450,3 +450,81 @@ test("inventory materialization stays scoped to the observed engine", () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("a rejected launch projects a terminal failed card with zero conversation artifacts and lineage depth is exposed", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-rejection-"));
+  const filename = path.join(directory, "agent-registry.json");
+  try {
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const rootBegun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      role: "reviewer",
+      reviewsConversationId: registry.ensureConversation("codex", path.join(directory, "reviewed.jsonl"), "work").id,
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (rootBegun.kind !== "created") throw new Error("expected creation");
+    const settled = registry.settleSpawn(rootBegun.receipt.launchId, {
+      key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1" },
+      artifactPath: path.join(directory, "019f7b8a-9f75-7dc0-b231-17f7eadd7fe1.jsonl"),
+      cwd: directory,
+      accountId: "work",
+      status: "live",
+      host: null,
+      claimEpoch: 0,
+      claimOwner: null,
+      pendingAction: null,
+    });
+    if (settled.kind !== "settled") throw new Error("expected settlement");
+
+    let launchId = "";
+    let conversationId = "";
+    try {
+      registry.beginSpawnRequest({
+        engine: "codex",
+        cwd: directory,
+        transport: "structured",
+        accountId: "work",
+        origin: { kind: "agent", conversationId: settled.conversation.id },
+        launchProfile: emptyLaunchProfile({ cwd: directory }),
+      });
+      throw new Error("expected a spawn admission rejection");
+    } catch (error) {
+      const rejection = error as { receipt?: { launchId: string; conversationId: string } };
+      if (!rejection.receipt) throw error;
+      launchId = rejection.receipt.launchId;
+      conversationId = rejection.receipt.conversationId;
+    }
+
+    const snapshot = registry.snapshot();
+    expect(snapshot.conversations[conversationId]).toBeUndefined();
+    const cards = preallocatedStructuredSpawnCards([], snapshot);
+    const rejectedCard = cards.find((card) => card.path === `spawn:${launchId}`)!;
+    expect(rejectedCard).toMatchObject({
+      activity: "stalled",
+      activityReason: "structured_spawn_failed",
+      spawn: { state: "failed", retrySafe: true },
+    });
+
+    /* Lineage depth rides the projection for admitted launches. */
+    const childBegun = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: directory,
+      transport: "structured",
+      accountId: "work",
+      parentConversationId: settled.conversation.id,
+      role: "builder",
+      origin: { kind: "operator" },
+      launchProfile: emptyLaunchProfile({ cwd: directory }),
+    });
+    if (childBegun.kind !== "created") throw new Error("expected creation");
+    const childCard = preallocatedStructuredSpawnCards([], registry.snapshot())
+      .find((card) => card.path === `spawn:${childBegun.receipt.launchId}`)!;
+    expect(childCard.durableLineage).toMatchObject({ role: "builder", depth: 0 });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
