@@ -16,22 +16,22 @@ afterEach(() => {
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
-function observation(pathname: string, accountId: string): ConversationObservation {
+function observation(pathname: string, accountId: string, turnState: "idle" | "busy" = "idle"): ConversationObservation {
   return {
     engine: "codex",
     path: pathname,
     accountId,
     launchProfile: emptyLaunchProfile({ cwd: "/repo/checkout", title: "Implementer", project: "repo", role: "worker" }),
-    turn: { state: "idle", source: "empty", terminalAt: null },
+    turn: { state: turnState, source: "empty", terminalAt: null },
     observedAt: new Date().toISOString(),
   };
 }
 
-function seededRegistry(withHealthyQuota: boolean): { registry: AgentRegistry; id: ViewerConversationId } {
+function seededRegistry(withHealthyQuota: boolean, turnState: "idle" | "busy" = "idle"): { registry: AgentRegistry; id: ViewerConversationId } {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reseat-route-"));
   roots.push(root);
   const registry = new AgentRegistry(path.join(root, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
-  registry.reconcileConversations([observation("/sessions/limited.jsonl", "limited")]);
+  registry.reconcileConversations([observation("/sessions/limited.jsonl", "limited", turnState)]);
   if (withHealthyQuota) {
     registry.recordQuotaEvaluation({
       engine: "codex",
@@ -110,6 +110,19 @@ test("reseat requests a lineage-safe migration once and repeats idempotently", a
   expect(repeat.status).toBe(200);
   expect(await repeat.json()).toMatchObject({ reseat: "already-migrating" });
   expect(registry.conversation(id)!.migration!.operationId).toBe(migration.operationId);
+});
+
+test("a reseat behind a still-open turn exposes its exact wait state", async () => {
+  const { registry, id } = seededRegistry(true, "busy");
+  const response = await POST(
+    reseatRequest(id, { action: "reseat", path: "/sessions/limited.jsonl" }),
+    { params: Promise.resolve({ conversationId: id }) },
+  );
+  expect(response.status).toBe(200);
+  /* The card learns exactly what the reseat waits on instead of a generic
+     "requested"; the wall itself frees the turn on the next inventory pass. */
+  expect(await response.json()).toMatchObject({ reseat: "requested", phase: "waiting-turn" });
+  expect(registry.conversation(id)!.migration!.phase).toBe("waiting-turn");
 });
 
 test("retry reaches normal migration handling", async () => {

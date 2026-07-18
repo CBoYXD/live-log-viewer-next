@@ -120,6 +120,29 @@ test("a card already owned by a migration offers no reseat", () => {
   expect(dom.document.querySelector("[data-rate-limit-reseat]")).toBeNull();
 });
 
+test("a stale card renders already-reseated as terminal truth, never a fresh reseat", async () => {
+  /* The server's path fence says a successor already owns this thread: the
+     card must state that outcome and go inert — not spin "reseating…" as if
+     a new successor were on the way, and not raise an error alert. */
+  fetchResponse = { ok: false, status: 409, payload: { reseat: "already-reseated", error: "a successor already replaced this conversation" } };
+  mount(<RateLimitBadge file={limitedEntry()} />);
+
+  const button = dom.document.querySelector("[data-rate-limit-reseat]") as unknown as HTMLButtonElement;
+  flushSync(() => { button.click(); });
+  await settle();
+
+  expect(button.hasAttribute("data-rate-limit-reseated")).toBeTrue();
+  expect(button.hasAttribute("disabled")).toBeTrue();
+  expect(button.textContent).toContain("already reseated");
+  expect(button.textContent).not.toContain("reseating");
+  expect(dom.document.querySelector("[role=alert]")).toBeNull();
+
+  /* Terminal means terminal: another tap never re-posts. */
+  flushSync(() => { button.click(); });
+  await settle();
+  expect(fetchCalls).toHaveLength(1);
+});
+
 test("a refused reseat announces its public reason instead of failing silently", async () => {
   fetchResponse = { ok: false, status: 409, payload: { error: "no healthy account with fresh quota headroom is available" } };
   mount(<RateLimitBadge file={limitedEntry()} />);

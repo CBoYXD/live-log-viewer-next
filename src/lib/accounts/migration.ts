@@ -413,6 +413,9 @@ export async function postConversationMigration(
 export interface ConversationReseatResult {
   ok: boolean;
   state: "requested" | "already-migrating" | "already-reseated" | "failed";
+  /** Exact server-side wait state ("waiting-turn" while a walled turn still
+      owns the pane) so the card can say what the reseat is waiting on. */
+  phase: string | null;
   /** Public failure detail from the route, safe to show; null otherwise. */
   error: string | null;
 }
@@ -429,22 +432,23 @@ export async function postConversationReseat(
   conversationId: string,
   path: string,
 ): Promise<ConversationReseatResult> {
-  if (!conversationId.startsWith("conversation_")) return { ok: false, state: "failed", error: null };
+  if (!conversationId.startsWith("conversation_")) return { ok: false, state: "failed", phase: null, error: null };
   try {
     const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/migration`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "reseat", path }),
     });
-    const body = (await response.json().catch(() => null)) as { reseat?: unknown; error?: unknown } | null;
+    const body = (await response.json().catch(() => null)) as { reseat?: unknown; phase?: unknown; error?: unknown } | null;
     const reseat = str(body?.reseat);
+    const phase = str(body?.phase);
     if (response.ok) {
-      return { ok: true, state: reseat === "already-migrating" ? "already-migrating" : "requested", error: null };
+      return { ok: true, state: reseat === "already-migrating" ? "already-migrating" : "requested", phase, error: null };
     }
-    if (reseat === "already-reseated") return { ok: true, state: "already-reseated", error: null };
-    return { ok: false, state: "failed", error: str(body?.error) };
+    if (reseat === "already-reseated") return { ok: true, state: "already-reseated", phase: null, error: null };
+    return { ok: false, state: "failed", phase: null, error: str(body?.error) };
   } catch {
-    return { ok: false, state: "failed", error: null };
+    return { ok: false, state: "failed", phase: null, error: null };
   }
 }
 

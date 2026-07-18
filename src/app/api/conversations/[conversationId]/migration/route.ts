@@ -37,7 +37,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
       return NextResponse.json({ reseat: "already-reseated", error: "a successor already replaced this conversation" }, { status: 409 });
     }
     if (conversation.migration && IN_FLIGHT_PHASES.has(conversation.migration.phase)) {
-      return NextResponse.json({ reseat: "already-migrating", conversation });
+      return NextResponse.json({ reseat: "already-migrating", phase: conversation.migration.phase, conversation });
     }
     const accounts = conversation.engine === "claude" ? listClaudeAccounts() : listCodexAccounts();
     const target = chooseReseatTarget(source.accountId, registry.quotaObservations(conversation.engine), accounts);
@@ -52,7 +52,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
         if (final.migration?.phase === "committed") await drainHeldDeliveries(final.id, deliveryPort, registry);
       } catch { final = registry.conversation(conversationId as ViewerConversationId) ?? requested; }
     }
-    return NextResponse.json({ reseat: "requested", targetId: target.accountId, targetLabel: target.label, conversation: final });
+    /* `phase` exposes the exact wait state: "waiting-turn" means the reseat is
+       parked until the walled turn releases (the wall itself frees it on the
+       next inventory pass), anything else is actively migrating. */
+    return NextResponse.json({ reseat: "requested", phase: final.migration?.phase ?? null, targetId: target.accountId, targetLabel: target.label, conversation: final });
   }
   if (!Number.isInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) return NextResponse.json({ error: "expectedRevision must be a non-negative integer" }, { status: 400 });
   if (body.action === "rollback") {
