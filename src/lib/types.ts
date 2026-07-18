@@ -393,6 +393,9 @@ export interface ActionEvent {
 
 export interface ApiError {
   error: string;
+  /** Set on a superseded/conflicting request (issue #383): the live successor
+      conversation the caller should redirect to instead. */
+  successorConversationId?: string;
 }
 
 /** One rate-limit window (5h session or weekly) of an engine subscription. */

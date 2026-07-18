@@ -3676,6 +3676,17 @@ export class AgentRegistry {
     return supersedenceChainTail(this.readOnlySnapshot(), id);
   }
 
+  /** Pre-flight for a supersedence claim: the actively hosted chain end that
+      would block recording an edge over `predecessorId`, or null when the
+      chain may be retired. Advisory only — settlement re-checks under the
+      write lock and fails open. */
+  supersedenceConflict(predecessorId: ViewerConversationId): ViewerConversationId | null {
+    const snapshot = this.readOnlySnapshot();
+    const tailId = supersedenceChainTail(snapshot, predecessorId);
+    const tail = snapshot.conversations[tailId];
+    return tail && conversationActivelyHosted(snapshot, tail) ? tailId : null;
+  }
+
   /** Explicit operator fork (issue #383 invariant 5): "resume here" clears the
       edge so a superseded card may go live again. A card is never
       simultaneously superseded and live. */
