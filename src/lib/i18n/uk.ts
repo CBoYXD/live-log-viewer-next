@@ -320,7 +320,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "strip.resolving": "визначаємо середовище агента…",
 
   // Dead-host banner (issue #247)
-  "deadHost.title": "Хост агента помер · {since} тому",
+  "deadHost.title": "Хост агента помер · {since}",
   "deadHost.body": "Повідомлення не доставляються. Очікувані підтвердження застаріли.",
   "deadHost.respawn": "Відновити розмову",
   "deadHost.attach": "Відкрити в терміналі",

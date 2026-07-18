@@ -316,7 +316,7 @@ export const en = {
   "strip.resolving": "resolving the agent host…",
 
   // Dead-host banner (issue #247)
-  "deadHost.title": "Agent host died · {since} ago",
+  "deadHost.title": "Agent host died · {since}",
   "deadHost.body": "Messages can't be delivered. Pending approvals expired.",
   "deadHost.respawn": "Respawn conversation",
   "deadHost.attach": "Open in terminal",

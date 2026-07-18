@@ -42,6 +42,21 @@ test("the banner states what died and when, as a polite status, with the danger 
   expect(html).toContain(translate("en", "deadHost.recheck"));
 });
 
+test("the fmtAge since label keeps a single localized ago/тому suffix (#380)", () => {
+  // The container passes fmtAge(file.mtime), whose output already ends in the
+  // localized suffix — the title template must not append it a second time.
+  for (const locale of ["en", "uk"] as const) {
+    const tLoc: typeof t = (key, params) => translate(locale, key, params);
+    const since = translate(locale, "time.agoMin", { n: 12 });
+    const html = renderToStaticMarkup(
+      <DeadHostBannerView t={tLoc} sinceLabel={since} onRespawn={() => {}} onAttach={() => {}} onRecheck={() => {}} />,
+    );
+    expect(html).toContain(translate(locale, "deadHost.title", { since }));
+    const suffix = locale === "en" ? "ago" : "тому";
+    expect(html.split(suffix).length - 1).toBe(1);
+  }
+});
+
 test("respawn shows a spinner and disables while busy", () => {
   const html = renderToStaticMarkup(
     <DeadHostBannerView t={t} sinceLabel="1 min" onRespawn={() => {}} onAttach={() => {}} onRecheck={() => {}} respawnBusy />,
