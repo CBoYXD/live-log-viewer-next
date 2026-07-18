@@ -347,3 +347,118 @@ test("concurrent and lost-response replays actuate each deliberate gesture once"
     expect.objectContaining({ launchId: secondGesture.firstBody.launchId, state: "failed" }),
   ]);
 });
+
+test("retryOfLaunchId relaunches a pathless failed assignment with a fresh attempt id and preserves the failed audit row (#334)", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "llv-task-retry-334-"));
+  const registry = new AgentRegistry(path.join(cwd, "registry.json"), undefined, undefined, { sqliteMode: "off" });
+  const sessionId = crypto.randomUUID();
+  const artifactPath = path.join(cwd, `${sessionId}.jsonl`);
+  let tasks: BoardTask[] = [{
+    id: "b7f1c2d3-89c5-4064-9118-51661c4f0334",
+    project: "live-log-viewer-next",
+    status: "inbox",
+    text: "Own issue #334",
+    placement: "pinned",
+    pos: { x: 0, y: 0 },
+    assignments: [],
+    createdAt: "2026-07-19T10:00:00.000Z",
+    updatedAt: "2026-07-19T10:00:00.000Z",
+  }];
+  let failNextSpawn = true;
+  const dependencies = {
+    registry: () => registry,
+    loadTasks: () => tasks,
+    mutateTasks: (mutator: (current: BoardTask[]) => { tasks?: BoardTask[]; result: unknown }) => {
+      const mutation = mutator(tasks);
+      if (mutation.tasks) tasks = mutation.tasks;
+      return mutation.result;
+    },
+    resolveSpawnAccount: () => ({
+      engine: "claude" as const,
+      accountId: "claude-work",
+      kind: "managed" as const,
+      home: cwd,
+      transcriptRoot: cwd,
+      env: { NODE_ENV: "test" },
+    }),
+    resolveSpawnedTranscriptPath: async () => artifactPath,
+    spawnAgentWithPrompt: async (_spec: unknown, _prompt: string, receipt: SpawnReceipt) => {
+      if (failNextSpawn) throw new Error("pane allocation failed before binding");
+      const binding = {
+        endpoint: "/tmp",
+        server: { pid: 91, startIdentity: "91:one" },
+        paneId: "%21",
+        panePid: { pid: 3627500, startIdentity: "3627500:one" },
+        target: "agents:21.0",
+      };
+      registry.bindSpawnPane(receipt.launchId, binding);
+      const host = {
+        kind: "tmux" as const,
+        ...binding,
+        windowName: "claude-builder",
+        agent: { pid: 3627501, startIdentity: "3627501:one" },
+        argv: ["claude"],
+      };
+      registry.markSpawnHostVerified(receipt.launchId, host);
+      registry.markSpawnPromptDelivered(receipt.launchId);
+      fs.writeFileSync(artifactPath, `${JSON.stringify({ type: "user", message: { content: "Own issue #334" } })}\n`);
+      return { paneId: "%21", display: "agents:21.0", panePid: 3627500, host, receipt };
+    },
+  } as Parameters<typeof POST.withDependencies>[2];
+  const request = (body: Record<string, unknown>) => new NextRequest(`http://127.0.0.1/api/tasks/${tasks[0]!.id}/spawn`, {
+    method: "POST",
+    headers: { origin: "http://127.0.0.1", host: "127.0.0.1", "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const context = { params: Promise.resolve({ id: tasks[0]!.id }) };
+
+  const failed = await POST.withDependencies(request({
+    engine: "claude",
+    model: "opus",
+    effort: "high",
+    cwd,
+    clientAttemptId: "task_334_first_attempt_20260719",
+  }), context, dependencies);
+  const failedBody = await failed.json();
+  expect(failed.status).toBe(500);
+  expect(failedBody).toMatchObject({ assignment: "failed", retrySafe: true });
+  expect(tasks[0]!.assignments).toEqual([expect.objectContaining({
+    launchId: failedBody.launchId,
+    state: "failed",
+    path: null,
+  })]);
+
+  /* Guards: unknown launch, terminal-only, and no caller-supplied attempt id. */
+  expect((await POST.withDependencies(request({ retryOfLaunchId: "unknown-launch" }), context, dependencies)).status).toBe(404);
+  expect((await POST.withDependencies(request({
+    retryOfLaunchId: failedBody.launchId,
+    clientAttemptId: "task_334_forced_id_1",
+  }), context, dependencies)).status).toBe(400);
+
+  failNextSpawn = false;
+  const retried = await POST.withDependencies(request({ retryOfLaunchId: failedBody.launchId }), context, dependencies);
+  const retriedBody = await retried.json();
+  expect(retried.status).toBe(200);
+  expect(retriedBody).toMatchObject({ assignment: "delivered", path: artifactPath });
+  expect(retriedBody.launchId).not.toBe(failedBody.launchId);
+
+  const snapshot = registry.snapshot();
+  const original = snapshot.receipts[failedBody.launchId]!;
+  const fresh = snapshot.receipts[retriedBody.launchId]!;
+  expect(original.state).toBe("failed");
+  expect(fresh.clientAttemptId).not.toBe(original.clientAttemptId);
+  expect(fresh).toMatchObject({
+    engine: "claude",
+    cwd: original.cwd,
+    accountId: original.accountId,
+    launchProfile: expect.objectContaining({ model: "opus", effort: "high" }),
+  });
+  /* The failed audit assignment survives beside the fresh delivered one. */
+  expect(tasks[0]!.assignments).toEqual([
+    expect.objectContaining({ launchId: failedBody.launchId, state: "failed" }),
+    expect.objectContaining({ launchId: retriedBody.launchId, state: "delivered", path: artifactPath }),
+  ]);
+
+  /* A delivered launch is not retryable: the terminal-only guard holds. */
+  expect((await POST.withDependencies(request({ retryOfLaunchId: retriedBody.launchId }), context, dependencies)).status).toBe(409);
+});

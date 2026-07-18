@@ -7,6 +7,23 @@ import type { FileEntry, StructuredSpawnCardState } from "@/lib/types";
 
 const TERMINAL_SPAWN_RECENT_MS = 15 * 60 * 1_000;
 
+/* Placeholder retirement (#342): a terminal receipt older than this bound is
+   pure history — it stops projecting a board FileEntry entirely. A pure
+   read-model rule: the durable receipt is never mutated or deleted, repeated
+   scans stay byte-stable, and restart changes nothing. Non-terminal receipts
+   always project (the #334 convergence pass turns dead-evidence launches
+   terminal, after which they age through the same tiers: prominent card for
+   15 min, launch-history strip until 24 h, retired after). Mirrored by
+   LAUNCH_HISTORY_RETIREMENT_MS in components/launchHistoryModel.ts. */
+export const PLACEHOLDER_RETIREMENT_MS = 24 * 60 * 60 * 1_000;
+
+function retiredTerminalReceipt(receipt: SpawnReceipt, nowMs: number): boolean {
+  const terminal = receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted";
+  if (!terminal) return false;
+  const createdMs = Date.parse(receipt.createdAt);
+  return Number.isFinite(createdMs) && nowMs - createdMs >= PLACEHOLDER_RETIREMENT_MS;
+}
+
 function initialDelivery(snapshot: RegistryFile, receipt: SpawnReceipt) {
   return Object.values(snapshot.heldDeliveries).find((delivery) =>
     delivery.conversationId === receipt.conversationId
@@ -47,7 +64,7 @@ function cardState(snapshot: RegistryFile, receipt: SpawnReceipt): StructuredSpa
   };
 }
 
-function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: RegistryFile): SpawnReceipt[] {
+function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: RegistryFile, nowMs: number): SpawnReceipt[] {
   const scannedConversations = new Set(files.flatMap((file) => file.conversationId ? [file.conversationId] : []));
   const scannedPaths = new Set(files.map((file) => file.path));
   const byConversation = new Map<string, SpawnReceipt>();
@@ -59,7 +76,7 @@ function newestUnscannedReceipts(files: readonly FileEntry[], snapshot: Registry
     const current = byConversation.get(receipt.conversationId);
     if (!current || current.createdAt < receipt.createdAt) byConversation.set(receipt.conversationId, receipt);
   }
-  return [...byConversation.values()];
+  return [...byConversation.values()].filter((receipt) => !retiredTerminalReceipt(receipt, nowMs));
 }
 
 function projectedActivity(spawn: StructuredSpawnCardState, createdAt: string, nowMs: number): FileEntry["activity"] {
@@ -77,7 +94,7 @@ export function preallocatedStructuredSpawnCards(
   nowMs = Date.now(),
 ): FileEntry[] {
   const scannedPaths = new Set(files.map((file) => file.path));
-  return newestUnscannedReceipts(files, snapshot).map((receipt) => {
+  return newestUnscannedReceipts(files, snapshot, nowMs).map((receipt) => {
     const spawn = cardState(snapshot, receipt);
     /* Pre-admission cards honor the explicit operator project the moment the
        receipt exists; once admitted, the conversation record is authoritative. */

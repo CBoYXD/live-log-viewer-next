@@ -7,6 +7,22 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Added
+- Inferred spawn lineage (#341). `POST /api/spawn` no longer requires `src`
+  from authenticated agent callers: the durable parent is inferred from the
+  caller's own capability-bound conversation, persisted as registry lineage
+  (receipt + edge) with a `parentSource` attribution (`explicit` /
+  `inferred-caller`), and exposed in the spawn response as `parent`. An
+  explicit `src` still wins and is still rejected when it does not resolve to
+  the caller; operator-capability callers without `src` proceed as silent
+  roots. Lineage stays conversation-id-keyed, so restart, resume, account
+  switch, handoff, and the board projection are unchanged.
+- Pathless retry for failed task launches (#334). `POST
+  /api/tasks/{id}/spawn` accepts `retryOfLaunchId`, relaunching a failed
+  assignment from its durable receipt shape (engine, directory, model,
+  effort, pinned account) with a server-minted fresh attempt id — the
+  terminal receipt is never replayed and the failed audit assignment is
+  preserved. The task card's failed assignment chip and the mobile task
+  sheet gain a compact retry-launch control that needs no transcript path.
 - Reviewer isolation and bounded, tracked agent nesting (#393). Reviewer and
   verifier sessions keep full filesystem, shell, GitHub, and browser access but
   have zero child-spawn capability: every launch they originate — direct
@@ -26,6 +42,26 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
   fixture, browser image, and pixel gates. The README now leads with the hero
   GIF and a feature tour; regeneration commands live in
   `docs/media/README.md`.
+
+### Fixed
+- Stale structured launches now converge while the server runs (#334): a
+  bounded, idempotent reaper-cycle pass turns dead-evidence pending launches
+  (no live admission owner, host entry, or runtime session past the timeout)
+  into the durable retry-safe `failed` state — recovering instead when strong
+  delivery evidence exists — so permanent placeholder spinners and blocked
+  composers no longer wait for a replay request or a restart.
+- `viewer.snapshot` resolves `spawn:<launchId>` visible paths (#342): a
+  materialized launch returns its real conversation (annotated with
+  `resolvedFrom`), an unresolved one returns a typed `spawn-stub` with the
+  durable launch state in the additive `stubs` array, and `omittedCount`
+  covers only genuine budget truncation instead of silently dropping spawn
+  placeholders.
+- Terminal spawn placeholders retire from the board projection after 24 hours
+  (#342): a pure read-model bound (no registry writes, no deletions, restart-
+  invariant) that converges the accumulated placeholder baseline while
+  receipts, conversations, lineage, transcripts, tasks, and active pane-less
+  agents stay intact; recent terminal launches keep their prominent card and
+  launch-history tiers.
 
 ### Changed
 - Current product prose, static page metadata, and the CLI startup banner use

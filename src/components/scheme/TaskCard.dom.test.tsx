@@ -369,3 +369,69 @@ test("real clamp overflow keeps the disclosure and fade truthful", () => {
     expect(body.style.maskImage).toContain("linear-gradient");
   });
 });
+
+test("a pathless failed assignment shows its terminal state with a compact retry launch control (#334)", async () => {
+  const fetches: Array<{ url: string; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    fetches.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+    return new Response(JSON.stringify({ ok: true, task: { id: "retry-task" }, assignment: "spawning" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    const task = boardTask({
+      id: "retry-task",
+      assignments: [{
+        launchId: "launch-334",
+        clientAttemptId: "task_334_attempt",
+        path: null,
+        conversationId: "conversation_334",
+        panePid: null,
+        state: "failed",
+        error: "structured spawn runtime snapshot has no session after 300000ms",
+        at: "2026-07-19T10:00:00.000Z",
+      }],
+    });
+    const { host } = render(task);
+
+    /* Terminal, not a spinner: the failed chip never renders the spawning
+       loader, and its ⚠ badge plus error title stay visible. */
+    const chip = host.querySelector("[data-task-retry-launch]")?.closest("span");
+    expect(chip).toBeTruthy();
+    expect(chip!.textContent).toContain("delivery failed");
+    expect(chip!.getAttribute("title")).toContain("no session after 300000ms");
+    expect(chip!.querySelector(".animate-spin")).toBeNull();
+
+    const retry = host.querySelector("[data-task-retry-launch]") as HTMLButtonElement;
+    expect(retry.getAttribute("aria-label")).toBe("Retry the failed launch for delivery failed");
+    retry.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetches).toEqual([{
+      url: "/api/tasks/retry-task/spawn",
+      body: { retryOfLaunchId: "launch-334" },
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a live assignment offers no retry launch control", () => {
+  const agent = file("/agent.jsonl", "Live agent");
+  const task = boardTask({
+    id: "live-task",
+    assignments: [{
+      launchId: "launch-live",
+      clientAttemptId: null,
+      path: "/agent.jsonl",
+      conversationId: "conversation_live",
+      panePid: 42,
+      state: "delivered",
+      error: null,
+      at: "2026-07-19T10:00:00.000Z",
+    }],
+  });
+  const { host } = render(task, { files: [agent] });
+  expect(host.querySelector("[data-task-retry-launch]")).toBeNull();
+});

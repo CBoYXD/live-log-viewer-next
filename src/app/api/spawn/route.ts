@@ -293,7 +293,27 @@ async function postSpawn(
     }), registry);
     const parent = lineage.parent;
     const reviewedConversationId = lineage.reviewed?.conversationId ?? null;
-    if (agentInitiated && !parent) return NextResponse.json({ error: AGENT_SPAWN_LINEAGE_ERROR }, { status: 400 });
+    /* An authenticated agent caller always resolves its own conversation as
+       parent; failure here means broken caller identity. An operator-capability
+       caller without src proceeds as a silent root (#341) — the API lane now
+       matches the UI lane's unmatched-caller fallback. */
+    if (agentInitiated && authenticatedCaller?.kind === "agent" && !parent) {
+      return NextResponse.json({ error: AGENT_SPAWN_LINEAGE_ERROR }, { status: 400 });
+    }
+    /* Parent attribution (#341): an explicit body selector wins and is
+       recorded as such; an agent-lane parent that stood alone on the
+       authenticated caller conversation is durably marked inferred. */
+    const bodyCarriedSelector = authenticatedCaller?.kind === "agent"
+      /* Agent lane: only the caller-verified `src` counts as explicit — other
+         body selectors are ignored by the lane and never chose this parent. */
+      ? typeof body.src === "string" && Boolean(body.src.trim())
+      : (typeof body.src === "string" && Boolean(body.src.trim()))
+        || (typeof body.parent === "string" && Boolean(body.parent.trim()))
+        || body.parentConversationId !== undefined
+        /* A UI/operator reviewer without src parents on the reviewed
+           conversation — that selector also came from the request body. */
+        || (typeof body.reviews === "string" && Boolean(body.reviews.trim()));
+    const parentSource = parent ? (bodyCarriedSelector ? "explicit" as const : "inferred-caller" as const) : null;
     const parentConversationId = parent?.conversationId ?? null;
     const parentSessionKey = parent?.sessionKey ?? null;
     const parentArtifactPath = parent?.artifactPath ?? null;
@@ -347,6 +367,7 @@ async function postSpawn(
       transport,
       accountId: account.accountId,
       parentConversationId,
+      parentSource,
       parentSessionKey,
       parentArtifactPath,
       role: role.value?.role ?? null,

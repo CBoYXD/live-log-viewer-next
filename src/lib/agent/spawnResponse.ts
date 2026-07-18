@@ -30,6 +30,10 @@ export interface SpawnResponse {
   effectivePermissionMode?: string;
   launchId: string;
   conversationId: string;
+  /** Durable parent attribution (#341): the lineage recorded on the receipt
+      and how it was derived. Null for root launches; `source` is null only on
+      receipts persisted before attribution existed. */
+  parent?: { conversationId: string; source: "explicit" | "inferred-caller" | null } | null;
   launched: boolean;
   retrySafe: boolean;
   initialMessage: "pending" | "queued" | "delivered" | "failed";
@@ -77,6 +81,9 @@ export function spawnResponseForReceipt(
       : {}),
     launchId: receipt.launchId,
     conversationId: receipt.conversationId,
+    parent: receipt.parentConversationId
+      ? { conversationId: receipt.parentConversationId, source: receipt.parentSource }
+      : null,
     launched,
     retrySafe: receipt.state === "failed",
     initialMessage: options.initialMessage ?? initialMessageForReceipt(receipt, structured),

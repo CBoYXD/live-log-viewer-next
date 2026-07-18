@@ -3321,3 +3321,66 @@ describe("supersedence contract (issue #383)", () => {
     expect(() => store.beginSpawnRequest({ engine: "codex", cwd: "/repo", supersedes: "conversation_missing" })).toThrow("predecessor is unknown");
   });
 });
+
+describe("spawn parent attribution (#341)", () => {
+  test("parentSource persists on the receipt and lineage edge and survives restart", () => {
+    const store = registry();
+    const parentPath = "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1341.jsonl";
+    const parent = store.ensureConversation("codex", parentPath, "terra");
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      parentConversationId: parent.id,
+      parentArtifactPath: parentPath,
+      parentSource: "inferred-caller",
+    });
+    if (begun.kind !== "created") throw new Error("expected create");
+    expect(begun.receipt.parentSource).toBe("inferred-caller");
+
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.snapshot().receipts[begun.receipt.launchId]).toMatchObject({
+      parentConversationId: parent.id,
+      parentSource: "inferred-caller",
+    });
+    expect(restarted.snapshot().lineageEdges[begun.receipt.conversationId]).toMatchObject({
+      parentConversationId: parent.id,
+      evidence: { launchId: begun.receipt.launchId, parentSource: "inferred-caller" },
+    });
+  });
+
+  test("a root launch and a legacy receipt both read back parentSource null", () => {
+    const store = registry();
+    const root = store.beginSpawnRequest({ engine: "codex", cwd: "/repo", accountId: "terra" });
+    if (root.kind !== "created") throw new Error("expected create");
+    expect(root.receipt.parentSource).toBeNull();
+    /* A parentSource without a parent is meaningless and never persists. */
+    const orphanAttribution = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      parentSource: "explicit",
+    });
+    if (orphanAttribution.kind !== "created") throw new Error("expected create");
+    expect(orphanAttribution.receipt.parentSource).toBeNull();
+
+    const parent = store.ensureConversation("codex", "/sessions/parent-019f4906-3f67-7b72-9fbc-9ec3b5ad1342.jsonl", "terra");
+    const legacy = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      accountId: "terra",
+      parentConversationId: parent.id,
+      parentSource: "explicit",
+    });
+    if (legacy.kind !== "created") throw new Error("expected create");
+    const snapshot = store.snapshot();
+    delete (snapshot.receipts[legacy.receipt.launchId] as unknown as Record<string, unknown>).parentSource;
+    fs.writeFileSync(store.filename, JSON.stringify(snapshot));
+
+    const restarted = new AgentRegistry(store.filename);
+    expect(restarted.snapshot().receipts[legacy.receipt.launchId]).toMatchObject({
+      parentConversationId: parent.id,
+      parentSource: null,
+    });
+  });
+});

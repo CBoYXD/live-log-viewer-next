@@ -1716,3 +1716,45 @@ test("a delivery created during merge revalidation fences the final reap decisio
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("the reaper cycle runs the stale structured spawn convergence pass when a runtime client exists", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-reaper-stale-spawns-"));
+  process.env.LLV_STATE_DIR = directory;
+  delete process.env.LLV_REAPER_ENABLED;
+  const registry = new AgentRegistry(path.join(directory, "agent-registry.json"));
+  const runtimeClient = { snapshot: async () => ({ revision: 0, sessions: [] }) };
+  const passes: Array<{ registry: unknown; client: unknown }> = [];
+
+  try {
+    await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [],
+      actuation: {
+        runtimeClient: (() => runtimeClient) as never,
+        terminalizeStaleSpawns: (async (passRegistry: unknown, passClient: unknown) => {
+          passes.push({ registry: passRegistry, client: passClient });
+          return { examined: 0, terminalized: [], recovered: [] };
+        }) as never,
+      },
+    });
+    expect(passes).toEqual([{ registry, client: runtimeClient }]);
+
+    /* No runtime client — the pass never runs and the cycle still completes. */
+    const report = await runReaperCycle({
+      registry,
+      hosts: [],
+      files: [],
+      actuation: {
+        runtimeClient: (() => null) as never,
+        terminalizeStaleSpawns: (async () => {
+          throw new Error("must not run without a runtime client");
+        }) as never,
+      },
+    });
+    expect(report.agents).toEqual([]);
+    expect(passes).toHaveLength(1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -67,7 +67,27 @@ export interface SnapshotConversation {
   activity: Activity;
   proc: FileEntry["proc"];
   attention: { state: "question" | "terminal" | "stalled"; since: string } | null;
+  /** Set when a `spawn:<launchId>` scope path resolved to this conversation's
+      materialized transcript (#342): the original requested path. */
+  resolvedFrom?: string;
   text?: { messages: Array<{ role: "user" | "assistant"; at: string | null; text: string }>; truncated: boolean; scannedBytes: number; error?: "unavailable" };
+}
+
+/** Typed unresolved `spawn:<launchId>` scope path (#342): the launch receipt
+    exists but its conversation has no scanned transcript yet, so the snapshot
+    reports the durable launch state instead of silently omitting the path. */
+export interface SnapshotSpawnStub {
+  path: string;
+  kind: "spawn-stub";
+  launch: {
+    launchId: string;
+    state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
+    error: string | null;
+    retrySafe: boolean;
+    engine: Extract<Engine, "claude" | "codex">;
+    cwd: string;
+    createdAt: string;
+  };
 }
 
 export interface ViewerSnapshotV1 {
@@ -79,6 +99,9 @@ export interface ViewerSnapshotV1 {
   view: Omit<PresencePayloadV1, "schemaVersion" | "sequence" | "inputSequence"> & { freshness: ViewFreshness; presenceAgeMs: number };
   scope: { kind: ViewScopeKind; totalPaths: number; returnedPaths: string[]; truncated: boolean; omittedCount: number };
   conversations: SnapshotConversation[];
+  /** Additive (#342): unresolved spawn placeholders in scope. `truncated` and
+      `omittedCount` then cover only genuine budget truncation. */
+  stubs: SnapshotSpawnStub[];
   siblings: { selfResolution: "matched" | "unmatched" | "omitted"; agents: Array<{ transcriptPath: string; engine: "claude" | "codex"; project: string | null; title: string | null; activity: string | null; pid: number; self: boolean }> };
   scanner: { scannedAt: string; ageMs: number; durationMs: number; entryCount: number };
 }

@@ -13,6 +13,8 @@ import { loadFlows, saveFlows } from "@/lib/flows/store";
 import type { Flow, FlowMergeEvidence } from "@/lib/flows/types";
 import { reconcileMigrationInventory } from "@/lib/accounts/migration/coordinator";
 import { procBackend } from "@/lib/proc";
+import { runtimeHostClient } from "@/lib/runtime/client";
+import { terminalizeStaleStructuredSpawns } from "@/lib/runtime/structuredSpawn";
 import { listFiles } from "@/lib/scanner";
 import { isNativeCodexSubagentTranscript } from "@/lib/scanner/codexNative";
 import { scanUserAuthoredMessagesCooperatively } from "@/lib/session/reader";
@@ -763,6 +765,8 @@ export interface ReaperActuationOverrides {
   mergeProbeConcurrency?: number;
   saveFlows?: typeof saveFlows;
   now?: () => number;
+  runtimeClient?: typeof runtimeHostClient;
+  terminalizeStaleSpawns?: typeof terminalizeStaleStructuredSpawns;
 }
 
 export async function runReaperCycle(options: {
@@ -774,6 +778,18 @@ export async function runReaperCycle(options: {
 }): Promise<ReaperReport> {
   const registry = options.registry ?? agentRegistry();
   const now = options.now ?? Date.now();
+  /* Stale structured launch convergence (#334): the reaper cycle is the
+     while-running seam that turns dead-evidence pending receipts terminal, so
+     a permanent spinner no longer waits for a replay POST or a restart. The
+     pass is bounded and idempotent; its failure never blocks the reaper. */
+  const runtimeClientForSpawns = (options.actuation?.runtimeClient ?? runtimeHostClient)();
+  if (runtimeClientForSpawns) {
+    try {
+      await (options.actuation?.terminalizeStaleSpawns ?? terminalizeStaleStructuredSpawns)(registry, runtimeClientForSpawns);
+    } catch (error) {
+      console.error("[reaper] stale structured spawn convergence failed", error);
+    }
+  }
   const state = updateObservationState(options.hosts, now);
   const report = evaluateReaper(await makeInput(registry, options.hosts, options.files, state, now, options.actuation));
   const completed = await runEvaluatedReaper(report, {
