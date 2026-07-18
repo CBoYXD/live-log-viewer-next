@@ -215,6 +215,90 @@ describe("lastTurnFromRecords — Claude", () => {
     });
   });
 
+  test("slash-command meta records never open a window (feed metadata contract)", () => {
+    // A command invocation is journaled as meta user records that carry real
+    // text: the caveat wrapper and the command echo. The feed classifies both
+    // as metadata; the timer must not start before the actual prompt lands
+    // (issue #406).
+    const records = [
+      {
+        type: "user",
+        timestamp: "2026-07-14T09:59:57.000Z",
+        isMeta: true,
+        message: { role: "user", content: "<local-command-caveat>Caveat: the command output follows</local-command-caveat>" },
+      },
+      {
+        type: "user",
+        timestamp: "2026-07-14T09:59:58.000Z",
+        promptSource: "command",
+        message: { role: "user", content: "<command-name>/review</command-name>" },
+      },
+    ];
+    expect(lastTurnFromRecords(records, false)).toBeNull();
+
+    const boundary = lastTurnFromRecords(
+      [...records, claudeUser("2026-07-14T10:00:00.000Z", "review the diff"), claudeAssistantEnd("2026-07-14T10:05:00.000Z")],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:05:00.000Z"),
+    });
+  });
+
+  test("promptSource records stay metadata unless typed", () => {
+    const notification = {
+      type: "user",
+      timestamp: "2026-07-14T10:10:00.000Z",
+      promptSource: "system",
+      origin: { kind: "task-notification" },
+      message: { role: "user", content: "<task-notification>\n<status>completed</status>\n</task-notification>" },
+    };
+    // After a finished turn, a system notification must not open a new window…
+    const boundary = lastTurnFromRecords(
+      [claudeUser("2026-07-14T10:00:00.000Z", "hi"), claudeAssistantEnd("2026-07-14T10:01:00.000Z"), notification],
+      false,
+    );
+    expect(boundary).toEqual({
+      startedAt: ms("2026-07-14T10:00:00.000Z"),
+      endedAt: ms("2026-07-14T10:01:00.000Z"),
+    });
+    // …while an explicitly typed prompt keeps its role through envelope fields.
+    const typed = lastTurnFromRecords(
+      [
+        {
+          type: "user",
+          timestamp: "2026-07-14T10:20:00.000Z",
+          promptSource: "typed",
+          origin: { kind: "human" },
+          message: { role: "user", content: "queued while you worked" },
+        },
+      ],
+      false,
+    );
+    expect(typed).toEqual({ startedAt: ms("2026-07-14T10:20:00.000Z"), endedAt: null });
+  });
+
+  test("an image-bearing prompt opens a window without any text part", () => {
+    const boundary = lastTurnFromRecords(
+      [
+        {
+          type: "user",
+          timestamp: "2026-07-14T10:00:00.000Z",
+          message: { role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "AA==" } }] },
+        },
+        claudeAssistantOpen("2026-07-14T10:00:05.000Z"),
+      ],
+      false,
+    );
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
+
+  test("an ordinary prompt still opens a window under the shared contract", () => {
+    const boundary = lastTurnFromRecords([claudeUser("2026-07-14T10:00:00.000Z", "plain prompt")], false);
+    expect(boundary).toEqual({ startedAt: ms("2026-07-14T10:00:00.000Z"), endedAt: null });
+  });
+
   test("a survived API error keeps the run open and steering continuous", () => {
     // The error was transient: the model kept working after it, so a later
     // prompt steers the same window instead of resetting the start.
