@@ -42,7 +42,11 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
   const large = size === "large";
   return (
     <article
-      className={`group relative flex ${large ? "h-[150px] w-[300px]" : "h-[108px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(tone)}`}
+      /* reasoning-host (issue #270): the card's width is an explicit constant,
+         so the container query costs nothing — small (220px) cards collapse the
+         effort meter below the 260px threshold; the tier stays readable in the
+         model chip's tooltip. */
+      className={`reasoning-host group relative flex ${large ? "h-[150px] w-[300px]" : "h-[108px] w-[220px]"} shrink-0 flex-col rounded-[8px] border p-3 shadow-1 transition-colors hover:border-accent/45 ${toneClass(tone)}`}
       role="button"
       tabIndex={0}
       aria-label={t("switchCard.openColumn", { title: cleanTitle(title, 80) })}
