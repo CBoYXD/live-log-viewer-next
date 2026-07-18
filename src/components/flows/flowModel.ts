@@ -80,11 +80,11 @@ export function flowByImplementer(flows: Flow[]): Map<string, Flow> {
  * Reviewer transcripts claimed by a round deck: they render inside the deck
  * and must never appear as standalone scheme nodes or switchboard noise.
  */
-export function claimedReviewerPaths(flows: Flow[]): Set<string> {
+export function claimedReviewerPaths(flows: Flow[], files: readonly FileEntry[] = []): Set<string> {
   const set = new Set<string>();
   for (const flow of flows) {
     for (const round of flow.rounds) {
-      if (round.reviewerPath) set.add(round.reviewerPath);
+      for (const { path } of reviewerBindingTargetsForRound(flow, round, files)) set.add(path);
     }
   }
   return set;
@@ -180,7 +180,7 @@ export function reviewerBindingTargetsForRound(
  * still carry real conversation structure below the implementer.
  */
 export function claimedReviewerDescendantPaths(files: FileEntry[], flows: Flow[]): Set<string> {
-  const claimed = claimedReviewerPaths(flows);
+  const claimed = claimedReviewerPaths(flows, files);
   for (const file of files) {
     if (file.durableLineage?.role === "reviewer" || file.durableLineage?.memberships.some((membership) => membership.kind === "flow" && membership.role === "reviewer")) {
       claimed.add(file.path);

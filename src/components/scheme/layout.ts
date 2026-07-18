@@ -242,7 +242,7 @@ export function buildSchemeLayout(
   const decks: DeckNode[] = [];
   const loops: FlowLoop[] = [];
   const deckFor = flowByImplementer(flows);
-  const claimed = claimedReviewerPaths(flows);
+  const claimed = claimedReviewerPaths(flows, files);
   /* Direct one-shot review groups (issue #325) are synthetic client-side flows:
      they place a deck, a loop and folded reviewers exactly like a managed flow,
      but no /api/flows PATCH may ever target them — so every interactive control
