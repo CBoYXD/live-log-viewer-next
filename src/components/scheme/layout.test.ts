@@ -10,9 +10,11 @@ import { compactPipelineLayoutFlows } from "@/components/pipelines/pipelineModel
 import { type BranchGroup, buildBranchGroups } from "@/components/projectModel";
 import { planRootReconciliation } from "@/components/projectBoardMutations";
 import { applyBoardMutations } from "@/lib/board/mutations";
+import { autoTaskSlotPosition } from "@/lib/tasks/lattice";
 
 import { deckKey, flowLinkKey } from "./agentLinks";
-import { GROUP_PAD, NODE_W, buildSchemeLayout } from "./layout";
+import { GROUP_PAD, NODE_W, REST_BAND_MAX_W, buildSchemeLayout } from "./layout";
+import { TASK_W, taskWorldBounds } from "./taskGeometry";
 
 function entry(overrides: Partial<FileEntry> & { path: string }): FileEntry {
   return {
@@ -569,6 +571,96 @@ describe("buildSchemeLayout favorites band (issue #224)", () => {
     const favNode = layout.nodes.find((node) => node.file.path === "/manual-fav")!;
     const plainNode = layout.nodes.find((node) => node.file.path === "/plain")!;
     expect(plainNode.y).toBeGreaterThan(favNode.y + favNode.h);
+  });
+});
+
+describe("bounded attention-first rest bands (#343)", () => {
+  const solo = (index: number, activity: FileEntry["activity"] = "idle") => {
+    const file = entry({ path: `/rest-${index}`, activity, mtime: index });
+    const group: BranchGroup = {
+      key: file.path,
+      columns: [{ file, tasks: [] }],
+      returnable: [],
+      finished: [],
+      smt: file.mtime,
+      orphanTask: false,
+    };
+    return { file, group };
+  };
+
+  test("wraps a long quiet row while keeping live work at the band head", () => {
+    const rows = Array.from({ length: 40 }, (_, index) => solo(index));
+    const live = solo(99, "live");
+    const layout = buildSchemeLayout([...rows.map((row) => row.group), live.group], [], [...rows.map((row) => row.file), live.file]);
+    const liveNode = layout.nodes.find((node) => node.file.path === live.file.path)!;
+
+    expect(liveNode.x).toBe(100);
+    expect(layout.nodes.some((node) => node.y > liveNode.y)).toBe(true);
+    expect(Math.max(...layout.nodes.map((node) => node.x + node.w))).toBeLessThanOrEqual(REST_BAND_MAX_W + 100);
+  });
+
+  test("a fresh memberless pipeline docks at the rest-band head and keeps compact rails", () => {
+    const row = solo(1);
+    const pipeline = ({
+      id: "fresh-pipeline", task: "Fresh pipeline", project: "demo", repoDir: "/r", worktreeDir: "/w",
+      branch: "fresh", baseBranch: "main", baseRef: "a", lastPassedCommit: "a", stages: [], runs: [],
+      cursor: null, state: "draft", pausedState: null, stateDetail: null, srcPath: null, srcConversationId: null,
+      createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+    const layout = buildSchemeLayout([row.group], [], [row.file], [], [], [pipeline], [pipeline]);
+    const halo = layout.groups.find((group) => group.id === pipeline.id)!;
+
+    expect(halo.x).toBe(100);
+    expect(halo.y).toBe(100);
+    expect(layout.nodes[0]!.x).toBeGreaterThan(halo.x + halo.w);
+    expect(layout.slots).toHaveLength(0);
+  });
+
+  test("a pipeline whose only transcript is folded into an under-deck docks its rail clear of the rest cards (round-1 finding 2)", () => {
+    /* The attempt transcript is quiet history folded into the host pane's
+       under-deck: present in the file list (so no head slot is reserved) yet
+       absent from the anchor index (so no halo builds). The old dock placed
+       its rail at (PAD, restTop) — directly under the first rest-band card. */
+    const host = entry({ path: "/host", activity: "live" });
+    const folded = entry({ path: "/host/old", parent: "/host" });
+    const group: BranchGroup = { key: "/host", columns: [{ file: host, tasks: [] }], returnable: [], finished: [folded], smt: host.mtime, orphanTask: false };
+    const pipeline = ({
+      id: "folded-pipe", task: "Folded attempt", project: "demo", repoDir: "/r", worktreeDir: "/w",
+      branch: "b", baseBranch: "main", baseRef: "a", lastPassedCommit: "a",
+      stages: [{ id: "build", kind: "run", prompt: "", next: null }],
+      runs: [{ stageId: "build", attempts: [{ n: 1, state: "failed", agentPath: "/host/old", flowId: null }] }],
+      cursor: { stageId: "build", state: "failed" }, state: "running", pausedState: null, stateDetail: null,
+      srcPath: null, srcConversationId: null, createdAt: "1970", closedAt: null,
+    }) as unknown as Pipeline;
+    const layout = buildSchemeLayout([group], [], [host, folded], [], [], [pipeline], [pipeline]);
+
+    expect(layout.nodes.map((node) => node.file.path)).toEqual(["/host"]);
+    expect(layout.nodes[0]!.under.map((file) => file.path)).toEqual(["/host/old"]);
+    const rail = layout.groups.find((candidate) => candidate.kind === "pipeline" && candidate.id === "folded-pipe")!;
+    expect(rail).toBeTruthy();
+    /* The rail never overlaps the host card it was docked beside. */
+    const node = layout.nodes[0]!;
+    const overlaps =
+      rail.x < node.x + node.w && node.x < rail.x + rail.w &&
+      rail.y < node.y + node.h && node.y < rail.y + rail.h;
+    expect(overlaps).toBe(false);
+    /* …and stays inside the world box for camera/minimap reachability. */
+    expect(rail.x + rail.w).toBeLessThanOrEqual(layout.width);
+    expect(rail.y + rail.h).toBeLessThanOrEqual(layout.height);
+  });
+
+  test("audit-scale 100-card layout plus 150 auto cards fits above the 12% floor", () => {
+    const rows = Array.from({ length: 100 }, (_, index) => solo(index));
+    const board = buildSchemeLayout(rows.map((row) => row.group), [], rows.map((row) => row.file));
+    const autoCards = Array.from({ length: 150 }, (_, index) => ({
+      ...autoTaskSlotPosition(index),
+      w: TASK_W,
+      h: 184,
+    }));
+    const world = taskWorldBounds(board.width, board.height, autoCards);
+    const fitAll = Math.min((1920 - 48) / world.w, (1080 - 48) / world.h, 1);
+
+    expect(fitAll).toBeGreaterThan(0.12);
   });
 });
 
