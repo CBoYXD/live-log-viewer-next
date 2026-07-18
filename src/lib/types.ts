@@ -185,6 +185,15 @@ export interface FileEntry {
       Presence marks this entry as an archived predecessor: it folds into the
       successor's history and never renders a standalone card. */
   migratedTo?: string | null;
+  /** Terminal cross-conversation supersedence (issue #383): a recovery spawn
+      or stage retry replaced this round with a successor conversation. The
+      card leaves Current Work, never projects working/waiting, and its
+      composer is replaced by navigation to the live successor. Projection
+      metadata only — never identity-bearing. */
+  supersededBy?: { conversationId: string; path: string | null; at: string; reason: string };
+  /** Lineage of a supersedence-chain tail (issue #383): this card continues
+      round N of the superseded predecessor named here. */
+  continues?: { conversationId: string; path: string | null; round: number };
   /** Live per-session migration annotation while an intent drains. Absent for
       every session not currently migrating. */
   migration?: ConversationMigration;

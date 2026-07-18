@@ -163,6 +163,28 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
     if (responsePinOverlayPaths.has(child.path)) responsePinOverlayPaths.add(parentPath);
   }
   const scannedPaths = new Set(files.map((file) => file.path));
+  /* Supersedence lineage (issue #383): the reverse edge map gives each chain
+     tail its immediate predecessor and its round number (chain depth + 1),
+     bounded so a malformed chain can never hang the scan. */
+  const supersedencePredecessors = new Map<string, string>();
+  for (const candidate of Object.values(registrySnapshot.conversations)) {
+    if (!candidate.supersededBy) continue;
+    const successorId = conversationLookup.canonicalConversationId(candidate.supersededBy.conversationId);
+    if (successorId !== candidate.id && !supersedencePredecessors.has(successorId)) {
+      supersedencePredecessors.set(successorId, candidate.id);
+    }
+  }
+  const supersedenceRound = (conversationId: string): number => {
+    let round = 1;
+    const seen = new Set<string>([conversationId]);
+    let current = supersedencePredecessors.get(conversationId);
+    while (current && !seen.has(current) && round < 64) {
+      seen.add(current);
+      round += 1;
+      current = supersedencePredecessors.get(current);
+    }
+    return round;
+  };
   for (const file of files) {
     if (file.engine !== "claude" && file.engine !== "codex") continue;
     if (file.spawn) continue;
@@ -193,6 +215,45 @@ export async function buildFilesResponse(request: Request, dependencies: FilesRo
           source: "lifecycle",
           terminalAt: registryEntry.updatedAt,
         };
+      }
+      /* Terminal supersedence demotion (issue #383): a retired round never
+         projects working/waiting or a stale attention signal — it folds into
+         round history while the successor carries the live card. Fail-open:
+         with no materialized successor generation the card keeps today's
+         dead-host rendering instead of hiding behind a dangling link. */
+      if (conversation.supersededBy) {
+        const successorId = conversationLookup.canonicalConversationId(conversation.supersededBy.conversationId);
+        const successorGeneration = successorId !== conversation.id
+          ? registrySnapshot.conversations[successorId]?.generations.at(-1)
+          : undefined;
+        if (successorGeneration) {
+          file.supersededBy = {
+            conversationId: successorId,
+            path: successorGeneration.path,
+            at: conversation.supersededBy.at,
+            reason: conversation.supersededBy.reason,
+          };
+          file.activity = "idle";
+          file.activityReason = "superseded";
+          file.proc = "killed";
+          file.authoritativeTurn = {
+            state: "terminal",
+            source: "lifecycle",
+            terminalAt: conversation.supersededBy.at,
+          };
+          file.pendingQuestion = null;
+          file.waitingInput = null;
+          delete file.rateLimit;
+        }
+      } else {
+        const predecessorId = supersedencePredecessors.get(conversation.id);
+        if (predecessorId) {
+          file.continues = {
+            conversationId: predecessorId,
+            path: registrySnapshot.conversations[predecessorId]?.generations.at(-1)?.path ?? null,
+            round: supersedenceRound(conversation.id),
+          };
+        }
       }
       const profile = latest.launchProfile;
       file.title = profile.title ?? file.title;
