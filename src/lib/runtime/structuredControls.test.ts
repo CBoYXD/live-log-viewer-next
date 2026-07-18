@@ -7,17 +7,25 @@ import { afterAll, expect, test } from "bun:test";
 
 import { AgentRegistry } from "@/lib/agent/registry";
 
-import type { RuntimeHostClient } from "./client";
+import { RuntimeHostUnavailableError, type RuntimeHostClient } from "./client";
 import { dispatchStructuredControl } from "./structuredControls";
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "llv-structured-controls-"));
 afterAll(() => fs.rmSync(sandbox, { recursive: true, force: true }));
 
-function structuredConversation(): { registry: AgentRegistry; path: string; conversationId: string } {
+function structuredConversation(
+  options: { parentConversationId?: `conversation_${string}`; registry?: AgentRegistry } = {},
+): { registry: AgentRegistry; path: string; conversationId: string } {
   const id = crypto.randomUUID();
   const pathname = path.join(sandbox, `${id}.jsonl`);
-  const registry = new AgentRegistry(path.join(sandbox, `${id}.registry.json`), undefined, undefined, { sqliteMode: "off" });
-  const begun = registry.beginSpawnRequest({ engine: "codex", cwd: sandbox, accountId: "codex-subscription" });
+  const registry = options.registry
+    ?? new AgentRegistry(path.join(sandbox, `${id}.registry.json`), undefined, undefined, { sqliteMode: "off" });
+  const begun = registry.beginSpawnRequest({
+    engine: "codex",
+    cwd: sandbox,
+    accountId: "codex-subscription",
+    ...(options.parentConversationId ? { parentConversationId: options.parentConversationId } : {}),
+  });
   if (begun.kind !== "created") throw new Error("spawn receipt was unavailable");
   const settled = registry.settleSpawn(begun.receipt.launchId, {
     key: { engine: "codex", sessionId: id },
@@ -150,6 +158,180 @@ test("structured kill enters the durable runtime command channel", async () => {
     sessionKey: { engine: "codex", sessionId: expect.any(String) },
   }]);
   expect(kicks).toBe(1);
+});
+
+function terminateStructuredFixture(fixture: { registry: AgentRegistry; conversationId: string }): void {
+  const conversation = fixture.registry.conversation(fixture.conversationId as `conversation_${string}`)!;
+  const generation = conversation.generations.at(-1)!;
+  fixture.registry.terminateStructuredHost({ engine: conversation.engine, sessionId: generation.id });
+}
+
+test("structured kill addressed by conversationId enters the durable command channel", async () => {
+  const fixture = structuredConversation();
+  const commands: unknown[] = [];
+  const client = {
+    command: async (command: unknown) => {
+      commands.push(command);
+      return { operationId: "kill-by-id", receipt: { operationId: "kill-by-id", status: "queued" }, replayed: false };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({ path: "", conversationId: fixture.conversationId, action: "kill" }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "kill-by-id",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({ status: 202, body: { ok: true, structured: true, target: fixture.conversationId } });
+  expect(commands).toEqual([{
+    kind: "kill",
+    operationId: "kill-by-id",
+    idempotencyKey: "kill-by-id",
+    conversationId: fixture.conversationId,
+    sessionKey: { engine: "codex", sessionId: expect.any(String) },
+  }]);
+});
+
+test("a delivered kill receipt resolves as a terminal success, not a failure", async () => {
+  const fixture = structuredConversation();
+  const client = {
+    command: async () => ({
+      operationId: "kill-delivered",
+      receipt: { operationId: "kill-delivered", status: "delivered" },
+      replayed: true,
+    }),
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "kill" }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "kill-delivered",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toMatchObject({
+    status: 200,
+    body: { ok: true, structured: true, target: fixture.conversationId, receipt: { status: "delivered" } },
+  });
+});
+
+test("a kill transport timeout after journal admission reports the durable receipt", async () => {
+  const fixture = structuredConversation();
+  const probes: string[] = [];
+  let kicks = 0;
+  const client = {
+    command: async () => {
+      throw new RuntimeHostUnavailableError("runtime host request timed out");
+    },
+    operationStatus: async (operationId: string) => {
+      probes.push(operationId);
+      return {
+        operationId,
+        receipt: { operationId, status: "delivered", conversationId: fixture.conversationId },
+        replayed: true,
+      };
+    },
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({ path: "", conversationId: fixture.conversationId, action: "kill" }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "kill-timeout",
+    kick: () => { kicks += 1; },
+    enabled: () => true,
+  });
+
+  expect(probes).toEqual(["kill-timeout"]);
+  expect(kicks).toBe(1);
+  expect(result).toMatchObject({
+    status: 200,
+    body: { ok: true, structured: true, target: fixture.conversationId, operationId: "kill-timeout", receipt: { status: "delivered" } },
+  });
+});
+
+test("a kill transport timeout with no durable record stays a retryable failure", async () => {
+  const fixture = structuredConversation();
+  const client = {
+    command: async () => {
+      throw new RuntimeHostUnavailableError("runtime host request timed out");
+    },
+    operationStatus: async () => null,
+  } as unknown as RuntimeHostClient;
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "kill" }, {
+    registry: fixture.registry,
+    client,
+    operationId: () => "kill-lost",
+    kick: () => {},
+    enabled: () => true,
+  });
+
+  expect(result).toEqual({ status: 503, body: { error: "runtime host request timed out" } });
+});
+
+test("a dead structured session replays its terminal kill outcome for path callers", async () => {
+  const fixture = structuredConversation();
+  terminateStructuredFixture(fixture);
+
+  const result = await dispatchStructuredControl({ path: fixture.path, conversationId: "", action: "kill" }, {
+    registry: fixture.registry,
+    client: null,
+    enabled: () => true,
+  });
+
+  expect(result).toEqual({
+    status: 200,
+    body: { ok: true, structured: true, target: fixture.conversationId, outcome: "delivered" },
+  });
+});
+
+test("a dead structured session replays its terminal kill outcome for conversation-id callers", async () => {
+  const fixture = structuredConversation();
+  terminateStructuredFixture(fixture);
+
+  const result = await dispatchStructuredControl({ path: "", conversationId: fixture.conversationId, action: "kill" }, {
+    registry: fixture.registry,
+    client: null,
+    enabled: () => true,
+  });
+
+  expect(result).toEqual({
+    status: 200,
+    body: { ok: true, structured: true, target: fixture.conversationId, outcome: "delivered" },
+  });
+});
+
+test("a dead structured branch replays terminal kill without branch/root pane failures", async () => {
+  const root = structuredConversation();
+  const branch = structuredConversation({
+    registry: root.registry,
+    parentConversationId: root.conversationId as `conversation_${string}`,
+  });
+  terminateStructuredFixture(branch);
+  terminateStructuredFixture(root);
+
+  const branchResult = await dispatchStructuredControl({ path: branch.path, conversationId: "", action: "kill" }, {
+    registry: root.registry,
+    client: null,
+    enabled: () => true,
+  });
+  const rootResult = await dispatchStructuredControl({ path: "", conversationId: root.conversationId, action: "kill" }, {
+    registry: root.registry,
+    client: null,
+    enabled: () => true,
+  });
+
+  expect(branchResult).toEqual({
+    status: 200,
+    body: { ok: true, structured: true, target: branch.conversationId, outcome: "delivered" },
+  });
+  expect(rootResult).toEqual({
+    status: 200,
+    body: { ok: true, structured: true, target: root.conversationId, outcome: "delivered" },
+  });
 });
 
 test("disabled structured hosting leaves persisted ownership on the legacy control path", async () => {

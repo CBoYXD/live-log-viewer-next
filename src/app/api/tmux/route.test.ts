@@ -43,6 +43,7 @@ let delivery: (message: unknown) => Promise<{ ok: true; outcome: "delivered-to-l
   target: "agents:4.0",
 });
 let killOutcome: { ok: true; target: string } | { ok: false; outcome: "failed"; error: string; status: number } = { ok: true, target: "agents:4.0" };
+let killCalls = 0;
 let structuredControlCalls = 0;
 let interruptCalls = 0;
 let structuredMessageCalls = 0;
@@ -54,6 +55,7 @@ let structuredMessageResult:
   | { ok: true; structured: true; target: string; outcome: "queued"; operationId: string; receipt: { operationId: string; status: "queued" } }
   | null = null;
 let structuredControlResult:
+  | { status: 200; body: { ok: true; structured: true; target: string; outcome: "delivered" } }
   | { status: 202; body: { ok: true; structured: true; target: string; operationId: string; receipt: { operationId: string; status: string } } }
   | { status: 409; body: { error: string } }
   | null = null;
@@ -108,7 +110,10 @@ mock.module("@/lib/delivery", () => ({
     interruptCalls += 1;
     return { ok: true, target: "" };
   },
-  killConversation: async () => killOutcome,
+  killConversation: async () => {
+    killCalls += 1;
+    return killOutcome;
+  },
   livePaneTarget: async () => null,
   reconfigureConversation: async () => ({ ok: true, outcome: "reconfigured", target: "agents:4.0" }),
   resumeConversation: async () => ({ ok: true, target: "" }),
@@ -388,6 +393,38 @@ test("/api/tmux admits pane-less kill through the structured control path", asyn
       receipt: { status: "queued" },
     });
     expect(structuredControlCalls).toBe(1);
+  } finally {
+    structuredControlResult = null;
+    if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
+    else process.env.LLV_STRUCTURED_HOSTS = previous;
+  }
+});
+
+test("/api/tmux keeps a conversation-id kill on the structured outcome without legacy fallthrough", async () => {
+  const previous = process.env.LLV_STRUCTURED_HOSTS;
+  structuredControlCalls = 0;
+  killCalls = 0;
+  structuredControlResult = {
+    status: 200,
+    body: {
+      ok: true,
+      structured: true,
+      target: "conversation_dead-replay",
+      outcome: "delivered",
+    },
+  };
+  try {
+    process.env.LLV_STRUCTURED_HOSTS = "1";
+    const response = await POST(post({ conversationId: "conversation_dead-replay", action: "kill" }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      structured: true,
+      target: "conversation_dead-replay",
+      outcome: "delivered",
+    });
+    expect(structuredControlCalls).toBe(1);
+    expect(killCalls).toBe(0);
   } finally {
     structuredControlResult = null;
     if (previous === undefined) delete process.env.LLV_STRUCTURED_HOSTS;
