@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronDown, ChevronUp, Crosshair, FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
 import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
@@ -79,15 +79,25 @@ function ChipAction({
   /** Stable test/query hook, e.g. `data-task-open-agent`. */
   dataAttr?: string;
 }) {
+  /* An unavailable control must stay reachable and truthful: a native
+     `disabled` drops the button out of the tab order and gives assistive tech
+     nothing to announce, so keyboard and screen-reader users can't learn *why*
+     the agent won't open. `aria-disabled` keeps it focusable and announced as
+     unavailable while the guarded click keeps the action inert. */
   return (
     <button
       type="button"
       {...(dataAttr ? { [dataAttr]: "" } : {})}
-      className={`-my-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${hoverClass} disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted`}
+      className={`-my-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${
+        disabled ? "cursor-not-allowed opacity-40" : hoverClass
+      }`}
       aria-label={ariaLabel}
       title={title}
-      disabled={disabled}
-      onClick={onClick}
+      aria-disabled={disabled || undefined}
+      onClick={() => {
+        if (disabled) return;
+        onClick();
+      }}
     >
       {icon}
     </button>
@@ -110,6 +120,10 @@ function AssignmentChip({
   const { t } = useLocale();
   const state = assignmentAgentState(assignment, file);
   const detachRef: AssignmentRef = {
+    /* The launch id is minted at spawn time, before any transcript path or
+       scanner attribution exists — it is the one handle a pathless spawning
+       assignment always owns, so detach carries it first. */
+    launchId: assignment.launchId ?? null,
     path: assignment.path,
     conversationId: assignment.conversationId ?? null,
     panePid: assignment.panePid,
@@ -175,7 +189,11 @@ function AssignmentChip({
       {failed ? <span aria-hidden>⚠</span> : null}
       <ChipAction
         icon={<Crosshair className="h-3 w-3" aria-hidden />}
-        ariaLabel={t("tasks.openAgentAria", { title })}
+        ariaLabel={
+          openable
+            ? t("tasks.openAgentAria", { title })
+            : t("tasks.openAgentUnavailableAria", { title, reason: stateTitle ?? t("tasks.unhostedChip") })
+        }
         title={openable ? t("tasks.openAgent") : (stateTitle ?? t("tasks.openAgent"))}
         hoverClass="hover:bg-black/5 hover:text-accent"
         disabled={!openable}
@@ -221,7 +239,11 @@ function SourceChip({ task, file, onOpen }: { task: BoardTask; file: FileEntry |
           the current list. */}
       <ChipAction
         icon={<Crosshair className="h-3 w-3" aria-hidden />}
-        ariaLabel={t("tasks.openSourceAria", { title })}
+        ariaLabel={
+          file
+            ? t("tasks.openSourceAria", { title })
+            : t("tasks.openSourceUnavailableAria", { title, reason: t("tasks.sourceGone") })
+        }
         title={file ? t("tasks.openSource") : t("tasks.sourceGone")}
         hoverClass="hover:bg-black/5 hover:text-accent"
         disabled={!file}
@@ -376,7 +398,40 @@ export const TaskCard = memo(function TaskCard({
   const tone = TASK_TONES[task.status];
   const title = taskTitle(task.text) || t("tasks.untitled");
   const rest = task.text.includes("\n") ? task.text.slice(task.text.indexOf("\n") + 1) : "";
-  const expandable = taskCardExpandable(task);
+
+  /* Disclosure truth (issue #292 fresh review): the wrap-model estimate is a
+     deliberate *upper bound* for geometry, so a short card can be estimated
+     expandable while its text actually fits the clamps — showing a phantom
+     Expand control that reveals nothing. Once the browser lays the clamped
+     title/preview out, the real clamp state (scrollHeight vs clientHeight)
+     is authoritative; the estimate only covers the first pre-layout render
+     and environments with no layout engine (SSR, emulated test DOMs, which
+     report zero heights). */
+  const titleMeasureRef = useRef<HTMLDivElement | null>(null);
+  const restMeasureRef = useRef<HTMLDivElement | null>(null);
+  const [measuredClipped, setMeasuredClipped] = useState<boolean | null>(null);
+  useLayoutEffect(() => {
+    /* Only the compact, non-editing card renders the clamps being measured;
+       an expanded or editing card keeps the last trustworthy measurement. */
+    if (expanded || editing) return;
+    const measure = () => {
+      const els = [titleMeasureRef.current, restMeasureRef.current].filter((el): el is HTMLDivElement => el !== null);
+      if (!els.some((el) => el.clientHeight > 0)) return; // no real layout — the estimate stays authoritative
+      setMeasuredClipped(els.some((el) => el.scrollHeight - el.clientHeight > 1));
+    };
+    measure();
+    /* A late font swap can rewrap the text; re-measure once fonts settle. */
+    let stale = false;
+    void document.fonts?.ready.then(() => {
+      if (!stale) measure();
+    });
+    return () => {
+      stale = true;
+    };
+  }, [task.text, expanded, editing]);
+  /* An expanded card always owns its collapse control; a compact card
+     discloses only when text is actually hidden. */
+  const expandable = expanded || (measuredClipped ?? taskCardExpandable(task));
   /* Compact presentation is hiding text: fade the clamped preview out so the
      cut reads as «more below» and the Expand control announces where it is. */
   const clipped = !expanded && expandable;
@@ -457,6 +512,7 @@ export const TaskCard = memo(function TaskCard({
             style={clipped ? { maskImage: PREVIEW_FADE_MASK, WebkitMaskImage: PREVIEW_FADE_MASK } : undefined}
           >
             <div
+              ref={titleMeasureRef}
               className={`whitespace-pre-wrap break-words text-[12.5px] font-semibold leading-[17px] tracking-[-0.006em] text-primary ${
                 expanded ? "" : TITLE_CLAMP_CLASS
               }`}
@@ -464,7 +520,10 @@ export const TaskCard = memo(function TaskCard({
               {title}
             </div>
             {rest.trim() ? (
-              <div className={`whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary ${expanded ? "" : PREVIEW_CLAMP_CLASS}`}>
+              <div
+                ref={restMeasureRef}
+                className={`whitespace-pre-wrap break-words text-[12.5px] leading-[17px] text-secondary ${expanded ? "" : PREVIEW_CLAMP_CLASS}`}
+              >
                 {rest}
               </div>
             ) : null}
@@ -475,7 +534,12 @@ export const TaskCard = memo(function TaskCard({
             <SourceChip task={task} file={task.source ? (byPath.get(task.source.path) ?? null) : null} onOpen={handlers.openAgent} />
             {task.assignments.map((assignment, index) => (
               <AssignmentChip
-                key={assignment.conversationId ?? assignment.path ?? (assignment.panePid != null ? `pane:${assignment.panePid}` : `index:${index}`)}
+                key={
+                  assignment.launchId ??
+                  assignment.conversationId ??
+                  assignment.path ??
+                  (assignment.panePid != null ? `pane:${assignment.panePid}` : `index:${index}`)
+                }
                 task={task}
                 assignment={assignment}
                 file={resolveAgent(assignment)}

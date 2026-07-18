@@ -187,9 +187,18 @@ test("the source chip opens the originating conversation and disables truthfully
   expect(live.calls.opened.map((entry) => entry.path)).toEqual(["/origin.jsonl"]);
 
   const gone = render(sourced, { files: [] });
-  const disabled = gone.host.querySelector("[data-task-open-source]") as HTMLButtonElement;
-  expect(disabled.disabled).toBe(true);
-  expect(disabled.title).toBe("the source conversation is not on the board");
+  const unavailable = gone.host.querySelector("[data-task-open-source]") as HTMLButtonElement;
+  /* Truthful accessibility (issue #292 fresh review): the control stays in the
+     tab order and announces *why* it can't open, instead of vanishing from
+     keyboard and screen-reader reach behind a native `disabled`. */
+  expect(unavailable.disabled).toBe(false);
+  expect(unavailable.getAttribute("aria-disabled")).toBe("true");
+  expect(unavailable.getAttribute("aria-label")).toBe(
+    "Open source conversation origin.jsonl — unavailable: the source conversation is not on the board",
+  );
+  expect(unavailable.title).toBe("the source conversation is not on the board");
+  unavailable.click();
+  expect(gone.calls.opened).toEqual([]);
 });
 
 test("text disclosure and fold-to-stack remain separate actions", () => {
@@ -229,10 +238,83 @@ test("failed and unavailable assignments show truthful controls and remain detac
   const { host, calls } = render(item, { files: [killed] });
   expect(host.querySelectorAll(".animate-spin")).toHaveLength(1);
   const openControls = [...host.querySelectorAll("[data-task-open-agent]")] as HTMLButtonElement[];
-  expect(openControls.every((control) => control.disabled)).toBe(true);
+  /* Unavailable controls stay keyboard-reachable, announce their reason, and
+     remain inert on activation (issue #292 fresh review). */
+  expect(openControls.every((control) => !control.disabled)).toBe(true);
+  expect(openControls.every((control) => control.getAttribute("aria-disabled") === "true")).toBe(true);
   expect(openControls.some((control) => control.title.includes("killed"))).toBe(true);
+  expect(
+    openControls.some((control) => control.getAttribute("aria-label")?.includes("unavailable: the agent process was killed")),
+  ).toBe(true);
+  for (const control of openControls) control.click();
+  expect(calls.opened).toEqual([]);
   const detach = [...host.querySelectorAll('button[title="detach"]')] as HTMLButtonElement[];
   expect(detach).toHaveLength(3);
   detach[0]!.click();
-  expect(calls.detached[0]).toEqual({ path: null, conversationId: "failed-conversation", panePid: 77 });
+  expect(calls.detached[0]).toEqual({ launchId: null, path: null, conversationId: "failed-conversation", panePid: 77 });
+});
+
+test("a pathless spawning assignment keeps a stable launch handle for detach", () => {
+  const item = boardTask({
+    id: "task",
+    assignments: [
+      { launchId: "launch-9", path: null, conversationId: null, panePid: null, state: "spawning", error: null, at: "now" },
+    ],
+  });
+  const { host, calls } = render(item);
+  const detach = host.querySelector('button[title="detach"]') as HTMLButtonElement;
+  detach.click();
+  expect(calls.detached[0]).toEqual({ launchId: "launch-9", path: null, conversationId: null, panePid: null });
+});
+
+/* Emulate a real layout engine on top of happy-dom (which reports zero heights,
+   the signal TaskCard treats as «no layout — keep the estimate»): fixed
+   client/scroll heights stand in for the browser's clamp measurement. */
+function withLayoutMetrics(metrics: { clientHeight: number; scrollHeight: number }, run: () => void) {
+  const proto = dom.HTMLElement.prototype as unknown as Record<string, unknown>;
+  const originals = {
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+    scrollHeight: Object.getOwnPropertyDescriptor(proto, "scrollHeight"),
+  };
+  Object.defineProperty(proto, "clientHeight", { configurable: true, get: () => metrics.clientHeight });
+  Object.defineProperty(proto, "scrollHeight", { configurable: true, get: () => metrics.scrollHeight });
+  try {
+    run();
+  } finally {
+    for (const [key, descriptor] of Object.entries(originals)) {
+      if (descriptor) Object.defineProperty(proto, key, descriptor);
+      else delete proto[key];
+    }
+  }
+}
+
+/* 40 wide glyphs: the conservative wrap model (13px per glyph) estimates three
+   title rows — past the two-row clamp — while a real proportional font fits the
+   clamp. The card must trust the browser's clamp state, not the estimate. */
+const OVERESTIMATED_TEXT = "W".repeat(40);
+
+test("real layout measuring unclipped suppresses the phantom disclosure and fade", () => {
+  /* Without layout (zero heights) the estimate stays authoritative… */
+  const fallback = render(boardTask({ id: "estimated", text: OVERESTIMATED_TEXT }));
+  expect(fallback.host.querySelector("[data-task-disclosure]")).toBeTruthy();
+
+  /* …but once the DOM reports the clamped elements as not truncated, the
+     Expand control and the fade both disappear — no phantom expansion. */
+  withLayoutMetrics({ clientHeight: 34, scrollHeight: 34 }, () => {
+    const { host } = render(boardTask({ id: "short-real", text: OVERESTIMATED_TEXT }));
+    expect(host.querySelector("[data-task-disclosure]")).toBeNull();
+    const body = host.querySelector("[data-task-body]") as HTMLElement;
+    expect(body.hasAttribute("data-task-clipped")).toBe(false);
+    expect(body.style.maskImage || "").toBe("");
+  });
+});
+
+test("real clamp overflow keeps the disclosure and fade truthful", () => {
+  withLayoutMetrics({ clientHeight: 34, scrollHeight: 120 }, () => {
+    const { host } = render(boardTask({ id: "clipped-real", text: OVERESTIMATED_TEXT }));
+    expect(host.querySelector("[data-task-disclosure]")).toBeTruthy();
+    const body = host.querySelector("[data-task-body]") as HTMLElement;
+    expect(body.hasAttribute("data-task-clipped")).toBe(true);
+    expect(body.style.maskImage).toContain("linear-gradient");
+  });
 });

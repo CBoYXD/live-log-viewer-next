@@ -11,5 +11,5 @@ test("DELETE rejects a body without a stable assignment handle", async () => {
   });
   const response = await DELETE(request, { params: Promise.resolve({ id: "task-1" }) });
   expect(response.status).toBe(400);
-  expect(await response.json()).toEqual({ error: "path, conversationId or panePid is required" });
+  expect(await response.json()).toEqual({ error: "launchId, path, conversationId or panePid is required" });
 });

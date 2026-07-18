@@ -280,14 +280,24 @@ export interface TaskEdgeGeom {
 
 /**
  * Edge geometry from every task card to each resolvable assignment target.
- * Spawning assignments without a transcript and dead assignments (path
- * absent from the index) draw no edge — they stay chips on the card.
+ * An assignment resolves through its durable conversation id first — the
+ * transcript may have migrated to a newer path since the assignment was
+ * recorded, and the edge must land on the *current* generation, not the stale
+ * `assignment.path` (issue #292 fresh review) — falling back to the recorded
+ * path when the conversation is not in `files`. Spawning assignments without
+ * any resolvable transcript and dead assignments (resolved path absent from
+ * the index) draw no edge — they stay chips on the card.
  */
 export function buildTaskEdges(
   tasks: readonly PlacedTask[],
   index: ReadonlyMap<string, SchemeRect>,
   expandedIds?: ReadonlySet<string>,
+  files: ReadonlyArray<Pick<FileEntry, "path" | "conversationId">> = [],
 ): TaskEdgeGeom[] {
+  const pathByConversationId = new Map<string, string>();
+  for (const file of files) {
+    if (file.conversationId) pathByConversationId.set(file.conversationId, file.path);
+  }
   const edges: TaskEdgeGeom[] = [];
   for (const task of tasks) {
     const card = taskRect(task, expandedIds?.has(task.id) ?? false);
@@ -312,17 +322,25 @@ export function buildTaskEdges(
         });
       }
     }
+    /* One edge per resolved transcript: a migration can collapse a stale-path
+       assignment and a current one onto the same conversation, and duplicate
+       keys must never reach the render layer. */
+    const seenPaths = new Set<string>();
     for (const assignment of task.assignments) {
-      if (!assignment.path) continue;
-      const target = index.get(assignment.path);
+      const path =
+        (assignment.conversationId ? pathByConversationId.get(assignment.conversationId) : undefined) ??
+        assignment.path;
+      if (!path || seenPaths.has(path)) continue;
+      const target = index.get(path);
       if (!target) continue;
+      seenPaths.add(path);
       const from = rectAnchor(card, rectCenter(target));
       const to = rectAnchor(target, cardCenter);
       edges.push({
-        key: task.id + "::" + assignment.path,
+        key: task.id + "::" + path,
         taskId: task.id,
         relation: "assignment",
-        path: assignment.path,
+        path,
         x1: from.x,
         y1: from.y,
         x2: to.x,

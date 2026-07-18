@@ -562,6 +562,53 @@ describe("buildTaskEdges", () => {
     expect(edges[0]!.failed).toBe(false);
   });
 
+  test("a migrated conversation resolves its edge through the current identity, not the stale path", () => {
+    /* The assignment recorded «/retired», but the conversation has since moved
+       to «/node» (issue #292 fresh review): the edge must land on the current
+       generation — the retry handle included — not vanish with the old path. */
+    const edges = buildTaskEdges(
+      [
+        task({
+          id: "t5",
+          pos: { x: 0, y: 300 },
+          assignments: [assignment({ path: "/retired", conversationId: "conversation-live" })],
+        }),
+      ],
+      index,
+      undefined,
+      [{ path: "/node", conversationId: "conversation-live" }],
+    );
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.key).toBe("t5::/node");
+    expect(edges[0]!.path).toBe("/node");
+  });
+
+  test("an unknown conversation keeps the recorded-path fallback and a migration collapse dedupes to one edge", () => {
+    const fallback = buildTaskEdges(
+      [task({ id: "t6", assignments: [assignment({ path: "/node", conversationId: "conversation-unknown" })] })],
+      index,
+      undefined,
+      [{ path: "/other", conversationId: "conversation-other" }],
+    );
+    expect(fallback.map((edge) => edge.path)).toEqual(["/node"]);
+
+    const collapsed = buildTaskEdges(
+      [
+        task({
+          id: "t7",
+          assignments: [
+            assignment({ path: "/stale", conversationId: "conversation-live" }),
+            assignment({ path: "/node" }),
+          ],
+        }),
+      ],
+      index,
+      undefined,
+      [{ path: "/node", conversationId: "conversation-live" }],
+    );
+    expect(collapsed.map((edge) => edge.key)).toEqual(["t7::/node"]);
+  });
+
   test("anchors a downward edge on the expanded card boundary", () => {
     const long = task({
       id: "expanded-edge",

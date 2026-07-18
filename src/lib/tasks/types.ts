@@ -24,9 +24,11 @@ export interface TaskAssignment {
 }
 
 /** Stable assignment identity used when transcript attribution is incomplete or
- * a conversation has moved to a newer path. Matching uses conversation id,
- * path, and pane pid in that order. */
+ * a conversation has moved to a newer path. Matching uses launch id,
+ * conversation id, path, and pane pid in that order — the launch id exists from
+ * the moment of spawn, so a pathless spawning assignment is always reachable. */
 export interface AssignmentRef {
+  launchId?: string | null;
   path?: string | null;
   conversationId?: string | null;
   panePid?: number | null;

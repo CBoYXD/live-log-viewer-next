@@ -197,6 +197,50 @@ describe("stable assignment detach", () => {
     expect(assignmentRefFromBody({ path: " ", conversationId: "", panePid: Number.NaN })).toBeNull();
     expect(assignmentRefFromBody([])).toBeNull();
   });
+
+  test("request-body parsing accepts a launch id alone", () => {
+    expect(assignmentRefFromBody({ launchId: " launch-9 " })).toEqual({ launchId: "launch-9" });
+    expect(assignmentRefFromBody({ launchId: "  " })).toBeNull();
+  });
+
+  test("a pathless spawning assignment detaches through its launch id", () => {
+    /* No path, no conversation id, no pane pid: the launch id minted at spawn
+       time is the only handle this assignment ever had (issue #292 fresh
+       review) — without it the chip's detach control matched nothing. */
+    const spawning = task({
+      assignments: [
+        { launchId: "launch-9", path: null, conversationId: null, panePid: null, state: "spawning", error: null, at: "old" },
+        { path: "/current.jsonl", conversationId: "conversation-a", panePid: 11, state: "delivered", error: null, at: "old" },
+      ],
+    });
+    const result = removeAssignment(
+      [spawning],
+      "task-1",
+      { launchId: "launch-9", path: null, conversationId: null, panePid: null },
+      "now",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.path)).toEqual(["/current.jsonl"]);
+  });
+
+  test("launch identity outranks every other handle", () => {
+    const twins = task({
+      assignments: [
+        { launchId: "launch-a", path: "/shared.jsonl", conversationId: "conversation-a", panePid: 11, state: "delivered", error: null, at: "old" },
+        { launchId: "launch-b", path: "/shared.jsonl", conversationId: "conversation-a", panePid: 11, state: "spawning", error: null, at: "old" },
+      ],
+    });
+    const result = removeAssignment(
+      [twins],
+      "task-1",
+      { launchId: "launch-b", path: "/shared.jsonl", conversationId: "conversation-a", panePid: 11 },
+      "now",
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error);
+    expect(result.task.assignments.map((item) => item.launchId)).toEqual(["launch-a"]);
+  });
 });
 
 describe("task command helpers", () => {

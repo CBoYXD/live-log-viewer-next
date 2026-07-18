@@ -61,7 +61,7 @@ export async function DELETE(req: NextRequest, ctx: TaskRouteContext): Promise<N
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
   const ref = assignmentRefFromBody(body);
-  if (!ref) return NextResponse.json({ error: "path, conversationId or panePid is required" }, { status: 400 });
+  if (!ref) return NextResponse.json({ error: "launchId, path, conversationId or panePid is required" }, { status: 400 });
 
   const { id } = await ctx.params;
   const result = mutateTasks((tasks) => {

@@ -292,8 +292,9 @@ export function deleteTask(existing: BoardTask[], id: string): { ok: true; tasks
 /** Parse a usable assignment handle from the DELETE request body. */
 export function assignmentRefFromBody(body: unknown): AssignmentRef | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  const record = body as { path?: unknown; conversationId?: unknown; panePid?: unknown };
+  const record = body as { launchId?: unknown; path?: unknown; conversationId?: unknown; panePid?: unknown };
   const ref: AssignmentRef = {};
+  if (typeof record.launchId === "string" && record.launchId.trim()) ref.launchId = record.launchId.trim();
   if (typeof record.path === "string" && record.path.trim()) ref.path = record.path.trim();
   if (typeof record.conversationId === "string" && record.conversationId.trim()) {
     ref.conversationId = record.conversationId.trim();
@@ -301,10 +302,14 @@ export function assignmentRefFromBody(body: unknown): AssignmentRef | null {
   if (typeof record.panePid === "number" && Number.isInteger(record.panePid) && record.panePid > 0) {
     ref.panePid = record.panePid;
   }
-  return ref.conversationId != null || ref.path != null || ref.panePid != null ? ref : null;
+  return ref.launchId != null || ref.conversationId != null || ref.path != null || ref.panePid != null ? ref : null;
 }
 
 function assignmentMatchesRef(assignment: TaskAssignment, ref: AssignmentRef): boolean {
+  /* The launch id predates any transcript path or conversation attribution, so
+     it outranks the other handles — a pathless spawning assignment (no path,
+     no conversation id, no pane) is only reachable through it. */
+  if (ref.launchId != null) return assignment.launchId === ref.launchId;
   if (ref.conversationId != null) return assignment.conversationId === ref.conversationId;
   if (ref.path != null) return assignment.path === ref.path;
   if (ref.panePid != null) return assignment.panePid === ref.panePid;

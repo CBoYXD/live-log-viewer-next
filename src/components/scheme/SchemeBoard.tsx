@@ -559,8 +559,8 @@ export function SchemeBoard({
   );
   const taskTargetIndex = useMemo(() => buildTaskTargetIndex(layout, flows, files), [layout, flows, files]);
   const taskEdges = useMemo(
-    () => buildTaskEdges(placedTasks, taskTargetIndex, textExpandedIds),
-    [placedTasks, taskTargetIndex, textExpandedIds],
+    () => buildTaskEdges(placedTasks, taskTargetIndex, textExpandedIds, files),
+    [placedTasks, taskTargetIndex, textExpandedIds, files],
   );
   /* Card rects the edge router steers around, each tagged with its task so an
      edge is never counted as crossing the card it leaves from (issue #17). */
