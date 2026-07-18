@@ -1,8 +1,9 @@
+import { conversationLookupFromSnapshot, type RegistryFile } from "@/lib/agent/registry";
 import type { FileEntry } from "@/lib/types";
 
 import { compactText } from "./compactText";
 import { freshness, listPresence, sessionSummary } from "./presenceStore";
-import { MAX_RESPONSE_BYTES, MAX_SCOPE_PATHS, MAX_TEXT_BYTES, type SnapshotConversation, type SnapshotRequestV1, type StoredViewSession, type ViewerSnapshotV1, type ViewScopeKind, type ViewSessionSummary } from "./types";
+import { MAX_RESPONSE_BYTES, MAX_SCOPE_PATHS, MAX_TEXT_BYTES, type SnapshotConversation, type SnapshotRequestV1, type SnapshotSpawnStub, type StoredViewSession, type ViewerSnapshotV1, type ViewScopeKind, type ViewSessionSummary } from "./types";
 
 type SnapshotErrorCode = "NO_ACTIVE_VIEW" | "VIEW_SESSION_NOT_FOUND" | "AMBIGUOUS_ACTIVE_VIEW" | "PATH_OUTSIDE_CURRENT_VIEW" | "INTERNAL_ERROR";
 export class SnapshotError extends Error {
@@ -62,7 +63,7 @@ function conversation(entry: FileEntry): SnapshotConversation {
   return { path: entry.path, project: entry.project, title: entry.title, engine: entry.engine as "claude" | "codex", model: entry.model, activity: entry.activity, proc: entry.proc, attention };
 }
 
-export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; siblings: ViewerSnapshotV1["siblings"]; now?: number }): Promise<ViewerSnapshotV1> {
+export async function composeSnapshot(input: { request: SnapshotRequestV1; files: FileEntry[]; scannerDurationMs: number; siblings: ViewerSnapshotV1["siblings"]; registry?: RegistryFile; now?: number }): Promise<ViewerSnapshotV1> {
   const now = input.now ?? Date.now();
   const selection = choose(input.request, now);
   const session = selection.session;
@@ -70,12 +71,55 @@ export async function composeSnapshot(input: { request: SnapshotRequestV1; files
   const requestedPaths = input.request.scope?.kind === "paths" ? input.request.scope.paths ?? [] : [];
   validateExplicitMembership(session, requestedPaths);
   const scope = scopedPaths(session, input.request.scope);
-  const returnedPaths = scope.all.filter((pathname) => transcriptEntry(byPath, pathname)).slice(0, MAX_SCOPE_PATHS);
-  let textRemaining = MAX_TEXT_BYTES;
-  const conversations = returnedPaths.map((pathname) => {
+  /* `spawn:<launchId>` scope paths are registry evidence, not transcripts
+     (#342): resolve each to its materialized conversation when the scan has
+     it, otherwise report a typed stub with the durable launch state. Silent
+     omission is reserved for genuinely unknown paths and budget truncation. */
+  const lookup = input.registry ? conversationLookupFromSnapshot(input.registry) : null;
+  const stubs: SnapshotSpawnStub[] = [];
+  const resolvedEntries: Array<{ entry: FileEntry; resolvedFrom?: string }> = [];
+  const seenPaths = new Set<string>();
+  for (const pathname of scope.all) {
+    if (resolvedEntries.length + stubs.length >= MAX_SCOPE_PATHS) break;
+    const launchId = pathname.startsWith("spawn:") ? pathname.slice("spawn:".length) : null;
+    const receipt = launchId && input.registry ? input.registry.receipts[launchId] : undefined;
+    if (receipt) {
+      const materializedPath = lookup?.conversation(receipt.conversationId)?.generations.at(-1)?.path
+        ?? receipt.artifactPath;
+      const entry = materializedPath ? transcriptEntry(byPath, materializedPath) : undefined;
+      if (entry) {
+        if (!seenPaths.has(entry.path)) {
+          seenPaths.add(entry.path);
+          resolvedEntries.push({ entry, resolvedFrom: pathname });
+        }
+        continue;
+      }
+      stubs.push({
+        path: pathname,
+        kind: "spawn-stub",
+        launch: {
+          launchId: receipt.launchId,
+          state: receipt.state,
+          error: receipt.error,
+          retrySafe: receipt.state === "failed",
+          engine: receipt.engine,
+          cwd: receipt.cwd,
+          createdAt: receipt.createdAt,
+        },
+      });
+      continue;
+    }
     const entry = transcriptEntry(byPath, pathname);
-    if (!entry) throw new SnapshotError("INTERNAL_ERROR", 500, "snapshot membership changed during composition");
+    if (entry && !seenPaths.has(entry.path)) {
+      seenPaths.add(entry.path);
+      resolvedEntries.push({ entry });
+    }
+  }
+  const returnedPaths = resolvedEntries.map(({ entry }) => entry.path);
+  let textRemaining = MAX_TEXT_BYTES;
+  const conversations = resolvedEntries.map(({ entry, resolvedFrom }) => {
     const card = conversation(entry);
+    if (resolvedFrom) card.resolvedFrom = resolvedFrom;
     if (input.request.text?.include !== false) {
       const text = compactText(entry, input.request.text?.lastMessages ?? 6, input.request.text?.maxCharsPerConversation ?? 3000, textRemaining);
       textRemaining -= text.messages.reduce((total, message) => total + Buffer.byteLength(message.text, "utf8"), 0);
@@ -83,13 +127,13 @@ export async function composeSnapshot(input: { request: SnapshotRequestV1; files
     }
     return card;
   });
-  const omittedCount = scope.all.length - returnedPaths.length;
+  const omittedCount = scope.all.length - returnedPaths.length - stubs.length;
   const snapshot: ViewerSnapshotV1 = {
     ok: true, schemaVersion: 1, capability: "viewer.snapshot", generatedAt: new Date(now).toISOString(),
     resolution: { by: selection.by, ambiguous: selection.ambiguous, alternatives: selection.alternatives.map((item) => sessionSummary(item, now)) },
     view: { viewSessionId: session.viewSessionId, deviceId: session.deviceId, device: session.device, visibility: session.visibility, freshness: freshness(session, now), presenceAgeMs: Math.max(0, now - session.lastSeenAt), project: session.project, mode: session.mode, viewport: session.viewport, camera: session.camera, focusedPath: session.focusedPath, selectedPaths: session.selectedPaths, visiblePaths: session.visiblePaths, board: session.board },
     scope: { kind: scope.kind, totalPaths: scope.all.length, returnedPaths, truncated: omittedCount > 0, omittedCount },
-    conversations, siblings: input.siblings,
+    conversations, stubs, siblings: input.siblings,
     scanner: { scannedAt: new Date(now).toISOString(), ageMs: 0, durationMs: input.scannerDurationMs, entryCount: input.files.length },
   };
   if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > MAX_RESPONSE_BYTES) throw new SnapshotError("INTERNAL_ERROR", 500, "snapshot response limit exceeded");

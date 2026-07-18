@@ -7,7 +7,7 @@ import { matchesOperatorSpawnCapability, OperatorSpawnCapabilityError } from "@/
 import { VIEWER_SPAWN_CAPABILITY_HEADER, VIEWER_SPAWN_ENDPOINT } from "@/lib/agent/spawnPolicy";
 
 export const AGENT_SPAWN_LIVE_CHILD_CAP = 3;
-export const AGENT_SPAWN_LINEAGE_ERROR = `Agent-initiated spawns require src (the caller transcript path) and role; reviewer spawns also require reviews (the implementer conversation or transcript). POST ${VIEWER_SPAWN_ENDPOINT} with {engine, model, cwd, prompt, src, role, reviews?}.`;
+export const AGENT_SPAWN_LINEAGE_ERROR = `Agent-initiated spawns require role; reviewer spawns also require reviews (the implementer conversation or transcript). The parent is inferred from the authenticated caller conversation; src stays optional verification. POST ${VIEWER_SPAWN_ENDPOINT} with {engine, model, cwd, prompt, role, src?, reviews?}.`;
 
 export type AuthenticatedSpawnCaller =
   | { kind: "agent"; conversationId: ViewerConversationId; liveChildrenCap: number }
@@ -46,12 +46,16 @@ export function isAgentInitiatedSpawn(req: Pick<NextRequest, "headers">): boolea
   }
 }
 
+/** Lineage no longer gates admission on `src` (#341): the durable parent is
+    inferred from the authenticated caller conversation, so agent-initiated
+    requests only need their admission identity (`role`, plus `reviews` for
+    reviewers). A present `src` stays verified against the caller. */
 export function agentSpawnLineageError(
   req: Pick<NextRequest, "headers">,
   body: { src?: unknown; role?: unknown; reviews?: unknown },
 ): string | null {
   if (!isAgentInitiatedSpawn(req)) return null;
-  if (typeof body.src !== "string" || !body.src.trim()) return AGENT_SPAWN_LINEAGE_ERROR;
+  if (body.src !== undefined && (typeof body.src !== "string" || !body.src.trim())) return AGENT_SPAWN_LINEAGE_ERROR;
   if (typeof body.role !== "string" || !body.role.trim()) return AGENT_SPAWN_LINEAGE_ERROR;
   if (body.role.trim() === "reviewer" && (typeof body.reviews !== "string" || !body.reviews.trim())) {
     return AGENT_SPAWN_LINEAGE_ERROR;
@@ -70,9 +74,14 @@ export function authenticatedAgentSpawnCaller(
     : "";
   const conversationId = registry.conversationIdForSpawnCapabilityDigest(digest);
   if (conversationId) {
-    const source = typeof src === "string" ? registry.conversationForPath(src.trim()) : null;
-    if (!source || source.id !== conversationId) {
-      return { error: "src must identify the authenticated caller conversation" };
+    /* `src` became optional for capability callers (#341): the authenticated
+       conversation is the parent either way. When present it must still
+       resolve to the caller, so a spoofed selector keeps its rejection. */
+    if (src !== undefined && src !== null) {
+      const source = typeof src === "string" ? registry.conversationForPath(src.trim()) : null;
+      if (!source || source.id !== conversationId) {
+        return { error: "src must identify the authenticated caller conversation" };
+      }
     }
     return { kind: "agent", conversationId, liveChildrenCap: AGENT_SPAWN_LIVE_CHILD_CAP };
   }

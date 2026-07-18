@@ -274,7 +274,9 @@ test("another generation's newer observation cannot materialize a pending launch
 
     const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
     expect(restarted.snapshot().receipts[begun.receipt.launchId]?.artifactLifecycle).toBe("pending");
-    expect(preallocatedStructuredSpawnCards([], restarted.snapshot())).toHaveLength(1);
+    /* Pinned inside the 24 h retirement window (#342): scan-lag protection is
+       about the recent horizon; an aged terminal receipt retires instead. */
+    expect(preallocatedStructuredSpawnCards([], restarted.snapshot(), Date.parse("2026-07-17T12:00:00.000Z"))).toHaveLength(1);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -524,6 +526,125 @@ test("a rejected launch projects a terminal failed card with zero conversation a
     const childCard = preallocatedStructuredSpawnCards([], registry.snapshot())
       .find((card) => card.path === `spawn:${childBegun.receipt.launchId}`)!;
     expect(childCard.durableLineage).toMatchObject({ role: "builder", depth: 0 });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("terminal receipts age through history and retire at the 24h bound; non-terminal receipts always project (#342)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-retire-"));
+  const filename = path.join(directory, "agent-registry.json");
+  try {
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const failed = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      transport: "structured",
+      accountId: "work",
+      clientAttemptId: "retire_failed_20260719_a1",
+      requestDigest: "a".repeat(64),
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    });
+    if (failed.kind !== "created") throw new Error("expected structured launch creation");
+    registry.failStructuredSpawn(failed.receipt.launchId, "structured spawn interrupted");
+    const pending = registry.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      transport: "structured",
+      accountId: "work",
+      clientAttemptId: "retire_pending_20260719_a1",
+      requestDigest: "b".repeat(64),
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    });
+    if (pending.kind !== "created") throw new Error("expected structured launch creation");
+    const createdMs = Date.parse(failed.receipt.createdAt);
+
+    const at23h = preallocatedStructuredSpawnCards([], registry.snapshot(), createdMs + 23 * 60 * 60 * 1_000);
+    const failedAt23h = at23h.find((card) => card.path === `spawn:${failed.receipt.launchId}`);
+    expect(failedAt23h).toMatchObject({ activity: "idle", activityReason: "structured_spawn_failed" });
+
+    const at25h = preallocatedStructuredSpawnCards([], registry.snapshot(), createdMs + 25 * 60 * 60 * 1_000);
+    expect(at25h.map((card) => card.path)).toEqual([`spawn:${pending.receipt.launchId}`]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the production placeholder baseline converges by projection alone with a loss-free inventory across restart (#342)", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "llv-spawn-projection-baseline-"));
+  const filename = path.join(directory, "agent-registry.json");
+  try {
+    const registry = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const parent = registry.ensureConversation("codex", path.join(directory, "parent-019f0000-0000-7000-8000-000000000342.jsonl"), "work");
+    const seed = (index: number, terminal: "completed" | "failed") => {
+      const begun = registry.beginSpawnRequest({
+        engine: "codex",
+        cwd: "/repo",
+        transport: "structured",
+        accountId: "work",
+        parentConversationId: parent.id,
+        clientAttemptId: `baseline_${terminal}_${String(index).padStart(3, "0")}`,
+        requestDigest: String(index % 10).repeat(64),
+        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+      });
+      if (begun.kind !== "created") throw new Error("expected structured launch creation");
+      if (terminal === "failed") {
+        registry.failStructuredSpawn(begun.receipt.launchId, "structured spawn interrupted before identity staging");
+      } else {
+        const sessionId = `019f7b8a-9f75-7dc0-b231-${String(100000000000 + index)}`;
+        registry.settleSpawn(begun.receipt.launchId, {
+          key: { engine: "codex", sessionId },
+          artifactPath: path.join(directory, `${sessionId}.jsonl`),
+          cwd: "/repo",
+          accountId: "work",
+          launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+          status: "unhosted",
+          host: null,
+          claimEpoch: 0,
+          claimOwner: null,
+          pendingAction: null,
+        });
+      }
+      return begun.receipt.launchId;
+    };
+    /* The production baseline: 107 recovered/completed + 73 failed terminal
+       receipts, all past the retirement bound, with none of their transcripts
+       scanned — 180 placeholders on the live board today. */
+    for (let index = 0; index < 107; index += 1) seed(index, "completed");
+    for (let index = 0; index < 73; index += 1) seed(1000 + index, "failed");
+
+    const before = registry.snapshot();
+    const inventory = (snapshot: typeof before) => ({
+      receipts: Object.keys(snapshot.receipts).length,
+      byState: Object.values(snapshot.receipts).reduce<Record<string, number>>((acc, receipt) => {
+        acc[receipt.state] = (acc[receipt.state] ?? 0) + 1;
+        return acc;
+      }, {}),
+      conversations: Object.keys(snapshot.conversations).length,
+      lineageEdges: Object.keys(snapshot.lineageEdges).length,
+    });
+    const beforeInventory = inventory(before);
+    expect(beforeInventory.receipts).toBe(180);
+    expect(beforeInventory.byState).toEqual({ completed: 107, failed: 73 });
+    expect(beforeInventory.lineageEdges).toBe(180);
+
+    const baselineNow = Date.now();
+    const withinWindow = preallocatedStructuredSpawnCards([], before, baselineNow);
+    expect(withinWindow).toHaveLength(180);
+
+    /* One day later — no registry write, no restart-as-cleanup: the whole
+       terminal baseline retires from the projection. */
+    const afterRetirement = baselineNow + 25 * 60 * 60 * 1_000;
+    expect(preallocatedStructuredSpawnCards([], before, afterRetirement)).toEqual([]);
+    /* Idempotent and byte-stable across repeated projections. */
+    expect(preallocatedStructuredSpawnCards([], before, afterRetirement)).toEqual([]);
+
+    /* Restart: a fresh load projects identically and loses nothing. */
+    const restarted = new AgentRegistry(filename, undefined, undefined, { sqliteMode: "off" });
+    const after = restarted.snapshot();
+    expect(inventory(after)).toEqual(beforeInventory);
+    expect(preallocatedStructuredSpawnCards([], after, afterRetirement)).toEqual([]);
+    expect(preallocatedStructuredSpawnCards([], after, baselineNow)).toHaveLength(180);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

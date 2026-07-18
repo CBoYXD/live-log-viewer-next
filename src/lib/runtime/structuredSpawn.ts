@@ -246,6 +246,75 @@ export async function reconcileStructuredSpawnReplay(
   };
 }
 
+/* Bounds for the reaper-cycle convergence pass (#334). The timeout is
+   deliberately wider than the replay POST's 30 s: a background pass has no
+   caller waiting and must never race a slow-but-healthy deferred launch. */
+export const STALE_STRUCTURED_SPAWN_TIMEOUT_MS = 5 * 60_000;
+export const STALE_STRUCTURED_SPAWN_ACTUATION_CAP = 50;
+
+function admissionOwnerAlive(owner: { pid: number; startIdentity: string | null } | null): boolean {
+  if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  return procBackend.pidAlive(owner.pid)
+    && (owner.startIdentity === null || procBackend.processIdentity(owner.pid) === owner.startIdentity);
+}
+
+/** Bounded, idempotent convergence for stale non-terminal structured launches
+    (#334): a receipt stuck `starting`/`path-pending` with no live admission
+    owner, no live registry host, and no live runtime evidence converges to the
+    durable terminal `failed` (retry-safe) state — or is recovered when strong
+    delivery evidence exists — through the exact guard set the replay POST
+    already encodes in `reconcileStructuredSpawnReplay`. Running the pass twice
+    is a no-op: terminal receipts are skipped and `failStructuredSpawn`
+    no-ops on terminal states. Held deliveries and receipts are never deleted. */
+export async function terminalizeStaleStructuredSpawns(
+  registry: AgentRegistry,
+  client: RuntimeHostClient,
+  options: {
+    now?: () => number;
+    timeoutMs?: number;
+    actuationCap?: number;
+    ownerAlive?: (owner: { pid: number; startIdentity: string | null }) => boolean;
+    reconcile?: typeof reconcileStructuredSpawnReplay;
+  } = {},
+): Promise<{ examined: number; terminalized: string[]; recovered: string[] }> {
+  const now = options.now ?? Date.now;
+  const timeoutMs = options.timeoutMs ?? STALE_STRUCTURED_SPAWN_TIMEOUT_MS;
+  const actuationCap = options.actuationCap ?? STALE_STRUCTURED_SPAWN_ACTUATION_CAP;
+  const ownerAlive = options.ownerAlive ?? admissionOwnerAlive;
+  const reconcile = options.reconcile ?? reconcileStructuredSpawnReplay;
+  const snapshot = registry.readOnlySnapshot();
+  const terminalized: string[] = [];
+  const recovered: string[] = [];
+  let examined = 0;
+  for (const receipt of Object.values(snapshot.receipts)) {
+    if (examined >= actuationCap) break;
+    if (receipt.transport !== "structured" || receipt.artifactLifecycle !== "pending") continue;
+    if (receipt.state === "completed" || receipt.state === "failed" || receipt.state === "conflicted") continue;
+    const createdMs = Date.parse(receipt.createdAt);
+    if (!Number.isFinite(createdMs) || now() - createdMs < timeoutMs) continue;
+    /* A live admission owner still owns its process-local deferred launch. */
+    if (receipt.admissionOwner && ownerAlive(receipt.admissionOwner)) continue;
+    /* A live registry host entry means the launch is progressing. */
+    if (receipt.key) {
+      const entry = snapshot.entries[sessionKeyId(receipt.key)];
+      if (entry && (entry.structuredHost?.process || entry.claimOwner
+        || (entry.status !== "dead" && entry.status !== "unhosted"))) continue;
+    }
+    examined += 1;
+    try {
+      const reconciled = await reconcile(receipt.launchId, registry, client, { now, timeoutMs });
+      if (reconciled.state === "failed") terminalized.push(receipt.launchId);
+      else if (reconciled.state === "completed") recovered.push(receipt.launchId);
+    } catch (error) {
+      console.error("[reaper] stale structured spawn reconciliation failed", {
+        launchId: receipt.launchId,
+        error,
+      });
+    }
+  }
+  return { examined, terminalized, recovered };
+}
+
 export interface StructuredSpawnInput {
   engine: AgentEngine;
   receipt: SpawnReceipt;

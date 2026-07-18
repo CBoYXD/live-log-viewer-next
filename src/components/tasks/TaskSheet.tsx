@@ -14,7 +14,7 @@ import { useLocale } from "@/lib/i18n";
 import type { BoardTask, TaskStatus } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
-import { createTask, deleteTask, sendTask, updateTask } from "./taskApi";
+import { createTask, deleteTask, retryTaskSpawn, sendTask, updateTask } from "./taskApi";
 import { TaskComposer } from "./TaskComposer";
 import { TASK_STATUS_CYCLE, TASK_TONES, taskTitle } from "./taskModel";
 import { TargetChecklist } from "./TargetChecklist";
@@ -256,7 +256,9 @@ function TaskDetailView({
               ? file
                 ? cleanTitle(file.title, 44)
                 : (assignment.path.split("/").pop() ?? assignment.path)
-              : t("tasks.spawning");
+              : failed
+                ? t("tasks.failedChip")
+                : t("tasks.spawning");
             return (
               <div
                 key={(assignment.path ?? "spawning") + index}
@@ -273,9 +275,10 @@ function TaskDetailView({
                 ) : null}
                 <span className="min-w-0 flex-1 truncate text-[11px] font-semibold">{title}</span>
                 {failed ? <span aria-hidden>⚠</span> : null}
-                {assignment.path && (failed || !file) ? (
+                {(assignment.path && (failed || !file)) || (failed && assignment.launchId) ? (
                   <button
                     type="button"
+                    data-task-sheet-retry
                     className="inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded px-2 text-[11px] font-bold text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40"
                     onClick={() => {
                       void (async () => {
@@ -284,6 +287,16 @@ function TaskDetailView({
                           return;
                         }
                         if ((await commitText()) !== null) return;
+                        /* A pathless failed assignment has no transcript to
+                           deliver into — relaunch from its durable launch
+                           identity instead (#334). */
+                        const retryLaunchId = assignment.launchId;
+                        if (failed && !assignment.path && retryLaunchId) {
+                          const relaunched = await retryTaskSpawn(task.id, retryLaunchId);
+                          if ("task" in relaunched) pushTaskToast("ok", t("tasks.retryLaunched"));
+                          else pushTaskToast("err", relaunched.error);
+                          return;
+                        }
                         const sent = await sendTask(task.id, [assignment.path!]);
                         if ("error" in sent) pushTaskToast("err", sent.error);
                         else {
@@ -293,7 +306,7 @@ function TaskDetailView({
                       })();
                     }}
                   >
-                    {t("tasks.retry")}
+                    {failed && !assignment.path ? t("tasks.retryLaunch") : t("tasks.retry")}
                   </button>
                 ) : null}
               </div>

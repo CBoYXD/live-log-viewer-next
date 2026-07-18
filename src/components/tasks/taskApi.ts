@@ -233,3 +233,14 @@ export async function spawnTaskAgent(id: string, input: SpawnAgentInput): Promis
   const res = await request<TaskSpawnResult>(`/api/tasks/${encodeURIComponent(id)}/spawn`, "POST", input);
   return res.ok ? res.data : { error: res.error };
 }
+
+/** Relaunches a failed assignment from its durable receipt shape (#334):
+    engine, directory, model, and pinned account replay server-side, so no
+    transcript path is needed. The server mints a fresh attempt id — a
+    terminal receipt is never replayed. Same stale-text guard as spawn. */
+export async function retryTaskSpawn(id: string, launchId: string): Promise<TaskSpawnResult | { error: string }> {
+  const textError = await pendingTextError(id);
+  if (textError) return { error: textError };
+  const res = await request<TaskSpawnResult>(`/api/tasks/${encodeURIComponent(id)}/spawn`, "POST", { retryOfLaunchId: launchId });
+  return res.ok ? res.data : { error: res.error };
+}

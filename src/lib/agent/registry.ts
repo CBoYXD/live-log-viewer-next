@@ -152,6 +152,10 @@ export interface SpawnReceipt {
   cwd: string;
   accountId: string | null;
   parentConversationId: ViewerConversationId | null;
+  /** How the durable parent was attributed (#341): an explicit selector in the
+      request body, or inference from the authenticated caller conversation.
+      Null for roots and for receipts persisted before attribution existed. */
+  parentSource: "explicit" | "inferred-caller" | null;
   createdAt: string;
   state: "starting" | "pane-bound" | "host-verified" | "prompt-delivered" | "path-pending" | "completed" | "failed" | "conflicted";
   artifactPath: string | null;
@@ -193,6 +197,8 @@ export interface SpawnLineageEdge {
   evidence: {
     launchId: string | null;
     clientAttemptId: string | null;
+    /** Parent attribution mirrored from the launch receipt (#341). */
+    parentSource?: "explicit" | "inferred-caller" | null;
   };
   createdAt: string;
 }
@@ -222,6 +228,9 @@ export interface SpawnRequest {
   spawnCapabilityDigest?: string | null;
   accountId?: string | null;
   parentConversationId?: ViewerConversationId | null;
+  /** Attribution of the resolved parent (#341): explicit request selector or
+      inference from the authenticated caller conversation. */
+  parentSource?: "explicit" | "inferred-caller" | null;
   parentSessionKey?: SessionKey | null;
   parentArtifactPath?: string | null;
   role?: string | null;
@@ -1679,6 +1688,7 @@ function normalizeReceipt(value: SpawnReceipt): SpawnReceipt {
     parentConversationId: typeof value.parentConversationId === "string" && value.parentConversationId.startsWith("conversation_")
       ? value.parentConversationId as ViewerConversationId
       : null,
+    parentSource: value.parentSource === "explicit" || value.parentSource === "inferred-caller" ? value.parentSource : null,
     state,
     artifactLifecycle: value.artifactLifecycle === "materialized" ? "materialized" : "pending",
     key: value.key && typeof value.key === "object" && (value.key.engine === "claude" || value.key.engine === "codex") && typeof value.key.sessionId === "string" ? value.key : null,
@@ -2707,6 +2717,10 @@ export class AgentRegistry {
         cwd: input.cwd,
         accountId: input.accountId ?? null,
         parentConversationId,
+        parentSource: parentConversationId
+          && (input.parentSource === "explicit" || input.parentSource === "inferred-caller")
+          ? input.parentSource
+          : null,
         createdAt,
         state: rejection ? "failed" : "starting",
         artifactPath: rejection ? null : input.expectedArtifactPath ?? null,
@@ -2758,7 +2772,7 @@ export class AgentRegistry {
             role,
             reviewsConversationId,
             source: "viewer-spawn",
-            evidence: { launchId: receipt.launchId, clientAttemptId: receipt.clientAttemptId },
+            evidence: { launchId: receipt.launchId, clientAttemptId: receipt.clientAttemptId, parentSource: receipt.parentSource },
             createdAt: receipt.createdAt,
           };
         }

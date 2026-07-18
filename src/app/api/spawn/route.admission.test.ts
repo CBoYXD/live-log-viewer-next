@@ -231,3 +231,89 @@ test("a non-reviewer agent caller keeps spawning normally", async () => {
     rejection: null,
   });
 });
+
+test("an agent capability caller without src spawns with an inferred durable parent (#341)", async () => {
+  const cwd = fs.mkdtempSync(path.join(sandbox, "inferred-parent-"));
+  const caller = seedCaller("builder");
+  const response = await POST.withDependencies(agentRequest(caller.capability, {
+    cwd,
+    prompt: "delegate without src",
+    role: "builder",
+    clientAttemptId: "inferred_parent_20260719_a1",
+  }), dependencies(cwd));
+
+  expect(response.status).toBe(202);
+  const body = await response.json() as { launchId: string; conversationId: string; parent: unknown };
+  expect(body.parent).toEqual({ conversationId: caller.conversationId, source: "inferred-caller" });
+
+  const snapshot = agentRegistry().snapshot();
+  expect(snapshot.receipts[body.launchId]).toMatchObject({
+    parentConversationId: caller.conversationId,
+    parentSource: "inferred-caller",
+  });
+  expect(snapshot.lineageEdges[body.conversationId]).toMatchObject({
+    childConversationId: body.conversationId,
+    parentConversationId: caller.conversationId,
+    evidence: { launchId: body.launchId, parentSource: "inferred-caller" },
+  });
+
+  /* A replay of the same gesture folds onto the same receipt with the same
+     inferred parent — the digest keys on the resolved parent selector. */
+  const replay = await POST.withDependencies(agentRequest(caller.capability, {
+    cwd,
+    prompt: "delegate without src",
+    role: "builder",
+    clientAttemptId: "inferred_parent_20260719_a1",
+  }), dependencies(cwd));
+  expect([200, 202]).toContain(replay.status);
+  expect(await replay.json()).toMatchObject({
+    launchId: body.launchId,
+    parent: { conversationId: caller.conversationId, source: "inferred-caller" },
+  });
+});
+
+test("an explicit src is recorded explicit and a mismatched src stays rejected (#341)", async () => {
+  const cwd = fs.mkdtempSync(path.join(sandbox, "explicit-parent-"));
+  const caller = seedCaller("builder");
+  const explicit = await POST.withDependencies(agentRequest(caller.capability, {
+    cwd,
+    prompt: "delegate with src",
+    src: caller.path,
+    role: "builder",
+  }), dependencies(cwd));
+  expect(explicit.status).toBe(202);
+  expect(await explicit.json()).toMatchObject({
+    parent: { conversationId: caller.conversationId, source: "explicit" },
+  });
+
+  const other = seedCaller("builder");
+  const mismatched = await POST.withDependencies(agentRequest(caller.capability, {
+    cwd,
+    prompt: "spoofed parent",
+    src: other.path,
+    role: "builder",
+  }), dependencies(cwd));
+  expect(mismatched.status).toBe(403);
+  expect(await mismatched.json()).toEqual({ error: "src must identify the authenticated caller conversation" });
+});
+
+test("an operator capability caller without src proceeds as a silent root (#341)", async () => {
+  const cwd = fs.mkdtempSync(path.join(sandbox, "operator-root-"));
+  const operator = rotateOperatorSpawnCapability();
+  const response = await POST.withDependencies(agentRequest(operator, {
+    cwd,
+    prompt: "pipeline launch without src",
+    role: "builder",
+  }), dependencies(cwd));
+
+  expect(response.status).toBe(202);
+  const body = await response.json() as { launchId: string; conversationId: string; parent: unknown };
+  expect(body.parent).toBeNull();
+
+  const snapshot = agentRegistry().snapshot();
+  expect(snapshot.receipts[body.launchId]).toMatchObject({
+    parentConversationId: null,
+    parentSource: null,
+  });
+  expect(snapshot.lineageEdges[body.conversationId]).toBeUndefined();
+});

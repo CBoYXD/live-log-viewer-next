@@ -169,33 +169,69 @@ async function postTaskSpawn(
   const rejection = rejectCrossOrigin(req);
   if (rejection) return rejection;
 
-  let body: { engine?: unknown; model?: unknown; cwd?: unknown; effort?: unknown; fast?: unknown; clientAttemptId?: unknown };
+  let body: { engine?: unknown; model?: unknown; cwd?: unknown; effort?: unknown; fast?: unknown; clientAttemptId?: unknown; retryOfLaunchId?: unknown };
   try {
     body = (await req.json()) as typeof body;
   } catch {
     return NextResponse.json({ error: "invalid JSON" }, { status: 400 });
   }
 
-  const engine = body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
-  if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
-  if (body.clientAttemptId !== undefined
-    && (typeof body.clientAttemptId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(body.clientAttemptId))) {
-    return NextResponse.json({ error: "clientAttemptId must be 8-128 URL-safe characters" }, { status: 400 });
+  /* Pathless retry seam (#334): `retryOfLaunchId` relaunches a failed
+     assignment from its durable receipt shape alone — no transcript path
+     needed. The gesture always mints a fresh attempt id through the
+     `nextTaskAttemptId` rotation, so the terminal receipt can never be
+     replayed while replay-within-gesture stays untouched. */
+  if (body.retryOfLaunchId !== undefined
+    && (typeof body.retryOfLaunchId !== "string" || !body.retryOfLaunchId.trim())) {
+    return NextResponse.json({ error: "retryOfLaunchId must name a launch id" }, { status: 400 });
   }
-
-  const reasoning = reasoningFromBody(engine, body);
-  if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
-  const selectedModel = modelFromBody(body);
-  if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
-  const cwdResult = cwdFromBody(body.cwd);
-  if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "invalid working directory" }, { status: cwdResult.status ?? 400 });
+  if (body.retryOfLaunchId !== undefined && body.clientAttemptId !== undefined) {
+    return NextResponse.json({ error: "retryOfLaunchId mints a fresh attempt id; omit clientAttemptId" }, { status: 400 });
+  }
 
   const { id } = await ctx.params;
   const task = dependencies.loadTasks().find((item) => item.id === id);
   if (!task) return NextResponse.json({ error: "task not found" }, { status: 404 });
 
   const registry = dependencies.registry();
-  const previous = pinnedAccountId(task.assignments, engine);
+  let retryOf: SpawnReceipt | null = null;
+  if (typeof body.retryOfLaunchId === "string") {
+    const launchId = body.retryOfLaunchId.trim();
+    const receipt = registry.snapshot().receipts[launchId] ?? null;
+    const assignment = task.assignments.find((item) => item.launchId === launchId) ?? null;
+    if (!receipt || !assignment) {
+      return NextResponse.json({ error: "retryOfLaunchId does not name an assignment of this task" }, { status: 404 });
+    }
+    if (receipt.state !== "failed" || assignment.state !== "failed") {
+      return NextResponse.json({ error: "only a failed launch can be retried" }, { status: 409 });
+    }
+    retryOf = receipt;
+  }
+
+  const engine = retryOf
+    ? retryOf.engine
+    : body.engine === "claude" || body.engine === "codex" ? (body.engine as AgentEngine) : null;
+  if (!engine) return NextResponse.json({ error: "engine must be claude or codex" }, { status: 400 });
+  if (body.clientAttemptId !== undefined
+    && (typeof body.clientAttemptId !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(body.clientAttemptId))) {
+    return NextResponse.json({ error: "clientAttemptId must be 8-128 URL-safe characters" }, { status: 400 });
+  }
+
+  const reasoning = reasoningFromBody(engine, retryOf
+    ? {
+        ...(retryOf.launchProfile.effort != null ? { effort: retryOf.launchProfile.effort } : {}),
+        ...(retryOf.launchProfile.fast != null ? { fast: retryOf.launchProfile.fast } : {}),
+      }
+    : body);
+  if (reasoning.error) return NextResponse.json({ error: reasoning.error }, { status: 400 });
+  const selectedModel = modelFromBody(retryOf
+    ? { ...(retryOf.launchProfile.model != null ? { model: retryOf.launchProfile.model } : {}) }
+    : body);
+  if (selectedModel.error) return NextResponse.json({ error: selectedModel.error }, { status: 400 });
+  const cwdResult = cwdFromBody(retryOf ? retryOf.cwd : body.cwd);
+  if (!cwdResult.cwd) return NextResponse.json({ error: cwdResult.error ?? "invalid working directory" }, { status: cwdResult.status ?? 400 });
+
+  const previous = retryOf?.accountId ?? pinnedAccountId(task.assignments, engine);
   let account: AccountContext;
   try {
     account = dependencies.resolveSpawnAccount(engine, previous);

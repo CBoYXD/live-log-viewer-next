@@ -24,6 +24,12 @@ import { projectKey } from "@/components/projectModel";
     horizon shared by the projection's activity downgrade. */
 export const LAUNCH_HISTORY_HORIZON_MS = 15 * 60 * 1_000;
 
+/** Mirror of spawnProjection's PLACEHOLDER_RETIREMENT_MS (#342): terminal
+    receipts older than this stop being served as FileEntries at all, so the
+    strip naturally covers only the 15 min – 24 h window. The durable receipts
+    stay fully queryable in the registry — retirement is projection-only. */
+export const LAUNCH_HISTORY_RETIREMENT_MS = 24 * 60 * 60 * 1_000;
+
 /** A receipt whose launch reached a terminal state: recovered or failed. */
 export function isTerminalSpawnReceipt(file: FileEntry): boolean {
   return file.spawn?.state === "failed" || file.spawn?.state === "recovered";

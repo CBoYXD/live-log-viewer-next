@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronUp, Crosshair, FoldVertical, Link2, Loader2, Send, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Crosshair, FoldVertical, Link2, Loader2, RotateCcw, Send, Trash2, X } from "lucide-react";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useLocale } from "@/lib/i18n";
@@ -8,6 +8,7 @@ import type { AssignmentRef, BoardTask } from "@/lib/tasks/types";
 import type { FileEntry } from "@/lib/types";
 
 import { useLinkDrag } from "@/components/AgentLink";
+import { retryTaskSpawn } from "@/components/tasks/taskApi";
 import { pushTaskToast } from "@/components/tasks/taskToast";
 import { nextTaskStatus, TASK_TONES, taskTitle } from "@/components/tasks/taskModel";
 import { activityDot, cleanTitle, engineBadge, engineBadgeFor } from "@/components/utils";
@@ -119,6 +120,22 @@ function AssignmentChip({
 }) {
   const { t } = useLocale();
   const state = assignmentAgentState(assignment, file);
+  /* Compact terminal retry (#334): a failed launch is retry-safe by contract,
+     and the launch id is the one handle a pathless failed assignment always
+     owns — the relaunch needs no transcript path. */
+  const [retrying, setRetrying] = useState(false);
+  const retryLaunch = async () => {
+    const launchId = assignment.launchId;
+    if (!launchId || retrying) return;
+    setRetrying(true);
+    try {
+      const result = await retryTaskSpawn(task.id, launchId);
+      if ("task" in result) pushTaskToast("ok", t("tasks.retryLaunched"));
+      else pushTaskToast("err", result.error);
+    } finally {
+      setRetrying(false);
+    }
+  };
   const detachRef: AssignmentRef = {
     /* The launch id is minted at spawn time, before any transcript path or
        scanner attribution exists — it is the one handle a pathless spawning
@@ -199,6 +216,17 @@ function AssignmentChip({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-[10.5px] font-semibold">{title}</span>
       {failed ? <span aria-hidden>⚠</span> : null}
+      {failed && assignment.launchId ? (
+        <ChipAction
+          icon={retrying ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <RotateCcw className="h-3 w-3" aria-hidden />}
+          ariaLabel={t("tasks.retryLaunchAria", { title })}
+          title={t("tasks.retryLaunch")}
+          hoverClass="hover:bg-black/5 hover:text-accent"
+          disabled={retrying}
+          onClick={() => void retryLaunch()}
+          dataAttr="data-task-retry-launch"
+        />
+      ) : null}
       <ChipAction
         icon={<Crosshair className="h-3 w-3" aria-hidden />}
         ariaLabel={

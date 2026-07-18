@@ -190,3 +190,88 @@ test("validators bound membership and scope", () => {
   expect(() => validateSnapshotRequest({ schemaVersion: 1, text: { lastMessages: 1.5 } })).toThrow(ViewValidationError);
   expect(() => validateSnapshotRequest({ schemaVersion: 1, unknown: true })).toThrow(ViewValidationError);
 });
+
+describe("viewer.snapshot spawn path resolution (#342)", () => {
+  async function spawnScopedSnapshot(options: { settle: boolean }) {
+    const { AgentRegistry } = await import("@/lib/agent/registry");
+    const { emptyLaunchProfile } = await import("@/lib/accounts/migration/contracts");
+    const directory = fs.mkdtempSync(path.join(sandbox, "spawn-scope-"));
+    const store = new AgentRegistry(path.join(directory, "agent-registry.json"), undefined, undefined, { sqliteMode: "off" });
+    const begun = store.beginSpawnRequest({
+      engine: "codex",
+      cwd: "/repo",
+      transport: "structured",
+      accountId: "work",
+      launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+    });
+    if (begun.kind !== "created") throw new Error("expected structured launch creation");
+    const artifactPath = "/sessions/019f7b8a-9f75-7dc0-b231-17f7eadd0342.jsonl";
+    if (options.settle) {
+      const settled = store.settleSpawn(begun.receipt.launchId, {
+        key: { engine: "codex", sessionId: "019f7b8a-9f75-7dc0-b231-17f7eadd0342" },
+        artifactPath,
+        cwd: "/repo",
+        accountId: "work",
+        launchProfile: emptyLaunchProfile({ cwd: "/repo" }),
+        status: "unhosted",
+        host: null,
+        claimEpoch: 0,
+        claimOwner: null,
+        pendingAction: null,
+      });
+      if (settled.kind !== "settled") throw new Error("expected settlement");
+    }
+    const spawnPath = `spawn:${begun.receipt.launchId}`;
+    upsertPresence(presence({ visiblePaths: [spawnPath, "/a.jsonl"] }), 1000);
+    const result = await composeSnapshot({
+      request: { schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } },
+      files: [file("/a.jsonl"), ...(options.settle ? [file(artifactPath, { engine: "codex", fmt: "codex", root: "codex-sessions", title: "Spawned worker" })] : [])],
+      siblings: { selfResolution: "omitted", agents: [] },
+      registry: store.readOnlySnapshot(),
+      scannerDurationMs: 1,
+      now: 2000,
+    });
+    return { result, spawnPath, artifactPath, receipt: begun.receipt };
+  }
+
+  test("a spawn: visible path resolves to its materialized conversation", async () => {
+    const { result, spawnPath, artifactPath } = await spawnScopedSnapshot({ settle: true });
+    expect(result.scope.returnedPaths).toEqual([artifactPath, "/a.jsonl"]);
+    expect(result.scope).toMatchObject({ truncated: false, omittedCount: 0 });
+    expect(result.stubs).toEqual([]);
+    const resolved = result.conversations.find((card) => card.path === artifactPath);
+    expect(resolved).toMatchObject({ engine: "codex", resolvedFrom: spawnPath });
+  });
+
+  test("an unresolved spawn: path returns a typed stub instead of silent omission", async () => {
+    const { result, spawnPath, receipt } = await spawnScopedSnapshot({ settle: false });
+    expect(result.scope.returnedPaths).toEqual(["/a.jsonl"]);
+    expect(result.scope).toMatchObject({ truncated: false, omittedCount: 0 });
+    expect(result.stubs).toEqual([{
+      path: spawnPath,
+      kind: "spawn-stub",
+      launch: {
+        launchId: receipt.launchId,
+        state: "starting",
+        error: null,
+        retrySafe: false,
+        engine: "codex",
+        cwd: "/repo",
+        createdAt: receipt.createdAt,
+      },
+    }]);
+  });
+
+  test("a spawn: path with no receipt still counts as genuine omission", async () => {
+    upsertPresence(presence({ visiblePaths: ["spawn:unknown-launch", "/a.jsonl"] }), 1000);
+    const result = await composeSnapshot({
+      request: { schemaVersion: 1, scope: { kind: "visible" }, text: { include: false } },
+      files: [file("/a.jsonl")],
+      siblings: { selfResolution: "omitted", agents: [] },
+      scannerDurationMs: 1,
+      now: 2000,
+    });
+    expect(result.scope).toMatchObject({ returnedPaths: ["/a.jsonl"], truncated: true, omittedCount: 1 });
+    expect(result.stubs).toEqual([]);
+  });
+});

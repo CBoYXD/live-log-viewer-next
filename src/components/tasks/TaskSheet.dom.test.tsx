@@ -110,3 +110,46 @@ test("task create view: the deadline pill is a 44px target", () => {
   expect(meets44(pill!)).toBe(true);
   flushSync(() => root.unmount());
 });
+
+test("task detail view: a pathless failed assignment retries through the launch seam (#334)", async () => {
+  const fetches: Array<{ url: string; body: unknown }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    fetches.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
+    return new Response(JSON.stringify({ ok: true, task: { id: "t334" }, assignment: "spawning" }), {
+      status: 202,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  try {
+    const task: BoardTask = {
+      id: "t334", project: "orbit-api", status: "assigned", text: "Ship the limiter", placement: "unplaced",
+      createdAt: "2026-07-19T00:00:00Z", updatedAt: "2026-07-19T00:00:00Z",
+      assignments: [{
+        launchId: "launch-334",
+        path: null,
+        panePid: null,
+        state: "failed",
+        error: "structured spawn runtime snapshot has no session after 300000ms",
+        at: "2026-07-19T00:00:00Z",
+      }],
+    };
+    const { host, root } = mount(
+      <TaskSheet project="orbit-api" tasks={[task]} files={[]} initialView={{ taskId: "t334" }} onClose={() => {}} />,
+    );
+    const retry = host.querySelector("[data-task-sheet-retry]") as HTMLButtonElement;
+    expect(retry).not.toBeNull();
+    expect((retry.textContent ?? "").trim()).toBe("retry launch");
+    /* The pathless failed row states its terminal outcome, never «starting…». */
+    expect(retry.closest("div")!.textContent).toContain("delivery failed");
+    retry.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetches).toEqual([{
+      url: "/api/tasks/t334/spawn",
+      body: { retryOfLaunchId: "launch-334" },
+    }]);
+    flushSync(() => root.unmount());
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
