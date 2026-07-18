@@ -730,6 +730,7 @@ export function beginRegistryResume(
     accountId: current?.accountId ?? null,
     conversationId: conversation.id,
     purpose: "resume-successor",
+    origin: { kind: "successor" },
     launchProfile: spec.launchProfile ?? current?.launchProfile,
   });
   return { receipt: begun.receipt, spec };

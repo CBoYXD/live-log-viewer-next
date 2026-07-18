@@ -130,7 +130,8 @@ export function preallocatedStructuredSpawnCards(
       ...(edge || memberships.length ? {
         durableLineage: {
           kind: edge?.kind ?? "spawn",
-          role: edge?.role ?? null,
+          role: receipt.agentRole ?? edge?.role ?? null,
+          depth: receipt.delegationDepth,
           parentConversationId: edge?.parentConversationId ?? receipt.parentConversationId,
           reviewsConversationId: edge?.reviewsConversationId ?? null,
           memberships: memberships.map((membership) => ({

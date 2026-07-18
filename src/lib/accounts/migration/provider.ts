@@ -834,6 +834,7 @@ export class RegisteredSuccessorProvider implements SuccessorProviderPort {
       accountId: target.accountId,
       conversationId,
       purpose: "migration-successor",
+      origin: { kind: "successor" },
       expectedArtifactPath: successorPath,
     });
     if (begun.kind === "conflict") throw new Error("successor Claude operation receipt conflicts");

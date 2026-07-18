@@ -7,6 +7,19 @@ versions follow [SemVer](https://semver.org/) (0.x — the API may still move).
 ## [Unreleased]
 
 ### Added
+- Reviewer isolation and bounded, tracked agent nesting (#393). Reviewer and
+  verifier sessions keep full filesystem, shell, GitHub, and browser access but
+  have zero child-spawn capability: every launch they originate — direct
+  `/api/spawn`, pipeline creation, or any future MCP surface routed through the
+  registry — is terminally rejected before a child transcript or process
+  exists, with a durable typed rejection receipt (`reviewer_origin_spawn` /
+  `nesting_depth_exceeded`) and actionable guidance. Every delegated launch
+  durably records its role and delegation depth (plus parent, membership,
+  account, and engine) before execution, and a new operator-only
+  `maxAgentNestingDepth` setting (`GET`/`PATCH /api/spawn/policy`,
+  conservative default 2) bounds delegation chains. Resume, restart adoption,
+  account switch, and stage retries conserve the recorded identity; reviewer
+  resume profiles always deny native multi-agent tools.
 - Demo motion pipeline (`bun run demo:motion`, stage B of the demo media
   effort): storyboard-as-data recordings of the four key flows rendered as
   loopable GIFs plus a stitched `docs/media/demo.mp4`, reusing the stage A

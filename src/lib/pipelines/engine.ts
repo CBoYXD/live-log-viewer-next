@@ -67,6 +67,10 @@ export interface PipelinePorts {
     parentPath: string | null;
     clientAttemptId: string;
     membership: DurableMembershipInput;
+    /** Pipeline creator (#393): the container acts for the conversation that
+        created it, so reviewer-isolation and depth admission key on this —
+        never on the lineage parent, which may be a passed review stage. */
+    creatorConversationId: string | null;
     /** Prior-attempt conversation this stage retry terminally supersedes
         (issue #383); attempt chains become round chains automatically. */
     supersedes?: string | null;
@@ -154,6 +158,9 @@ async function spawnPipelineAgent(
     ...(supersedes ? { supersedes } : {}),
     prompt: input.prompt,
   })).digest("hex");
+  const creatorConversationId = input.creatorConversationId?.startsWith("conversation_")
+    ? registry.canonicalConversationId(input.creatorConversationId as ViewerConversationId)
+    : null;
   const begun = registry.beginSpawnRequest({
     engine: input.role.engine,
     cwd: input.cwd,
@@ -162,6 +169,17 @@ async function spawnPipelineAgent(
     parentConversationId: parent.conversationId,
     parentSessionKey: parent.sessionKey,
     parentArtifactPath: parent.conversationId ? input.parentPath : null,
+    role: input.role.roleId,
+    /* Container origin (#393): admission keys on the pipeline creator, so a
+       reviewer-lineage-parent stage stays admissible while a reviewer-created
+       pipeline is terminally rejected. Retries reuse the same origin, so
+       delegation depth is stable across rounds. */
+    origin: {
+      kind: "container",
+      container: "pipeline",
+      containerId: input.membership.containerId,
+      creatorConversationId,
+    },
     memberships: [{ ...input.membership, parentConversationId: parent.conversationId }],
     launchProfile,
     clientAttemptId: input.clientAttemptId,
@@ -483,6 +501,7 @@ async function tickRunStage(
         prompt,
         parentPath: latestCompletedAgentPath(pipeline, stage.id),
         clientAttemptId: clientAttemptId(pipeline, stage, attempt),
+        creatorConversationId: pipeline.srcConversationId,
         supersedes: priorAttempt?.conversationId ?? null,
         membership: {
           kind: "pipeline",
