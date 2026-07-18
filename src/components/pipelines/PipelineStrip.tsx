@@ -256,7 +256,7 @@ function StageChip({
 
   return (
     <li ref={chipRef} className="relative flex shrink-0 items-center gap-1.5" data-pipeline-stage={stage.id} data-stage-state={state}>
-      {previousStage ? (
+      {previousStage && !mobile ? (
         <span
           role="group"
           aria-label={t("pipelineStrip.lineageAria", { from: previousLabel, to: label })}
@@ -321,7 +321,7 @@ function StageChip({
             <span aria-hidden>{attempt!.verdict ? (attempt!.verdict.status === "pass" ? "✓" : attempt!.verdict.status === "fail" ? "✕" : "●") : "!"}</span>
           </button>
         ) : null}
-        {terminalEvidence && attempt ? (
+        {!mobile && terminalEvidence && attempt ? (
           <span
             data-stage-evidence={attempt.state}
             aria-label={t("pipelineStrip.evidenceAria", {
@@ -458,7 +458,7 @@ export function PipelineStrip({
       data-scheme-ui
       role="group"
       aria-label={t("pipelineStrip.groupAria", { task: pipeline.task })}
-      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${mobile ? "[&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
+      className={`pointer-events-auto flex min-h-9 w-full flex-wrap items-center gap-x-2.5 gap-y-1 rounded-surface border bg-card/95 py-1 shadow-1 ${compact ? "px-2.5" : "px-3"} ${mobile ? "max-w-full overflow-hidden [&_button]:min-h-11 [&_button]:min-w-11" : ""} ${draft ? "border-2 border-dashed border-warning" : attention ? "border-warning/70" : "border-border"}`}
     >
       <span className="flex min-w-0 max-w-full shrink-0 items-center gap-2 sm:max-w-[46%]">
         <span
@@ -485,12 +485,12 @@ export function PipelineStrip({
         ) : null}
         {detail ? <span className={`min-w-0 truncate text-ui font-semibold ${attention ? "text-warning" : "text-danger"}`} title={detail}>{detail}</span> : null}
       </span>
-      {pipeline.baseRef ? (
+      {!mobile && pipeline.baseRef ? (
         <span className="shrink-0 rounded-control border border-border bg-sunken px-1.5 py-0.5 font-mono text-caption text-muted" title={t("pipelineStrip.baseSha", { sha: pipeline.baseRef })}>
           {t("pipelineStrip.baseSha", { sha: pipeline.baseRef })}
         </span>
       ) : null}
-      <ol className="no-scrollbar flex min-w-0 flex-1 items-center justify-center gap-1.5 overflow-x-auto" aria-label={t("pipelineStrip.stagesAria")}>
+      <ol className={`no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto ${mobile ? "justify-start" : "justify-center"}`} aria-label={t("pipelineStrip.stagesAria")}>
         {pipeline.stages.map((stage, index) => (
           <StageChip
             key={stage.id}

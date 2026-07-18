@@ -16,6 +16,7 @@ import {
   draftStagesToInput,
   normalizeStageOrder,
   compactPipelineArtifactPaths,
+  stageDockCompact,
   compactStageOpenTarget,
   excludeCompactPipelineArtifacts,
   pipelineAnnouncement,
@@ -581,6 +582,37 @@ describe("stageHasEvidence (running attempts have no verdict sheet)", () => {
   test("no attempt is no evidence", () => {
     expect(stageHasEvidence(p({}), runStage, null)).toBe(false);
   });
+});
+
+test("stageDockCompact keeps every stage with transcript evidence fully disclosed", () => {
+  const build = stage("build");
+  const skipped = { n: 1, state: "skipped", agentPath: null, verdict: null, error: null } as never;
+  const parked = { n: 1, state: "needs_decision", agentPath: null, verdict: null, error: null } as never;
+  const passedWithVerdict = { n: 1, state: "passed", agentPath: null, verdict: { status: "pass" }, error: null } as never;
+  const passedWithPath = { n: 1, state: "passed", agentPath: "/build.jsonl", verdict: null, error: null } as never;
+  const pendingPipeline = pipeline({ stages: [build], state: "draft", cursor: { stageId: build.id, state: "pending" } });
+
+  expect(stageDockCompact(pendingPipeline, build, null, [], new Set(), new Set(), [])).toBe(true);
+  expect(stageDockCompact(pipeline({ stages: [build] }), build, skipped, [], new Set(), new Set(), [])).toBe(true);
+  expect(stageDockCompact(
+    pipeline({ stages: [build], state: "needs_decision", cursor: { stageId: build.id, state: "running" } }),
+    build,
+    parked,
+    [],
+    new Set(),
+    new Set(),
+    [],
+  )).toBe(false);
+  expect(stageDockCompact(pipeline({ stages: [build] }), build, passedWithVerdict, [], new Set(), new Set(), [])).toBe(false);
+  expect(stageDockCompact(
+    pipeline({ stages: [build] }),
+    build,
+    passedWithPath,
+    [],
+    new Set(),
+    new Set(["/build.jsonl"]),
+    [],
+  )).toBe(false);
 });
 
 describe("stageHasNavigableHistory", () => {

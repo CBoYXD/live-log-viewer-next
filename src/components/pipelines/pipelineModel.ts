@@ -471,6 +471,21 @@ export function stageHasNavigableHistory(
   ));
 }
 
+/** Mobile dock stages stay small only when every history entry point is empty. */
+export function stageDockCompact(
+  pipeline: Pipeline,
+  stage: PipelineStage,
+  attempt: PipelineStageAttempt | null,
+  flows: readonly Flow[] = [],
+  renderableFlows?: ReadonlySet<string>,
+  renderablePaths?: ReadonlySet<string>,
+  files: readonly FileEntry[] = [],
+): boolean {
+  return !stageHasEvidence(pipeline, stage, attempt)
+    && !stageHasNavigableHistory(pipeline, stage, attempt, flows, renderablePaths, files)
+    && compactStageOpenTarget(stage, attempt, flows, renderableFlows, renderablePaths, files) === null;
+}
+
 /** Localized label for a raw attempt state (the prior-attempt audit), so a
     verdict-less attempt never shows an English identifier in the uk UI. */
 export function attemptStateLabel(t: TFunction, state: PipelineAttemptState): string {

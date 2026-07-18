@@ -123,6 +123,73 @@ test("the compact pipeline surface exposes the full pinned base SHA", () => {
   expect(html).toContain(`Base ${baseRef}`);
 });
 
+test("mobile contains the rail and defers diagnostics while desktop markup stays complete", () => {
+  const baseRef = "48c739bbcc87b3244aee7fb0e2d1b3f8e312548f";
+  const stages = [stage("plan"), stage("build")];
+  const passed = attempt({
+    state: "passed",
+    agentPath: "/build.jsonl",
+    startedAt: "2026-07-18T10:00:00.000Z",
+    completedAt: "2026-07-18T10:01:30.000Z",
+    verdict: { status: "pass", findings: [], confidence: 0.95 },
+  });
+  const p = pipeline({
+    baseRef,
+    lastPassedCommit: baseRef,
+    stages,
+    runs: [{ stageId: "build", attempts: [passed] }],
+  });
+  const mobile = renderToStaticMarkup(
+    <PipelineStrip mobile pipeline={p} renderablePaths={new Set(["/build.jsonl"])} onOpenPath={() => undefined} />,
+  );
+  const desktop = renderToStaticMarkup(
+    <PipelineStrip pipeline={p} renderablePaths={new Set(["/build.jsonl"])} onOpenPath={() => undefined} />,
+  );
+
+  expect(mobile).toContain("max-w-full");
+  expect(mobile).toContain("overflow-hidden");
+  expect(mobile).toContain("justify-start");
+  expect(mobile).not.toContain(`Base ${baseRef}`);
+  expect(mobile).not.toContain("data-stage-evidence");
+  expect(mobile).not.toContain("Open previous stage plan");
+
+  expect(desktop).toContain("justify-center");
+  expect(desktop).toContain(`Base ${baseRef}`);
+  expect(desktop).toContain('data-stage-evidence="passed"');
+  expect(desktop).toContain("Open previous stage plan");
+});
+
+test("mobile compacts empty stages while a parked decision keeps its full controls", () => {
+  const build = stage("build");
+  const pending = renderToStaticMarkup(
+    <PipelineStrip
+      mobile
+      pipeline={pipeline({ state: "draft", stages: [build], cursor: { stageId: build.id, state: "pending" } })}
+    />,
+  );
+  const parked = renderToStaticMarkup(
+    <PipelineStrip
+      mobile
+      pipeline={pipeline({
+        state: "needs_decision",
+        stages: [build],
+        cursor: { stageId: build.id, state: "running" },
+        runs: [{ stageId: build.id, attempts: [attempt({ state: "needs_decision", agentPath: null })] }],
+      })}
+    />,
+  );
+
+  expect(pending).toContain('data-stage-compact="true"');
+  expect(pending).toContain('aria-label="build, pending"');
+  expect(pending).toContain("h-11 w-11");
+  expect(pending).not.toContain(">build</span>");
+
+  expect(parked).not.toContain("data-stage-compact");
+  expect(parked).toContain("max-w-[180px]");
+  expect(parked).toContain('aria-label="Retry stage"');
+  expect(parked).toContain('aria-label="Skip"');
+});
+
 test("compact history exposes evidence, configuration, and ordered lineage controls (#353)", () => {
   const stages = [stage("plan"), stage("build"), stage("verify")];
   const passed = attempt({
