@@ -277,6 +277,47 @@ test("SwitchCard: fixed-width cards declare the reasoning-host container so the 
   }
 });
 
+test("SwitchCard fallback badge: with model unknown, the engine chip still carries the effort tooltip", () => {
+  // model=null flips the identity chip to the engine-badge fallback; the tier
+  // must survive the sub-260px meter collapse through the badge's title
+  const entry = fableRoot({ model: null });
+  const { host, root } = mount();
+  flushSync(() =>
+    root.render(
+      <SwitchCard
+        file={entry}
+        title="root"
+        project="viewer"
+        currentProject="viewer"
+        descendants={0}
+        statusLine=""
+        size="small"
+        tone="working"
+        onOpen={() => undefined}
+        onArchive={() => undefined}
+      />,
+    ),
+  );
+  const badge = [...host.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent === "Claude") as HTMLElement;
+  expect(badge).not.toBeNull();
+  expect(badge.getAttribute("title")).toBe("Reasoning effort: low");
+});
+
+test("pane fallback badge: with model unknown, desktop and mobile engine chips carry the effort tooltip", () => {
+  const entry = fableRoot({ model: null });
+  for (const asMobile of [false, true]) {
+    mobile = asMobile;
+    const { host, root } = mount();
+    flushSync(() => root.render(<BranchPane file={entry} tasks={[]} isRoot />));
+    const badge = [...host.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent?.trim() === "Claude") as HTMLElement;
+    expect(badge).not.toBeNull();
+    expect(badge.getAttribute("title")).toBe("Reasoning effort: low");
+    flushSync(() => root.unmount());
+    roots.delete(root);
+    dom.document.body.replaceChildren();
+  }
+});
+
 test("globals.css defines the reasoning-host container and the 260px collapse for the slot", () => {
   // the class contract above only holds if the stylesheet ships the container
   // query — pin it so a rename or a dropped rule fails here, not in the field

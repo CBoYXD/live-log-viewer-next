@@ -82,7 +82,7 @@ export function SwitchCard({ file, title, project, currentProject, descendants, 
             {file.model}
           </span>
         ) : (
-          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style}>{badge.label}</span>
+          <span className="shrink-0 rounded-full px-1.5 py-0.5 text-[9.5px] font-bold" style={badge.style} title={effortTitle(file)}>{badge.label}</span>
         )}
         <EffortPills file={file} />
         <RateLimitBadge rateLimit={file.rateLimit} />
