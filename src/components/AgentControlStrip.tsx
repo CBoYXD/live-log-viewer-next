@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { MoreHorizontal } from "lucide-react";
 import { ArrowUpToLine, Check, FoldVertical, Loader2, Play, Square, SquareTerminal } from "@/components/icons";
@@ -262,7 +262,7 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const isMobile = useIsMobile();
   const { caps, attachMode, structuredSession } = useAgentCapabilities(file);
 
-  const rootRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
   const [layout, setLayout] = useState<StripLayout>("full");
   const [overflowOpen, setOverflowOpen] = useState(false);
   const [stopBusy, setStopBusy] = useState(false);
@@ -272,16 +272,20 @@ export function AgentControlStrip({ file }: { file: FileEntry }) {
   const [status, setStatus] = useState<{ kind: "ok" | "info" | "err"; text: string } | null>(null);
 
   /* Width is the collapse trigger (§3) — scheme nodes vary continuously with
-     zoom, so a ResizeObserver on the strip beats any media query. */
-  useEffect(() => {
-    const el = rootRef.current;
+     zoom, so a ResizeObserver on the strip beats any media query. A callback
+     ref (not a mount-once effect) attaches it, because the strip root can mount
+     LATE: an unresolved/gated surface renders nothing at first and the observed
+     div only appears once host evidence arrives (#257). */
+  const rootRef = useCallback((el: HTMLDivElement | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width ?? 999;
       setLayout(width >= 430 ? "full" : width >= 300 ? "narrow" : "mini");
     });
     observer.observe(el);
-    return () => observer.disconnect();
+    observerRef.current = observer;
   }, []);
 
   useEffect(() => {

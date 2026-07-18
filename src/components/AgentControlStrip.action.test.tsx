@@ -27,6 +27,28 @@ Object.assign(globalThis, {
   localStorage: dom.localStorage, sessionStorage: dom.sessionStorage,
 });
 
+/* Recording ResizeObserver: happy-dom has none, and the strip's width folding
+   must attach its observer even when the strip root mounts LATE (#257 — the
+   gated/unresolved surface renders nothing until host evidence arrives). */
+class FakeResizeObserver {
+  static instances: FakeResizeObserver[] = [];
+  observed: Element[] = [];
+  constructor(private cb: (entries: { contentRect: { width: number } }[]) => void) {
+    FakeResizeObserver.instances.push(this);
+  }
+  observe(el: Element): void {
+    this.observed.push(el);
+  }
+  unobserve(): void {}
+  disconnect(): void {
+    this.observed = [];
+  }
+  resize(width: number): void {
+    this.cb([{ contentRect: { width } }]);
+  }
+}
+Object.assign(globalThis, { ResizeObserver: FakeResizeObserver });
+
 /* The runtime plane is authoritative (enabled) and carries the subagent's root
    host keyed by its artifact path — the production shape. */
 function rootView(kind: HostKind, host: HostAxis): RuntimeSessionView {
@@ -50,7 +72,10 @@ mock.module("@/hooks/useRuntime", () => ({
   useRuntimeSessionByArtifact: (path: string | null) => (planeEnabled && path === "/root.jsonl" ? rootView(rootKind, rootAxis) : null),
 }));
 
-afterAll(() => { planeEnabled = false; });
+afterAll(() => {
+  planeEnabled = false;
+  delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+});
 
 const { AgentControlStrip } = await import("./AgentControlStrip");
 
@@ -76,6 +101,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
   rootKind = "claude-broker";
   rootAxis = "hosted";
+  FakeResizeObserver.instances = [];
   document.body.replaceChildren();
   localStorage.clear();
 });
@@ -98,6 +124,31 @@ test("a scanner-shaped subagent whose root is dead stays gated — no strip", as
   rootAxis = "dead";
   const { host, root } = await mount(subagent);
   expect(host.querySelector("[data-agent-control-strip]")).toBeNull();
+  await act(async () => root.unmount());
+});
+
+test("the width observer attaches when the strip mounts late (gated → live root) and folds the layout", async () => {
+  // The root host is not live yet: the strip renders nothing, so nothing is observed.
+  rootAxis = "dead";
+  const { host, root } = await mount(subagent);
+  expect(host.querySelector("[data-agent-control-strip]")).toBeNull();
+  expect(FakeResizeObserver.instances.reduce((n, o) => n + o.observed.length, 0)).toBe(0);
+
+  // Host evidence arrives: the strip root mounts NOW, and the observer must
+  // attach to it (a mount-once effect would have missed this late mount).
+  rootAxis = "hosted";
+  await act(async () => root.render(<AgentControlStrip file={subagent} />));
+  expect(host.querySelector("[data-agent-control-strip]")).not.toBeNull();
+  const attached = FakeResizeObserver.instances.filter((o) => o.observed.length > 0);
+  expect(attached).toHaveLength(1);
+
+  // Measured width drives the §3 faces: <430 folds to narrow, <300 to mini.
+  await act(async () => attached[0]!.resize(360));
+  expect(host.querySelector('[data-strip-layout="narrow"]')).not.toBeNull();
+  await act(async () => attached[0]!.resize(250));
+  expect(host.querySelector('[data-strip-layout="mini"]')).not.toBeNull();
+  await act(async () => attached[0]!.resize(600));
+  expect(host.querySelector('[data-strip-layout="full"]')).not.toBeNull();
   await act(async () => root.unmount());
 });
 

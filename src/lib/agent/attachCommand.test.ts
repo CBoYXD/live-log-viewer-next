@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
 import type { ResumeSpec } from "./cli";
-import { attachCommandFromSpec, resolveAttachCommand, type AttachResolverDeps } from "./attachCommand";
+import { attachCommandFromSpec, attachTargetPath, resolveAttachCommand, type AttachResolverDeps } from "./attachCommand";
 
 /**
  * Pure attach-command composition (design §6). No spawning, no waiting — every
@@ -90,4 +90,15 @@ test("a cyclic parent chain terminates instead of looping forever", () => {
   const b = file({ path: "/b.jsonl", kind: "subagent", parent: "/a.jsonl" });
   const res = resolveAttachCommand("/a.jsonl", deps([a, b]));
   expect(res.ok).toBe(false);
+});
+
+test("attachTargetPath resolves the path the composed command actually resumes (subagent → root)", () => {
+  const root = file({ path: "/root.jsonl", kind: "session" });
+  const sub = file({ path: "/sub.jsonl", kind: "subagent", parent: "/root.jsonl" });
+  // a resumable conversation is its own target; a subagent's target is its root
+  expect(attachTargetPath("/root.jsonl", [root, sub])).toBe("/root.jsonl");
+  expect(attachTargetPath("/sub.jsonl", [root, sub])).toBe("/root.jsonl");
+  // unknown paths and orphaned subagents resolve to nothing
+  expect(attachTargetPath("/nope.jsonl", [root, sub])).toBeNull();
+  expect(attachTargetPath("/orphan.jsonl", [file({ path: "/orphan.jsonl", kind: "subagent", parent: "/gone.jsonl" })])).toBeNull();
 });

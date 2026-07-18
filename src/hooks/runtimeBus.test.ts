@@ -748,4 +748,31 @@ describe("runtimeBus refresh (dead-host Re-check, §5)", () => {
     // the failure is reported to the caller, not swallowed into a stale banner
     expect(h.bus.getState().store.sessions["conv_a"]).toBe(before);
   });
+
+  test("a slow refresh response never regresses the store below the live cursor (#257)", async () => {
+    h.bus.start();
+    await flush();
+    h.sources[0]!.open();
+
+    // refresh's snapshot fetch is in flight while newer events land on the stream
+    const slow = h.deferNextFetch();
+    const pending = h.bus.refresh();
+    h.sources[0]!.message(sessionEvent(101, 2, "running", "t1"));
+    expect(h.bus.getState().store.cursor).toBe(101);
+
+    // the stale response (snapshotSeq 100 < cursor 101) finally arrives: it must
+    // NOT be installed — pollFallback semantics — yet the refresh still reports
+    // success, because fresher state than the response is already live.
+    slow.resolveSnapshot(snapshot(100));
+    expect(await pending).toBe(true);
+    expect(h.bus.getState().store.cursor).toBe(101);
+    expect(h.bus.getState().store.sessions["conv_a"]?.turn).toBe("running");
+    expect(h.bus.getState().store.sessions["conv_a"]?.activeTurnId).toBe("t1");
+
+    // an equal-or-newer snapshot still installs (the dead-host Re-check works)
+    h.setSnapshot(snapshot(200, { sessions: [{ ...snapshot(200).sessions[0]!, host: "dead", revision: 5 }] }));
+    expect(await h.bus.refresh()).toBe(true);
+    expect(h.bus.getState().store.cursor).toBe(200);
+    expect(h.bus.getState().store.sessions["conv_a"]?.host).toBe("dead");
+  });
 });

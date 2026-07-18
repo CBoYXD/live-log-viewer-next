@@ -257,11 +257,20 @@ test("dead: only terminal (the escape hatch) survives; send is disabled, not att
   }
 });
 
-test("shell: only Kill applies", () => {
+test("shell: only Kill applies, and only while the process runs", () => {
   const f = file({ engine: "shell", proc: "running", root: "shell-tasks" as FileEntry["root"] });
   expect(state("kill", f, null)).toBe("enabled");
   for (const c of ["stop", "compact", "runtime", "terminal", "images", "send"] as ControlName[]) {
     expect(state(c, f, null)).toBe("hidden");
+  }
+  // A finished shell task (done/killed/never observed) has nothing to signal:
+  // Kill is hidden, and the whole row goes dark.
+  for (const proc of ["done", "killed", null] as FileEntry["proc"][]) {
+    const finished = file({ engine: "shell", proc, root: "shell-tasks" as FileEntry["root"] });
+    expect(surfaceFor(finished, null)).toBe<StripSurface>("shell");
+    for (const c of ["stop", "compact", "runtime", "kill", "terminal", "images", "send"] as ControlName[]) {
+      expect(state(c, finished, null)).toBe("hidden");
+    }
   }
 });
 

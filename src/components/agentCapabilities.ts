@@ -323,7 +323,9 @@ export function capabilitiesFor(file: FileEntry, rv: RuntimeSessionView | null, 
           stop: HIDDEN,
           compact: HIDDEN,
           runtime: HIDDEN,
-          kill: ENABLED,
+          // Kill signals the live process — a finished (done/killed) shell task
+          // has nothing left to signal, so the control is hidden, not offered.
+          kill: file.proc === "running" ? ENABLED : HIDDEN,
           terminal: HIDDEN,
           images: HIDDEN,
           send: HIDDEN,

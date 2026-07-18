@@ -97,6 +97,19 @@ export function resolveAttachCommand(path: string, deps: AttachResolverDeps): At
   };
 }
 
+/**
+ * The transcript path the composed command actually resumes: the entry itself
+ * when resumable, otherwise its nearest resumable ancestor (Claude subagent →
+ * root). Null when the path is unknown or nothing resumable exists. The
+ * migration fence must consult THIS path's conversation — the command captures
+ * the resolved target's account home, not the requested transcript's.
+ */
+export function attachTargetPath(path: string, files: FileEntry[]): string | null {
+  const entry = files.find((f) => f.path === path);
+  if (!entry) return null;
+  return resolvableTarget(entry, files)?.entry.path ?? null;
+}
+
 /** The entry whose resume command represents this conversation: itself when
     resumable, otherwise the nearest resumable ancestor (Claude subagent → root). */
 function resolvableTarget(entry: FileEntry, files: FileEntry[]): { entry: FileEntry; viaRoot: boolean } | null {

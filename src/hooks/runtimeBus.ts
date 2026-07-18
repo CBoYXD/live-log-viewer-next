@@ -434,6 +434,11 @@ export function createRuntimeBus(deps: RuntimeBusDeps): RuntimeBus {
         // A newer generation already superseded us (reconnect/stop raced): the
         // fetch itself succeeded and fresher state is live, so report success.
         if (myGen !== generation) return true;
+        // Monotonic install (same guard as pollFallback): a slow refresh
+        // response that lost the race to live events or a newer snapshot must
+        // never regress the cursor. The refresh itself succeeded — fresher
+        // state than the response is already live — so still report success.
+        if (snapshot.snapshotSeq < state.store.cursor) return true;
         hasSnapshot = true;
         // Refresh the structured-hosts rollback gate alongside the store — every
         // other snapshot-install path (join/resume/fallback) does, so a manual
