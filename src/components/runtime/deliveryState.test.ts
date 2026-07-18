@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test } from "bun:test";
 
 import {
@@ -172,4 +174,20 @@ test("dismissed ids append bounded and survive a storage round-trip", () => {
   } finally {
     delete (globalThis as { sessionStorage?: unknown }).sessionStorage;
   }
+});
+
+test("the grouping-key NUL separator is escaped in source yet keeps kinds apart at runtime", () => {
+  // The separator must live in source as the `\u0000` escape, never a raw
+  // byte, so the file stays visible to text tooling (grep, diff, review UIs).
+  const source = readFileSync(new URL("./deliveryState.ts", import.meta.url), "utf8");
+  expect(source.includes("\\u0000")).toBe(true);
+  expect(source.includes("\u0000")).toBe(false);
+
+  // Same text under different kinds must stay two groups — the escape still
+  // produces the exact NUL-joined runtime key.
+  const groups = deliveryAttemptGroups([
+    receipt({ operationId: "op-send", kind: "send", status: "failed", reason: "dead-host", text: "same", at: "2026-07-18T10:00:01.000Z" }),
+    receipt({ operationId: "op-steer", kind: "steer", status: "failed", reason: "dead-host", text: "same", at: "2026-07-18T10:00:00.000Z" }),
+  ]);
+  expect(groups.map((group) => group.current.operationId)).toEqual(["op-send", "op-steer"]);
 });
