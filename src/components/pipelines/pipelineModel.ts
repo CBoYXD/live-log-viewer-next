@@ -540,15 +540,44 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
 }
 
 /**
+ * The 1-based array position of the stage a cursorless pipeline actually
+ * terminated on (#353): the last stage whose current attempt settled
+ * passed/skipped, by completion time. A non-linear pass graph can terminate at
+ * any stage — a jump or merge leaves later array slots unrun — so the last
+ * ordinal is not the terminal stage. Returns -1 when nothing settled (e.g. a
+ * pipeline closed before it ran a stage), letting the caller keep the n/n
+ * fallback.
+ */
+function terminalStageIndex(pipeline: Pipeline): number {
+  let index = -1;
+  let at = "";
+  pipeline.stages.forEach((stage, candidateIndex) => {
+    const attempt = latestAttempt(pipeline, stage.id);
+    if (!attempt || (attempt.state !== "passed" && attempt.state !== "skipped")) return;
+    const completedAt = attempt.completedAt ?? "";
+    if (index === -1 || completedAt >= at) {
+      index = candidateIndex;
+      at = completedAt;
+    }
+  });
+  return index;
+}
+
+/**
  * The single source of the header "stage k/n" counter (#353): every consumer —
  * strip header, live-region announcement, dock, projection — reads this one
  * derivation so the counter can never disagree with the rendered members.
- * k is the 1-based cursor position; a finished chain reads n/n.
+ * k is the 1-based cursor position; a completed/closed chain reads the position
+ * of the stage it actually terminated on (never a later, never-run array slot).
  */
 export function pipelineStagePosition(pipeline: Pipeline): { k: number; n: number } {
   const n = pipeline.stages.length;
-  const index = pipeline.cursor ? pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId) : -1;
-  return { k: index >= 0 ? index + 1 : n, n };
+  if (pipeline.cursor) {
+    const index = pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId);
+    return { k: index >= 0 ? index + 1 : n, n };
+  }
+  const terminalIndex = terminalStageIndex(pipeline);
+  return { k: terminalIndex >= 0 ? terminalIndex + 1 : n, n };
 }
 
 /** A spoken one-liner for a pipeline's current position — used by the board's
@@ -967,6 +996,19 @@ export function stageFailEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage
   return target.attempts.filter((attempt) => attempt.activatedBy?.edge === "fail" && attempt.activatedBy.stageId === stage.id).length;
 }
 
+/**
+ * Is a stage's fail edge frozen evidence (#353)? A fail edge freezes the instant
+ * its verdict routes the cursor along it — before the target attempt even
+ * materializes — so the edit control must mirror the API's guard, which also
+ * reads the in-flight cursor activation. Reading only the materialized round
+ * count would leave the picker briefly enabled over an edge the server would
+ * reject.
+ */
+export function stageFailEdgeFrozen(pipeline: Pipeline, stage: PipelineStage): boolean {
+  if (pipeline.cursor?.activatedBy?.edge === "fail" && pipeline.cursor.activatedBy.stageId === stage.id) return true;
+  return stageFailEdgeRoundsUsed(pipeline, stage) > 0;
+}
+
 /** Verdict-keyed edge list of the conversation graph, with the predicted next
     edge marked (the active cursor stage's pass edge). */
 export function pipelineBoardEdges(pipeline: Pipeline): PipelineBoardEdge[] {
@@ -1060,23 +1102,31 @@ const OPTIMISTIC_EFFECTIVE_ROLE: Omit<EffectivePipelineRole, "access"> = {
   promptScaffold: null,
 };
 
-/** Recompute the linear `next` chain after a local insert/removal — the same
-    normalization the server applies when it persists the mutation. A kept
-    stage's fail edge survives unless its target left the plan (server rule). */
-function chainStages(stages: PipelineStage[]): PipelineStage[] {
+/** Clears only dangling pass edges (target gone or self-referential) and fail
+    edges whose target left the plan — the same safety net the server applies
+    (replaceDraftStages). Every intentional edge is preserved so a local insert/
+    removal never flattens a custom jump/merge or fail loop (#353). */
+function pruneStageEdges(stages: PipelineStage[]): PipelineStage[] {
   const keptIds = new Set(stages.map((stage) => stage.id));
-  return stages.map((stage, index) => ({
+  return stages.map((stage) => ({
     ...stage,
-    next: stages[index + 1]?.id ?? null,
+    next: stage.next != null && stage.next !== stage.id && keptIds.has(stage.next) ? stage.next : null,
     onFail: stage.onFail && keptIds.has(stage.onFail.to) ? stage.onFail : null,
   }));
 }
 
 /** The pipeline as it will look once `add-stage` persists — applied locally
-    before the PATCH so the new placeholder window appears instantly (§3). */
+    before the PATCH so the new placeholder window appears instantly (§3). The
+    new stage is spliced into its own seam only (predecessor → new → predecessor's
+    old target); every other stage's intentional edge is preserved, mirroring the
+    server (#353). */
 export function optimisticAddStage(pipeline: Pipeline, input: PipelineStageInput, index: number): Pipeline {
+  const stages = [...pipeline.stages];
+  const at = Math.max(0, Math.min(index, stages.length));
+  const predecessor = at > 0 ? stages[at - 1]! : null;
   const stage: PipelineStage = {
     ...input,
+    next: predecessor ? predecessor.next ?? null : stages[at]?.id ?? null,
     effectiveRole: {
       ...OPTIMISTIC_EFFECTIVE_ROLE,
       roleId: input.role?.roleId ?? null,
@@ -1084,14 +1134,25 @@ export function optimisticAddStage(pipeline: Pipeline, input: PipelineStageInput
       access: input.access ?? (input.kind === "review-loop" ? "read-only" : "read-write"),
     },
   };
-  const stages = [...pipeline.stages];
-  stages.splice(Math.max(0, Math.min(index, stages.length)), 0, stage);
-  return { ...pipeline, stages: chainStages(stages) };
+  if (predecessor) stages[at - 1] = { ...predecessor, next: stage.id };
+  stages.splice(at, 0, stage);
+  return { ...pipeline, stages: pruneStageEdges(stages) };
 }
 
-/** The pipeline as it will look once `remove-stage` persists. */
+/** The pipeline as it will look once `remove-stage` persists. Predecessors that
+    pointed at the removed stage bypass to its pass target (the chain stays
+    connected); fail edges to it park. Every other edge is preserved (#353). */
 export function optimisticRemoveStage(pipeline: Pipeline, stageId: string): Pipeline {
-  return { ...pipeline, stages: chainStages(pipeline.stages.filter((stage) => stage.id !== stageId)) };
+  const removed = pipeline.stages.find((stage) => stage.id === stageId);
+  const bypass = removed?.next && removed.next !== removed.id ? removed.next : null;
+  const stages = pipeline.stages
+    .filter((stage) => stage.id !== stageId)
+    .map((stage) => ({
+      ...stage,
+      next: stage.next === stageId ? bypass : stage.next,
+      onFail: stage.onFail?.to === stageId ? null : stage.onFail,
+    }));
+  return { ...pipeline, stages: pruneStageEdges(stages) };
 }
 
 /** The pipeline as it will look once `set-edge` persists (#353). */

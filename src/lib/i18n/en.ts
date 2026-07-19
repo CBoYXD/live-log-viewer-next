@@ -1069,6 +1069,7 @@ export const en = {
   "pipelineSlot.passEdgeEnd": "— completes the pipeline",
   "pipelineSlot.failEdgeLabel": "On fail, loop back to",
   "pipelineSlot.failEdgeNone": "— park for the operator",
+  "pipelineSlot.failEdgeSelf": "↺ this stage (retry itself)",
   "pipelineSlot.failEdgeRounds": "Max loop rounds",
   "pipelineSlot.passEdgeFrozen": "This stage already ran — its pass edge is frozen evidence.",
   "pipelineSlot.failEdgeFrozen": "This fail edge was already traversed — it is frozen evidence.",

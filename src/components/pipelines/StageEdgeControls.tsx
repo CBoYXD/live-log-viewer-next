@@ -7,7 +7,7 @@ import { MAX_FAIL_EDGE_ROUNDS } from "@/lib/pipelines/limits";
 import { useLocale } from "@/lib/i18n";
 import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
 
-import { setPipelineEdge, stageAttempts, stageChipLabel, stageFailEdgeRoundsUsed } from "./pipelineModel";
+import { setPipelineEdge, stageAttempts, stageChipLabel, stageFailEdgeFrozen } from "./pipelineModel";
 
 /**
  * Keyboard/mobile-safe edge editing (#353): the stage config card's "Connect"
@@ -31,8 +31,13 @@ export function StageEdgeControls({
   const [error, setError] = useState<string | null>(null);
   const terminal = pipeline.state === "completed" || pipeline.state === "closed";
   const passFrozen = stageAttempts(pipeline, stage.id).length > 0;
-  const failFrozen = stageFailEdgeRoundsUsed(pipeline, stage) > 0;
-  const targets = pipeline.stages.filter((candidate) => candidate.id !== stage.id);
+  const failFrozen = stageFailEdgeFrozen(pipeline, stage);
+  /* A pass edge may not target its own stage (the pass graph stays acyclic), but
+     a fail edge legally loops back to the stage itself — that self-loop is the
+     only cycle a one-stage pipeline can carry (#353), so the fail picker must
+     offer the current stage while the pass picker excludes it. */
+  const passTargets = pipeline.stages.filter((candidate) => candidate.id !== stage.id);
+  const failTargets = pipeline.stages;
   const apply = async (edge: "pass" | "fail", to: string | null, maxRounds?: number) => {
     if (busy) return;
     setBusy(true);
@@ -56,7 +61,7 @@ export function StageEdgeControls({
             onChange={(event) => void apply("pass", event.target.value || null)}
           >
             <option value="">{t("pipelineSlot.passEdgeEnd")}</option>
-            {targets.map((candidate) => (
+            {passTargets.map((candidate) => (
               <option key={candidate.id} value={candidate.id}>{stageChipLabel(t, candidate)}</option>
             ))}
           </Select>
@@ -70,8 +75,10 @@ export function StageEdgeControls({
             onChange={(event) => void apply("fail", event.target.value || null, event.target.value ? stage.onFail?.maxRounds : undefined)}
           >
             <option value="">{t("pipelineSlot.failEdgeNone")}</option>
-            {targets.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>{stageChipLabel(t, candidate)}</option>
+            {failTargets.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.id === stage.id ? t("pipelineSlot.failEdgeSelf") : stageChipLabel(t, candidate)}
+              </option>
             ))}
           </Select>
         </label>

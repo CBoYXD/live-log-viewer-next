@@ -22,6 +22,8 @@ import {
   compactStageOpenTarget,
   excludeCompactPipelineArtifacts,
   pipelineAnnouncement,
+  pipelineStagePosition,
+  stageFailEdgeFrozen,
   pipelineBoardStripPath,
   pipelineCursorActive,
   pipelineNeedsAttention,
@@ -324,6 +326,118 @@ describe("pipelineAnnouncement", () => {
     expect(message).toContain("ship it");
     expect(message).toContain('"k":2');
     expect(message).toContain('"n":3');
+  });
+});
+
+describe("pipelineStagePosition (#353)", () => {
+  test("a running pipeline reports the 1-based cursor position", () => {
+    const stages = [stage("plan"), stage("build"), stage("review", "review-loop")];
+    const p = pipeline({ stages, cursor: { stageId: "build", state: "running", input: null, activatedBy: null } });
+    expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 3 });
+  });
+
+  test("a completed pipeline reports the terminal stage it actually ran, not the last array slot", () => {
+    /* plan jumps straight to ship (index 1); the trailing "extra" stage (index 2)
+       is never reached, so the header must read 2/3, not 3/3. */
+    const stages = [
+      { ...stage("plan"), next: "ship" },
+      { ...stage("ship"), next: null },
+      { ...stage("extra"), next: null },
+    ];
+    const p = pipeline({
+      stages,
+      state: "completed",
+      cursor: null,
+      runs: [
+        { stageId: "plan", attempts: [{ n: 1, state: "passed", completedAt: "2026-01-01T00:00:01Z" } as never] },
+        { stageId: "ship", attempts: [{ n: 1, state: "passed", completedAt: "2026-01-01T00:00:02Z" } as never] },
+        { stageId: "extra", attempts: [] },
+      ],
+    });
+    expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 3 });
+  });
+
+  test("a completed linear pipeline still reads n/n", () => {
+    const p = pipeline({
+      stages: [stage("plan"), stage("build")],
+      state: "completed",
+      cursor: null,
+      runs: [
+        { stageId: "plan", attempts: [{ n: 1, state: "passed", completedAt: "2026-01-01T00:00:01Z" } as never] },
+        { stageId: "build", attempts: [{ n: 1, state: "passed", completedAt: "2026-01-01T00:00:02Z" } as never] },
+      ],
+    });
+    expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 2 });
+  });
+});
+
+describe("stageFailEdgeFrozen (#353)", () => {
+  test("a fail edge is frozen the instant the cursor routes along it, before the target attempt materializes", () => {
+    const verify = { ...stage("verify"), onFail: { to: "build", maxRounds: 3 } };
+    const build = stage("build");
+    const p = pipeline({
+      stages: [build, verify],
+      state: "running",
+      /* Cursor routed to build along verify's fail edge; build has no new attempt yet. */
+      cursor: { stageId: "build", state: "pending", input: "x", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } },
+      runs: [
+        { stageId: "build", attempts: [{ n: 1, state: "passed" } as never] },
+        { stageId: "verify", attempts: [{ n: 1, state: "failed", verdict: { status: "fail" } } as never] },
+      ],
+    });
+    expect(stageFailEdgeFrozen(p, verify)).toBe(true);
+    expect(stageFailEdgeFrozen(p, build)).toBe(false);
+  });
+
+  test("a fail edge with a materialized target round is frozen too", () => {
+    const verify = { ...stage("verify"), onFail: { to: "build", maxRounds: 3 } };
+    const p = pipeline({
+      stages: [stage("build"), verify],
+      runs: [
+        { stageId: "build", attempts: [
+          { n: 1, state: "passed" } as never,
+          { n: 2, state: "running", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } } as never,
+        ] },
+        { stageId: "verify", attempts: [{ n: 1, state: "failed" } as never] },
+      ],
+    });
+    expect(stageFailEdgeFrozen(p, verify)).toBe(true);
+  });
+
+  test("an untraversed fail edge stays editable", () => {
+    const verify = { ...stage("verify"), onFail: { to: "build", maxRounds: 3 } };
+    const p = pipeline({ stages: [stage("build"), verify], cursor: { stageId: "build", state: "pending", input: null, activatedBy: null } });
+    expect(stageFailEdgeFrozen(p, verify)).toBe(false);
+  });
+});
+
+describe("structural draft edits preserve custom edges (#353)", () => {
+  /* A jumps to C (skipping B) and loops back to B on failure; B and C form the
+     tail. Any structural edit must keep these intentional edges. */
+  const custom = () => ([
+    { ...stage("a"), next: "c", onFail: { to: "b", maxRounds: 2 } },
+    { ...stage("b"), next: "c" },
+    { ...stage("c"), next: null },
+  ] as PipelineStage[]);
+
+  test("optimisticAddStage keeps the custom jump and fail edge, wiring only the new seam", () => {
+    const after = optimisticAddStage(pipeline({ stages: custom() }), { id: "d", kind: "run", prompt: "{{prev.output}}", next: null }, 3);
+    const byId = new Map(after.stages.map((s) => [s.id, s]));
+    expect(byId.get("a")!.next).toBe("c");
+    expect(byId.get("a")!.onFail).toEqual({ to: "b", maxRounds: 2 });
+    expect(byId.get("b")!.next).toBe("c");
+    /* Seam only: predecessor c now points at d, d inherits c's old target. */
+    expect(byId.get("c")!.next).toBe("d");
+    expect(byId.get("d")!.next).toBeNull();
+  });
+
+  test("optimisticRemoveStage bypasses the removed target and preserves untouched edges", () => {
+    const after = optimisticRemoveStage(pipeline({ stages: custom() }), "c");
+    const byId = new Map(after.stages.map((s) => [s.id, s]));
+    expect(after.stages.map((s) => s.id)).toEqual(["a", "b"]);
+    expect(byId.get("a")!.next).toBeNull();
+    expect(byId.get("a")!.onFail).toEqual({ to: "b", maxRounds: 2 });
+    expect(byId.get("b")!.next).toBeNull();
   });
 });
 

@@ -355,7 +355,47 @@ function normalizedOutput(pipeline: Pipeline): string {
   return "";
 }
 
+/** The durable activation that placed a stage's current attempt here (#353): the
+    attempt's own `activatedBy`, or the cursor's when the attempt has not
+    materialized yet. Null for the root stage and for migrated pre-v3 attempts
+    (unknown provenance), which is the signal to fall back to the positional
+    scan. */
+function stageActivation(pipeline: Pipeline, stageId: string): PipelineStageAttempt["activatedBy"] {
+  return currentAttempt(pipeline, stageId)?.activatedBy
+    ?? (pipeline.cursor?.stageId === stageId ? pipeline.cursor.activatedBy : null);
+}
+
+/** Walks the durable activation lineage backwards from a stage's current
+    attempt, yielding each graph ancestor (nearest first) along the real
+    provenance chain rather than array order — so merges, jumps, and fail loops
+    resolve to the stage that actually activated this one. Stops at the migrated
+    boundary (an ancestor with no `activatedBy`) or a cycle. */
+function* activationLineage(pipeline: Pipeline, stageId: string): Generator<{ stage: PipelineStage; attempt: PipelineStageAttempt }> {
+  const seen = new Set<string>();
+  let activation = stageActivation(pipeline, stageId);
+  while (activation) {
+    const key = `${activation.stageId}:${activation.attempt}`;
+    if (seen.has(key)) break;
+    seen.add(key);
+    const stage = pipeline.stages.find((candidate) => candidate.id === activation!.stageId) ?? null;
+    const attempt = runFor(pipeline, activation.stageId)?.attempts.find((candidate) => candidate.n === activation!.attempt) ?? null;
+    if (!stage || !attempt) break;
+    yield { stage, attempt };
+    activation = attempt.activatedBy;
+  }
+}
+
+/** The lineage parent transcript a fresh stage inherits (#353): the nearest
+    passed/skipped ancestor along the durable activation graph. Migrated pre-v3
+    attempts without provenance fall back to the legacy positional scan
+    byte-identically, so an in-flight v2 pipeline keeps its parent selection. */
 function latestCompletedAgentPath(pipeline: Pipeline, beforeStageId?: string): string | null {
+  if (beforeStageId && stageActivation(pipeline, beforeStageId)) {
+    for (const { attempt } of activationLineage(pipeline, beforeStageId)) {
+      if (attempt.agentPath && (attempt.state === "passed" || attempt.state === "skipped")) return attempt.agentPath;
+    }
+    return pipeline.srcPath;
+  }
   const stop = beforeStageId ? pipeline.stages.findIndex((stage) => stage.id === beforeStageId) : pipeline.stages.length;
   for (let index = stop - 1; index >= 0; index -= 1) {
     const attempt = currentAttempt(pipeline, pipeline.stages[index]!.id);
@@ -364,7 +404,17 @@ function latestCompletedAgentPath(pipeline: Pipeline, beforeStageId?: string): s
   return pipeline.srcPath;
 }
 
+/** The run whose session a review-loop stage reviews (#353): the nearest passed
+    run ancestor along the activation graph, so a merge/jump review binds to the
+    run that actually activated it — not whichever run sits earlier in the array.
+    Migrated pre-v3 attempts fall back to the positional scan. */
 function latestPassedRun(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
+  if (stageActivation(pipeline, stageId)) {
+    for (const { stage, attempt } of activationLineage(pipeline, stageId)) {
+      if (stage.kind === "run" && attempt.state === "passed" && attempt.agentPath) return attempt;
+    }
+    return null;
+  }
   const stop = pipeline.stages.findIndex((stage) => stage.id === stageId);
   for (let index = stop - 1; index >= 0; index -= 1) {
     const stage = pipeline.stages[index]!;
@@ -1041,8 +1091,13 @@ function normalizeStages(
   return { stages };
 }
 
+/** Snapshots the draft's stages as editable inputs, preserving each stage's
+    intentional pass (`next`) and fail (`onFail`) edges verbatim (#353): a
+    structural edit (add/remove/reorder/override) must not silently flatten a
+    custom jump/merge or fail loop back to array order — only the edit's own seam
+    is rewired, by the caller. */
 function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
-  return stages.map((stage, index) => ({
+  return stages.map((stage) => ({
     id: stage.id,
     kind: stage.kind,
     ...(stage.role ? { role: structuredClone(stage.role) } : {}),
@@ -1051,7 +1106,7 @@ function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
     ...(stage.effort !== undefined ? { effort: stage.effort } : {}),
     ...(stage.access !== undefined ? { access: stage.access } : {}),
     prompt: stage.prompt,
-    next: stages[index + 1]?.id ?? null,
+    next: stage.next ?? null,
     onFail: stage.onFail ?? null,
   }));
 }
@@ -1061,13 +1116,15 @@ function replaceDraftStages(
   inputs: PipelineStageInput[],
   lookup?: PipelineRoleLookup | null,
 ): { error?: string } {
-  /* Array edits (add/remove/reorder) relink the pass chain in array order —
-     custom pass edges are re-drawn through set-edge afterwards — while each
-     kept stage's fail edge survives unless its target left the plan. */
+  /* Custom edges survive structural edits (#353): each kept stage's intentional
+     pass and fail edge is preserved as-is — the add/remove handlers rewire only
+     the edit's own seam. This is only a safety net: an edge whose target left the
+     plan, or a pass edge left pointing at its own stage, is cleared so the graph
+     can never persist a dangling reference. */
   const keptIds = new Set(inputs.map((stage) => stage.id));
-  const relinked = inputs.map((stage, index) => ({
+  const relinked = inputs.map((stage) => ({
     ...stage,
-    next: inputs[index + 1]?.id ?? null,
+    next: stage.next != null && stage.next !== stage.id && keptIds.has(stage.next) ? stage.next : null,
     onFail: stage.onFail && keptIds.has(stage.onFail.to) ? stage.onFail : null,
   }));
   const preserved = new Map(pipeline.stages.map((stage) => [stage.id, stage]));
@@ -1075,6 +1132,14 @@ function replaceDraftStages(
      floor is enforced only at Start (#136, #353). */
   const normalized = normalizeStages(relinked, lookup, preserved, 0);
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
+  /* The entry stage (the draft cursor rests on stages[0]) must be a run: a
+     review-loop entry has no preceding run to review and would park on Start.
+     With edges preserved rather than flattened, a fronted review can be
+     graph-reachable from a later run, so the array-position guard is enforced
+     explicitly here (matching the client's reviewLoopChainValid). */
+  if (normalized.stages[0] && normalized.stages[0].kind !== "run") {
+    return { error: "review-loop stage requires a preceding run stage" };
+  }
   pipeline.stages = normalized.stages;
   pipeline.runs = normalized.stages.map((stage) => ({ stageId: stage.id, attempts: [] }));
   pipeline.cursor = normalized.stages.length
@@ -1241,7 +1306,15 @@ export async function patchPipeline(
       const inputs = draftStageInputs(pipeline.stages);
       const index = req.index === undefined ? inputs.length : req.index;
       if (!Number.isInteger(index) || index < 0 || index > inputs.length) return { error: "stage index is out of range", status: 400 };
-      inputs.splice(index, 0, req.stage);
+      /* Splice the new stage into the chain at its own seam only: it inherits the
+         predecessor's former pass target and the predecessor now points at it, so
+         every OTHER stage's intentional edge is untouched (#353). Inserting at the
+         front makes the new stage the head, pointing at the old head. */
+      const predecessor = index > 0 ? inputs[index - 1] : null;
+      const seamNext = predecessor ? predecessor.next ?? null : inputs[index]?.id ?? null;
+      const inserted: PipelineStageInput = { ...req.stage, next: seamNext };
+      inputs.splice(index, 0, inserted);
+      if (predecessor) predecessor.next = inserted.id;
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
       if (replaced.error) return { error: replaced.error, status: 400 };
     } else if (req.action === "remove-stage") {
@@ -1255,8 +1328,18 @@ export async function patchPipeline(
       if (pipeline.stages.length === 1) return { error: "a pipeline keeps at least one stage; reconfigure it instead", status: 409 };
       const index = pipeline.stages.findIndex((stage) => stage.id === req.stageId);
       if (index < 0) return { error: "stage not found", status: 404 };
+      const removed = pipeline.stages[index]!;
       const inputs = draftStageInputs(pipeline.stages);
       inputs.splice(index, 1);
+      /* Heal only the edges that pointed AT the removed stage, preserving every
+         other intentional edge (#353): a pass edge bypasses to the removed
+         stage's own target (the chain stays connected past it); a fail edge that
+         targeted it parks instead (there is no meaningful bypass for a loop). */
+      const bypass = removed.next && removed.next !== removed.id ? removed.next : null;
+      for (const input of inputs) {
+        if (input.next === removed.id) input.next = bypass;
+        if (input.onFail?.to === removed.id) input.onFail = null;
+      }
       const replaced = replaceDraftStages(pipeline, inputs, ports.roleLookup);
       if (replaced.error) return { error: replaced.error, status: 400 };
     } else if (req.action === "reorder-stage") {
@@ -1304,8 +1387,14 @@ export async function patchPipeline(
         if (graphError) return { error: graphError, status: 400 };
         from.next = req.to;
       } else {
-        const traversed = pipeline.runs.some((run) =>
-          run.attempts.some((item) => item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
+        /* A fail edge freezes the instant its verdict routes the cursor along it,
+           not only once the target attempt materializes: the activation lands on
+           the durable cursor in the same mutation as the failing verdict and
+           survives a restart, so the target it forwarded evidence to can never be
+           rewritten out from under an in-flight round (#353). */
+        const traversed = (pipeline.cursor?.activatedBy?.edge === "fail" && pipeline.cursor.activatedBy.stageId === from.id)
+          || pipeline.runs.some((run) =>
+            run.attempts.some((item) => item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
         if (traversed) return { error: "fail edge has already been traversed; it is frozen evidence", status: 409 };
         if (req.to === null) {
           if (req.maxRounds !== undefined) return { error: "maxRounds requires a fail-edge target", status: 400 };

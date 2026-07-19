@@ -1041,6 +1041,7 @@ export const uk: Record<keyof typeof en, Message> = {
   "pipelineSlot.passEdgeEnd": "— завершує конвеєр",
   "pipelineSlot.failEdgeLabel": "У разі невдачі — назад до",
   "pipelineSlot.failEdgeNone": "— зупинка для оператора",
+  "pipelineSlot.failEdgeSelf": "↺ цей етап (повтор себе)",
   "pipelineSlot.failEdgeRounds": "Макс. раундів циклу",
   "pipelineSlot.passEdgeFrozen": "Цей етап уже виконувався — його ребро проходження заморожене як свідчення.",
   "pipelineSlot.failEdgeFrozen": "Це ребро невдачі вже пройдене — воно заморожене як свідчення.",

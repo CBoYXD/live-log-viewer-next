@@ -214,7 +214,10 @@ function DraftStageCards({
               <button className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-border bg-canvas text-muted hover:text-danger focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-30" disabled={busy || !canRemove(index)} aria-label={t("groupOverride.removeStage")} onClick={() => removeStage(stage.id)}><Trash2 className="h-3 w-3" aria-hidden /></button>
             </div>
             <StageForm key={`${stage.id}:${stage.role?.roleId ?? ""}:${stage.effectiveRole.engine}:${stage.effectiveRole.model ?? ""}:${stage.effectiveRole.effort ?? ""}:${stage.prompt}`} pipeline={pipeline} stage={stage} index={index} busy={busy} disabled={false} run={run} />
-            {stages.length > 1 ? <StageEdgeControls pipeline={pipeline} stage={stage} disabled={busy} /> : null}
+            {/* Always shown, including a one-stage pipeline (#353): the lone stage's
+                only legal cycle is a self-targeting fail edge, so the Connect picker
+                must be reachable even before a second stage exists. */}
+            <StageEdgeControls pipeline={pipeline} stage={stage} disabled={busy} />
           </div>
         ))}
       </div>

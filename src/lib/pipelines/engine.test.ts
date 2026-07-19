@@ -1755,3 +1755,120 @@ test("set-edge rewires future edges and freezes traversed evidence (#353)", asyn
   const stillEditable = await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "fail", to: "build", maxRounds: 1 }, ports);
   expect(stillEditable.pipeline?.stages[2]?.onFail).toEqual({ to: "build", maxRounds: 1 });
 });
+
+test("a fail edge freezes the instant it routes, before the target attempt materializes, and the freeze survives restart (#353)", async () => {
+  const h = harness();
+  const { ports } = h;
+  await create(ports, CYCLE_STAGES as never);
+  await tickPipelines([], ports); // provision
+  await tickPipelines([], ports); // spawn build
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built v1")], ports); // build passes → verify
+  await tickPipelines([], ports); // spawn verify
+  /* verify fails → the cursor routes back to build along the fail edge. The
+     follow-up tick that would materialize build's second attempt is a no-op in
+     this suite, so we sit in the in-flight window on purpose. */
+  h.messages.set("/codex/stage-2.jsonl", { text: "cannot pass\n\n```json\n{\"status\":\"fail\",\"findings\":[\"broken\"]}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-2.jsonl")], ports);
+
+  const inflight = loadPipelines()[0]!;
+  expect(inflight.cursor).toMatchObject({ stageId: "build", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } });
+  /* The traversal lives only on the durable cursor: build has not grown a second
+     attempt yet, so a round-count-only guard would still read zero. */
+  expect(inflight.runs[0]!.attempts).toHaveLength(1);
+
+  const frozen = await patchPipeline(inflight.id, { action: "set-edge", stageId: "verify", edge: "fail", to: null }, ports);
+  expect(frozen.status).toBe(409);
+  expect(frozen.error).toContain("frozen evidence");
+
+  /* patchPipeline re-reads the persisted registry from disk, so this second edit
+     proves the freeze survives a process restart. */
+  const afterRestart = await patchPipeline(inflight.id, { action: "set-edge", stageId: "verify", edge: "fail", to: "build", maxRounds: 4 }, ports);
+  expect(afterRestart.status).toBe(409);
+  expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "verify")?.onFail).toEqual({ to: "build", maxRounds: 1 });
+});
+
+test("a review-loop binds its implementer through the activation graph, not array order (#353)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  /* Execution is seed → buildB → review, but the array order places review
+     (index 1) BEFORE its real implementer buildB (index 2). A positional scan
+     would bind the review to `seed` (the nearest earlier-in-array run); the
+     activation lineage correctly binds it to buildB. */
+  const created = await createPipelineFromRequest({
+    task: "Merge lineage",
+    spec: "AC",
+    repoDir: "/repo",
+    stages: [
+      { id: "seed", kind: "run", role: { roleId: "builder" }, prompt: "Seed {{task}}", next: "buildB" },
+      { id: "review", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review {{task}}", next: null },
+      { id: "buildB", kind: "run", role: { roleId: "builder" }, prompt: "Build {{prev.output}}", next: "review" },
+    ] as never,
+  }, ports);
+  expect(created.pipeline).toBeDefined();
+  await tickPipelines([], ports); // provision
+  await tickPipelines([], ports); // spawn seed
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "seeded")], ports); // seed → buildB
+  await tickPipelines([], ports); // spawn buildB
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "pass", "built")], ports); // buildB → review
+  await tickPipelines([], ports); // review creates its flow
+
+  const current = loadPipelines()[0]!;
+  expect(current.cursor?.stageId).toBe("review");
+  expect(current.runs.find((run) => run.stageId === "review")!.attempts[0]!.activatedBy).toEqual({ stageId: "buildB", attempt: 1, edge: "pass" });
+  /* The review flow was opened against buildB's transcript (the real implementer),
+     not seed's earlier-in-array transcript. */
+  expect(h.calls.some((call) => call.startsWith("flow:/codex/stage-2.jsonl"))).toBe(true);
+  expect(h.calls.some((call) => call.startsWith("flow:/codex/stage-1.jsonl"))).toBe(false);
+});
+
+test("structural draft edits preserve intentional pass and fail edges (#353)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Graph preservation",
+    repoDir: "/repo",
+    stages: [
+      { id: "plan", kind: "run", role: { roleId: "builder" }, prompt: "Plan", next: "build" },
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build", next: "verify" },
+      { id: "verify", kind: "run", role: { roleId: "builder" }, prompt: "Verify", next: null },
+    ] as never,
+    autoStart: false,
+  }, ports);
+  const id = created.pipeline!.id;
+
+  /* A custom jump (plan → verify, skipping build) and a fail loop (verify → plan). */
+  await patchPipeline(id, { action: "set-edge", stageId: "plan", edge: "pass", to: "verify" }, ports);
+  await patchPipeline(id, { action: "set-edge", stageId: "verify", edge: "fail", to: "plan", maxRounds: 3 }, ports);
+
+  const edgesOf = (stages: { id: string; next: string | null; onFail?: unknown }[]) =>
+    new Map(stages.map((stage) => [stage.id, { next: stage.next, onFail: stage.onFail ?? null }]));
+  const jumpAndLoopSurvive = (stages: { id: string; next: string | null; onFail?: unknown }[]) => {
+    const edges = edgesOf(stages);
+    expect(edges.get("plan")!.next).toBe("verify");
+    expect(edges.get("verify")!.onFail).toEqual({ to: "plan", maxRounds: 3 });
+  };
+
+  /* add-stage: the jump and loop survive; the new stage is spliced at its seam. */
+  const added = await patchPipeline(id, {
+    action: "add-stage",
+    stage: { id: "audit", kind: "run", role: { roleId: "builder" }, prompt: "Audit", next: null },
+  }, ports);
+  jumpAndLoopSurvive(added.pipeline!.stages);
+  expect(added.pipeline!.stages.some((stage) => stage.id === "audit")).toBe(true);
+
+  /* reorder-stage: edges follow ids, not array order, so nothing is rewired. */
+  const reordered = await patchPipeline(id, { action: "reorder-stage", stageId: "build", toIndex: 3 }, ports);
+  expect(reordered.pipeline!.stages.map((stage) => stage.id)).toEqual(["plan", "verify", "audit", "build"]);
+  jumpAndLoopSurvive(reordered.pipeline!.stages);
+
+  /* override-stage: editing a stage's prompt never disturbs edges. */
+  const overridden = await patchPipeline(id, { action: "override-stage", stageId: "build", prompt: "Rebuild" }, ports);
+  jumpAndLoopSurvive(overridden.pipeline!.stages);
+
+  /* remove-stage: removing an unrelated stage leaves the jump and loop intact. */
+  const removed = await patchPipeline(id, { action: "remove-stage", stageId: "audit" }, ports);
+  expect(removed.pipeline!.stages.some((stage) => stage.id === "audit")).toBe(false);
+  jumpAndLoopSurvive(removed.pipeline!.stages);
+});
