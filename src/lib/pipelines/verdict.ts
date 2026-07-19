@@ -4,8 +4,16 @@ const MAX_FINDINGS = 50;
 const MAX_FINDING_CHARS = 2_000;
 const MAX_OUTPUT_CHARS = 32_000;
 const ALLOWED_KEYS = new Set(["status", "findings", "confidence"]);
+const PROSE_VERDICT_STATUSES = {
+  APPROVE: "pass",
+  REQUEST_CHANGES: "fail",
+  COMMENT: "needs_decision",
+  "NO FINDINGS": "pass",
+} as const satisfies Record<string, StageVerdict["status"]>;
+const PROSE_VERDICT_RE = /^\s*(?:VERDICT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)|(NO FINDINGS))\s*$/gim;
 
 export type ParsedStageVerdict = { verdict: StageVerdict; output: string };
+export type RejectedStageVerdict = { failureReason: string; output: string };
 
 export function stageVerdictFrom(value: unknown): StageVerdict | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -33,7 +41,7 @@ export function stageVerdictFrom(value: unknown): StageVerdict | null {
   return verdict;
 }
 /** Completion authority is the final fenced JSON block in a completed turn. */
-export function parseStageVerdict(text: string): ParsedStageVerdict | null {
+export function parseStageVerdict(text: string): ParsedStageVerdict | RejectedStageVerdict | null {
   const matches = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   const last = matches.at(-1);
   if (!last || last.index === undefined) return null;
@@ -47,5 +55,22 @@ export function parseStageVerdict(text: string): ParsedStageVerdict | null {
   }
   const verdict = stageVerdictFrom(raw);
   if (!verdict) return null;
-  return { verdict, output: text.slice(0, last.index).trim().slice(0, MAX_OUTPUT_CHARS) };
+  const prose = text.slice(0, last.index).trim();
+  const output = prose.slice(0, MAX_OUTPUT_CHARS);
+  if (verdict.status === "pass" && verdict.findings?.length) {
+    return {
+      failureReason: 'contradictory stage verdict: status "pass" cannot include findings',
+      output,
+    };
+  }
+  for (const match of prose.matchAll(PROSE_VERDICT_RE)) {
+    const marker = (match[1] ?? match[2])!.toUpperCase() as keyof typeof PROSE_VERDICT_STATUSES;
+    if (PROSE_VERDICT_STATUSES[marker] !== verdict.status) {
+      return {
+        failureReason: `contradictory stage verdict: prose marker "${marker}" disagrees with JSON status "${verdict.status}"`,
+        output,
+      };
+    }
+  }
+  return { verdict, output };
 }

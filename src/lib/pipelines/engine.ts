@@ -413,9 +413,8 @@ function commitPassedStage(
   advancePipeline(pipeline, stage, ports);
 }
 
-/** One-shot settlement of a completed stage turn. Records the verdict on the
-    attempt, then either commits + advances (pass) or parks with the verdict
-    preserved (fail / needs_decision). */
+/** One-shot settlement of a completed stage turn. Semantic contradictions park
+    with their parser reason. Valid verdicts are recorded before settlement. */
 function settleStageVerdict(
   pipeline: Pipeline,
   stage: PipelineStage,
@@ -425,6 +424,11 @@ function settleStageVerdict(
   persist: () => void,
 ): void {
   attempt.output = parsed.output;
+  if ("failureReason" in parsed) {
+    attempt.completedAt = ports.now();
+    park(pipeline, parsed.failureReason, attempt);
+    return;
+  }
   attempt.verdict = parsed.verdict;
   if (parsed.verdict.status !== "pass") {
     attempt.state = parsed.verdict.status === "fail" ? "failed" : "needs_decision";

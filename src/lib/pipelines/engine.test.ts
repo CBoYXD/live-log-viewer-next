@@ -950,6 +950,42 @@ test("a durable fail verdict parks with the verdict receipt preserved", async ()
   });
 });
 
+test("a contradictory durable pass verdict parks with the parser failure reason", async () => {
+  const h = harness();
+  await runningStructuredStage(h);
+  h.setConversationActive(true);
+  h.durableTurns.set("/codex/stage-1.jsonl", {
+    turn: "terminal",
+    message: {
+      text: [
+        "VERDICT: REQUEST_CHANGES",
+        "",
+        "- [P1] Preserve the failed review",
+        "",
+        "```json",
+        '{"status":"pass","findings":["Preserve the failed review"]}',
+        "```",
+      ].join("\n"),
+      ts: 5_000_000,
+    },
+  });
+
+  await tickPipelines([], h.ports);
+
+  const reason = 'contradictory stage verdict: status "pass" cannot include findings';
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("needs_decision");
+  expect(current.stateDetail).toBe(reason);
+  expect(current.cursor).toEqual({ stageId: "plan", state: "running" });
+  expect(current.lastPassedCommit).toBe(ORIGIN_MAIN_SHA);
+  expect(current.runs[0]!.attempts[0]).toMatchObject({
+    state: "needs_decision",
+    output: "VERDICT: REQUEST_CHANGES\n\n- [P1] Preserve the failed review",
+    verdict: null,
+    error: reason,
+  });
+});
+
 test("durable settlement is idempotent across repeated wake-up ticks", async () => {
   const h = harness();
   await runningStructuredStage(h);
