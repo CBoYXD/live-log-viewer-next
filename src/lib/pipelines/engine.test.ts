@@ -1772,8 +1772,8 @@ test("a fail edge freezes the instant it routes, before the target attempt mater
 
   const inflight = loadPipelines()[0]!;
   expect(inflight.cursor).toMatchObject({ stageId: "build", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } });
-  /* The traversal lives only on the durable cursor: build has not grown a second
-     attempt yet, so a round-count-only guard would still read zero. */
+  /* The traversal lives on the durable cursor while build still holds one
+     attempt, so the freeze reads the cursor activation to catch this window. */
   expect(inflight.runs[0]!.attempts).toHaveLength(1);
 
   const frozen = await patchPipeline(inflight.id, { action: "set-edge", stageId: "verify", edge: "fail", to: null }, ports);
@@ -1787,14 +1787,14 @@ test("a fail edge freezes the instant it routes, before the target attempt mater
   expect(loadPipelines()[0]!.stages.find((stage) => stage.id === "verify")?.onFail).toEqual({ to: "build", maxRounds: 1 });
 });
 
-test("a review-loop binds its implementer through the activation graph, not array order (#353)", async () => {
+test("a review-loop binds its implementer through the activation graph across a merge (#353)", async () => {
   const h = harness();
   const { ports } = h;
   savePipelines([]);
-  /* Execution is seed → buildB → review, but the array order places review
-     (index 1) BEFORE its real implementer buildB (index 2). A positional scan
-     would bind the review to `seed` (the nearest earlier-in-array run); the
-     activation lineage correctly binds it to buildB. */
+  /* Execution runs seed → buildB → review, while the array order places review
+     (index 1) ahead of its real implementer buildB (index 2). The activation
+     lineage binds the review to buildB, the run that activated it, and the merge
+     makes buildB sit later in the array than the review it feeds. */
   const created = await createPipelineFromRequest({
     task: "Merge lineage",
     spec: "AC",
@@ -1816,8 +1816,8 @@ test("a review-loop binds its implementer through the activation graph, not arra
   const current = loadPipelines()[0]!;
   expect(current.cursor?.stageId).toBe("review");
   expect(current.runs.find((run) => run.stageId === "review")!.attempts[0]!.activatedBy).toEqual({ stageId: "buildB", attempt: 1, edge: "pass" });
-  /* The review flow was opened against buildB's transcript (the real implementer),
-     not seed's earlier-in-array transcript. */
+  /* The review flow opens against buildB's transcript, the run that activated
+     the review. */
   expect(h.calls.some((call) => call.startsWith("flow:/codex/stage-2.jsonl"))).toBe(true);
   expect(h.calls.some((call) => call.startsWith("flow:/codex/stage-1.jsonl"))).toBe(false);
 });
@@ -1858,12 +1858,12 @@ test("structural draft edits preserve intentional pass and fail edges (#353)", a
   jumpAndLoopSurvive(added.pipeline!.stages);
   expect(added.pipeline!.stages.some((stage) => stage.id === "audit")).toBe(true);
 
-  /* reorder-stage: edges follow ids, not array order, so nothing is rewired. */
+  /* reorder-stage: edges follow ids, so a reorder leaves them in place. */
   const reordered = await patchPipeline(id, { action: "reorder-stage", stageId: "build", toIndex: 3 }, ports);
   expect(reordered.pipeline!.stages.map((stage) => stage.id)).toEqual(["plan", "verify", "audit", "build"]);
   jumpAndLoopSurvive(reordered.pipeline!.stages);
 
-  /* override-stage: editing a stage's prompt never disturbs edges. */
+  /* override-stage: editing a stage's prompt leaves its edges intact. */
   const overridden = await patchPipeline(id, { action: "override-stage", stageId: "build", prompt: "Rebuild" }, ports);
   jumpAndLoopSurvive(overridden.pipeline!.stages);
 
@@ -1871,4 +1871,79 @@ test("structural draft edits preserve intentional pass and fail edges (#353)", a
   const removed = await patchPipeline(id, { action: "remove-stage", stageId: "audit" }, ports);
   expect(removed.pipeline!.stages.some((stage) => stage.id === "audit")).toBe(false);
   jumpAndLoopSurvive(removed.pipeline!.stages);
+});
+
+test("consecutive reviews cross a migration boundary and resume positional implementer selection (#353)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Mixed consecutive reviews",
+    spec: "AC",
+    repoDir: "/repo",
+    stages: [
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build {{task}}", next: "review1" },
+      { id: "review1", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review {{task}}", next: "review2" },
+      { id: "review2", kind: "review-loop", role: { roleId: "reviewer" }, prompt: "Review again {{task}}", next: null },
+    ] as never,
+  }, ports);
+  expect(created.pipeline).toBeDefined();
+  await tickPipelines([], ports); // provision
+  await tickPipelines([], ports); // spawn build
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "built")], ports); // build → review1
+  await tickPipelines([entry("/codex/stage-1.jsonl")], ports); // review1 opens flow-1
+  h.flows.get("flow-1")!.state = "approved";
+  await tickPipelines([entry("/codex/stage-1.jsonl")], ports); // review1 approves → review2
+
+  /* Migrate review1's attempt: an ancestor with activatedBy null is the boundary
+     the review2 lineage stops at, so implementer selection resumes positionally
+     and binds to build (the passed run before the reviews). */
+  const staged = loadPipelines()[0]!;
+  expect(staged.cursor?.stageId).toBe("review2");
+  staged.runs.find((run) => run.stageId === "review1")!.attempts[0]!.activatedBy = null;
+  savePipelines([staged]);
+
+  await tickPipelines([], ports); // review2 opens its flow
+  const current = loadPipelines()[0]!;
+  expect(current.state).toBe("running");
+  expect(h.flows.size).toBe(2);
+  expect(h.calls.filter((call) => call.startsWith("flow:/codex/stage-1.jsonl")).length).toBe(2);
+});
+
+test("a fail loop crosses a migration boundary and resumes positional parent selection (#353)", async () => {
+  const h = harness();
+  const { ports } = h;
+  savePipelines([]);
+  const created = await createPipelineFromRequest({
+    task: "Mixed fail loop",
+    spec: "AC",
+    repoDir: "/repo",
+    stages: [
+      { id: "seed", kind: "run", role: { roleId: "builder" }, prompt: "Seed {{task}}", next: "build" },
+      { id: "build", kind: "run", role: { roleId: "builder" }, prompt: "Build {{prev.output}}", next: "verify" },
+      { id: "verify", kind: "run", role: { roleId: "builder" }, prompt: "Verify {{prev.output}}", next: null, onFail: { to: "build", maxRounds: 2 } },
+    ] as never,
+  }, ports);
+  expect(created.pipeline).toBeDefined();
+  await tickPipelines([], ports); // provision
+  await tickPipelines([], ports); // spawn seed
+  await tickPipelines([h.finish("/codex/stage-1.jsonl", "pass", "seeded")], ports); // seed → build
+  await tickPipelines([], ports); // spawn build
+  await tickPipelines([h.finish("/codex/stage-2.jsonl", "pass", "built")], ports); // build → verify
+  await tickPipelines([], ports); // spawn verify
+  h.messages.set("/codex/stage-3.jsonl", { text: "cannot pass\n\n```json\n{\"status\":\"fail\",\"findings\":[\"broken\"]}\n```", ts: Date.now() + 100_000_000 });
+  await tickPipelines([entry("/codex/stage-3.jsonl")], ports); // verify fails → routes to build
+
+  /* Migrate verify's attempt: the fail-loop lineage stops at that boundary, so
+     the build retry's parent selection resumes positionally and inherits seed
+     (the passed run before build). */
+  const staged = loadPipelines()[0]!;
+  expect(staged.cursor).toMatchObject({ stageId: "build", activatedBy: { stageId: "verify", attempt: 1, edge: "fail" } });
+  staged.runs.find((run) => run.stageId === "verify")!.attempts[0]!.activatedBy = null;
+  savePipelines([staged]);
+
+  await tickPipelines([], ports); // build retry spawns
+  const lastSpawn = h.calls.filter((call) => call.startsWith("spawn:")).at(-1) ?? "";
+  expect(lastSpawn).toContain("_build_2");
+  expect(lastSpawn).toContain("parent=/codex/stage-1.jsonl");
 });

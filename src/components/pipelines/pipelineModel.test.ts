@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import type { FileEntry } from "@/lib/types";
-import type { Pipeline, PipelineStage } from "@/lib/pipelines/types";
+import type { Pipeline, PipelineStage, PipelineStageAttempt } from "@/lib/pipelines/types";
 import type { BoardTask } from "@/lib/tasks/types";
 
 import type { TFunction } from "@/lib/i18n";
@@ -336,9 +336,9 @@ describe("pipelineStagePosition (#353)", () => {
     expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 3 });
   });
 
-  test("a completed pipeline reports the terminal stage it actually ran, not the last array slot", () => {
+  test("a completed pipeline reports the terminal stage it actually ran", () => {
     /* plan jumps straight to ship (index 1); the trailing "extra" stage (index 2)
-       is never reached, so the header must read 2/3, not 3/3. */
+       stays unrun, so the header reads 2/3. */
     const stages = [
       { ...stage("plan"), next: "ship" },
       { ...stage("ship"), next: null },
@@ -368,6 +368,37 @@ describe("pipelineStagePosition (#353)", () => {
       ],
     });
     expect(pipelineStagePosition(p)).toEqual({ k: 2, n: 2 });
+  });
+
+  describe("a closed pipeline retains its current stage when the cursor is cleared", () => {
+    const stages = [stage("plan"), stage("build"), stage("verify")];
+    const closed = (build: PipelineStageAttempt) => pipeline({
+      stages,
+      state: "closed",
+      cursor: null,
+      closedAt: "2026-01-01T00:00:05Z",
+      runs: [
+        { stageId: "plan", attempts: [{ n: 1, state: "passed", completedAt: "2026-01-01T00:00:01Z" } as never] },
+        { stageId: "build", attempts: [build] },
+        { stageId: "verify", attempts: [] },
+      ],
+    });
+
+    test("closed on a running stage keeps that stage", () => {
+      expect(pipelineStagePosition(closed({ n: 1, state: "running", startedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });
+    });
+    test("closed on a pending stage keeps that stage", () => {
+      expect(pipelineStagePosition(closed({ n: 1, state: "pending" } as never))).toEqual({ k: 2, n: 3 });
+    });
+    test("closed on a failed stage keeps that stage", () => {
+      expect(pipelineStagePosition(closed({ n: 1, state: "failed", completedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });
+    });
+    test("closed on a passed stage keeps that stage", () => {
+      expect(pipelineStagePosition(closed({ n: 1, state: "passed", completedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });
+    });
+    test("closed on a skipped stage keeps that stage", () => {
+      expect(pipelineStagePosition(closed({ n: 1, state: "skipped", completedAt: "2026-01-01T00:00:02Z" } as never))).toEqual({ k: 2, n: 3 });
+    });
   });
 });
 

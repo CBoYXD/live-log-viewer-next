@@ -539,36 +539,44 @@ export function stageChipLabel(t: TFunction, stage: PipelineStage): string {
   return stage.id;
 }
 
+const CURSORLESS_LIVE_STATES: ReadonlySet<PipelineAttemptState> = new Set([
+  "pending", "spawning", "running", "reviewing", "committing",
+]);
+
 /**
- * The 1-based array position of the stage a cursorless pipeline actually
- * terminated on (#353): the last stage whose current attempt settled
- * passed/skipped, by completion time. A non-linear pass graph can terminate at
- * any stage — a jump or merge leaves later array slots unrun — so the last
- * ordinal is not the terminal stage. Returns -1 when nothing settled (e.g. a
- * pipeline closed before it ran a stage), letting the caller keep the n/n
+ * The 1-based array position of the stage a cursorless pipeline rests on (#353).
+ * A live attempt (pending/spawning/running/reviewing/committing) marks the stage
+ * the cursor held the moment it cleared, so a pipeline closed mid-flight keeps
+ * that stage across pending, running, and every in-progress state. Once every
+ * attempt has settled, the stage whose latest attempt completed most recently is
+ * the terminal one — a completed jump/merge graph reports the stage it truly
+ * ended on, and a pipeline closed on a failed, passed, or skipped stage keeps
+ * that stage. Returns -1 when no attempt exists, so the caller keeps the n/n
  * fallback.
  */
-function terminalStageIndex(pipeline: Pipeline): number {
-  let index = -1;
-  let at = "";
+function cursorlessStageIndex(pipeline: Pipeline): number {
+  let liveIndex = -1;
+  let settledIndex = -1;
+  let settledAt = "";
   pipeline.stages.forEach((stage, candidateIndex) => {
     const attempt = latestAttempt(pipeline, stage.id);
-    if (!attempt || (attempt.state !== "passed" && attempt.state !== "skipped")) return;
-    const completedAt = attempt.completedAt ?? "";
-    if (index === -1 || completedAt >= at) {
-      index = candidateIndex;
-      at = completedAt;
+    if (!attempt) return;
+    if (CURSORLESS_LIVE_STATES.has(attempt.state)) liveIndex = candidateIndex;
+    const stamp = attempt.completedAt ?? attempt.startedAt ?? "";
+    if ((attempt.completedAt || attempt.startedAt) && (settledIndex === -1 || stamp >= settledAt)) {
+      settledIndex = candidateIndex;
+      settledAt = stamp;
     }
   });
-  return index;
+  return liveIndex >= 0 ? liveIndex : settledIndex;
 }
 
 /**
  * The single source of the header "stage k/n" counter (#353): every consumer —
  * strip header, live-region announcement, dock, projection — reads this one
- * derivation so the counter can never disagree with the rendered members.
- * k is the 1-based cursor position; a completed/closed chain reads the position
- * of the stage it actually terminated on (never a later, never-run array slot).
+ * derivation so the counter stays consistent with the rendered members.
+ * k is the 1-based cursor position; a completed or closed chain reads the
+ * position of the stage it rests on, derived from its attempts.
  */
 export function pipelineStagePosition(pipeline: Pipeline): { k: number; n: number } {
   const n = pipeline.stages.length;
@@ -576,8 +584,8 @@ export function pipelineStagePosition(pipeline: Pipeline): { k: number; n: numbe
     const index = pipeline.stages.findIndex((stage) => stage.id === pipeline.cursor!.stageId);
     return { k: index >= 0 ? index + 1 : n, n };
   }
-  const terminalIndex = terminalStageIndex(pipeline);
-  return { k: terminalIndex >= 0 ? terminalIndex + 1 : n, n };
+  const restingIndex = cursorlessStageIndex(pipeline);
+  return { k: restingIndex >= 0 ? restingIndex + 1 : n, n };
 }
 
 /** A spoken one-liner for a pipeline's current position — used by the board's
@@ -998,11 +1006,10 @@ export function stageFailEdgeRoundsUsed(pipeline: Pipeline, stage: PipelineStage
 
 /**
  * Is a stage's fail edge frozen evidence (#353)? A fail edge freezes the instant
- * its verdict routes the cursor along it — before the target attempt even
- * materializes — so the edit control must mirror the API's guard, which also
- * reads the in-flight cursor activation. Reading only the materialized round
- * count would leave the picker briefly enabled over an edge the server would
- * reject.
+ * its verdict routes the cursor along it, while the target attempt is still
+ * forming, so the edit control mirrors the API's guard by reading the in-flight
+ * cursor activation. That keeps the picker disabled the moment the edge freezes,
+ * matching the server the edit would reach.
  */
 export function stageFailEdgeFrozen(pipeline: Pipeline, stage: PipelineStage): boolean {
   if (pipeline.cursor?.activatedBy?.edge === "fail" && pipeline.cursor.activatedBy.stageId === stage.id) return true;
@@ -1102,10 +1109,10 @@ const OPTIMISTIC_EFFECTIVE_ROLE: Omit<EffectivePipelineRole, "access"> = {
   promptScaffold: null,
 };
 
-/** Clears only dangling pass edges (target gone or self-referential) and fail
-    edges whose target left the plan — the same safety net the server applies
-    (replaceDraftStages). Every intentional edge is preserved so a local insert/
-    removal never flattens a custom jump/merge or fail loop (#353). */
+/** Clears a dangling pass edge (target gone or self-referential) and a fail edge
+    whose target left the plan, matching the safety net the server applies
+    (replaceDraftStages). Every intentional edge is preserved, so a local insert
+    or removal keeps a custom jump/merge or fail loop as authored (#353). */
 function pruneStageEdges(stages: PipelineStage[]): PipelineStage[] {
   const keptIds = new Set(stages.map((stage) => stage.id));
   return stages.map((stage) => ({

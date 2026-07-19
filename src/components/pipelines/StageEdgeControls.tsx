@@ -32,10 +32,10 @@ export function StageEdgeControls({
   const terminal = pipeline.state === "completed" || pipeline.state === "closed";
   const passFrozen = stageAttempts(pipeline, stage.id).length > 0;
   const failFrozen = stageFailEdgeFrozen(pipeline, stage);
-  /* A pass edge may not target its own stage (the pass graph stays acyclic), but
-     a fail edge legally loops back to the stage itself — that self-loop is the
-     only cycle a one-stage pipeline can carry (#353), so the fail picker must
-     offer the current stage while the pass picker excludes it. */
+  /* A pass edge targets a different stage so the pass graph stays acyclic. A fail
+     edge legally loops back to the stage itself, the only cycle a one-stage
+     pipeline can carry (#353), so the fail picker offers the current stage and
+     the pass picker omits it. */
   const passTargets = pipeline.stages.filter((candidate) => candidate.id !== stage.id);
   const failTargets = pipeline.stages;
   const apply = async (edge: "pass" | "fail", to: string | null, maxRounds?: number) => {

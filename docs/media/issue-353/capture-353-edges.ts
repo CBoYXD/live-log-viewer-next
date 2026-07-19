@@ -11,9 +11,9 @@
  * configurable (Finding 4), including on a one-stage pipeline where it is the
  * only cycle the graph can carry. The editor is a desktop board affordance
  * (useIsMobile gates the whole shelf/editor off below 768px), and its panel is
- * only w-[min(320px,…)] wide — so these captures already show the control at a
- * sub-390px width; there is no separate ≥390px mobile rendering of it. The
- * mobile pipeline board surface at 390px is covered by board-mobile-390.png.
+ * w-[min(320px,…)] wide, so these captures show the control at a sub-390px
+ * width. The mobile pipeline board surface at 390px lives in
+ * board-mobile-390.png.
  *
  *   bun docs/media/issue-353/capture-353-edges.ts
  *
@@ -201,8 +201,7 @@ async function main() {
       await Bun.sleep(2000);
       await cdp.send("Runtime.evaluate", { expression: `location.hash = "#p=atlas";` });
       await Bun.sleep(1500);
-      /* Ensure the scheme view (the pipeline shelf lives on the board, not the
-         conversations list). */
+      /* Select the scheme view, where the pipeline shelf lives on the board. */
       await cdp.send("Runtime.evaluate", { expression: `(Array.from(document.querySelectorAll('button[aria-label="scheme"]')).find((button) => button.getAttribute("aria-pressed") === "false"))?.click();` });
       await evalUntil(cdp, `!!document.querySelector('[data-pipeline-shelf-item="${MULTI_ID}"]')`, 90_000);
       await cdp.send("Runtime.evaluate", { expression: `

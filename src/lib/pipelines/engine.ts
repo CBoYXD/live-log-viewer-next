@@ -356,21 +356,22 @@ function normalizedOutput(pipeline: Pipeline): string {
 }
 
 /** The durable activation that placed a stage's current attempt here (#353): the
-    attempt's own `activatedBy`, or the cursor's when the attempt has not
-    materialized yet. Null for the root stage and for migrated pre-v3 attempts
-    (unknown provenance), which is the signal to fall back to the positional
-    scan. */
+    attempt's own `activatedBy`, or the cursor's while the attempt is still
+    forming. Null for the root stage and for migrated pre-v3 attempts (unknown
+    provenance), which signals the positional scan. */
 function stageActivation(pipeline: Pipeline, stageId: string): PipelineStageAttempt["activatedBy"] {
   return currentAttempt(pipeline, stageId)?.activatedBy
     ?? (pipeline.cursor?.stageId === stageId ? pipeline.cursor.activatedBy : null);
 }
 
 /** Walks the durable activation lineage backwards from a stage's current
-    attempt, yielding each graph ancestor (nearest first) along the real
-    provenance chain rather than array order — so merges, jumps, and fail loops
-    resolve to the stage that actually activated this one. Stops at the migrated
-    boundary (an ancestor with no `activatedBy`) or a cycle. */
-function* activationLineage(pipeline: Pipeline, stageId: string): Generator<{ stage: PipelineStage; attempt: PipelineStageAttempt }> {
+    attempt, yielding each graph ancestor (nearest first) along the recorded
+    provenance chain, so merges, jumps, and fail loops resolve to the stage that
+    activated this one. The walk stops at the migration boundary — an ancestor
+    whose own `activatedBy` is null (a migrated pre-v3 attempt, or the root) —
+    and marks it with `boundary: true`, so a caller resumes the positional scan
+    there. A repeated activation key ends the walk to bound a cycle. */
+function* activationLineage(pipeline: Pipeline, stageId: string): Generator<{ stage: PipelineStage; attempt: PipelineStageAttempt; boundary: boolean }> {
   const seen = new Set<string>();
   let activation = stageActivation(pipeline, stageId);
   while (activation) {
@@ -380,22 +381,25 @@ function* activationLineage(pipeline: Pipeline, stageId: string): Generator<{ st
     const stage = pipeline.stages.find((candidate) => candidate.id === activation!.stageId) ?? null;
     const attempt = runFor(pipeline, activation.stageId)?.attempts.find((candidate) => candidate.n === activation!.attempt) ?? null;
     if (!stage || !attempt) break;
-    yield { stage, attempt };
+    yield { stage, attempt, boundary: attempt.activatedBy == null };
     activation = attempt.activatedBy;
   }
 }
 
 /** The lineage parent transcript a fresh stage inherits (#353): the nearest
-    passed/skipped ancestor along the durable activation graph. Migrated pre-v3
-    attempts without provenance fall back to the legacy positional scan
-    byte-identically, so an in-flight v2 pipeline keeps its parent selection. */
+    passed or skipped ancestor along the durable activation graph. The positional
+    scan resumes at the lineage's migration boundary (an ancestor with
+    activatedBy null) and for an anchor with no provenance, so a migrated pre-v3
+    pipeline and a mixed v2/v3 history keep the legacy parent selection. */
 function latestCompletedAgentPath(pipeline: Pipeline, beforeStageId?: string): string | null {
-  if (beforeStageId && stageActivation(pipeline, beforeStageId)) {
-    for (const { attempt } of activationLineage(pipeline, beforeStageId)) {
-      if (attempt.agentPath && (attempt.state === "passed" || attempt.state === "skipped")) return attempt.agentPath;
+  let atBoundary = true;
+  if (beforeStageId) {
+    for (const step of activationLineage(pipeline, beforeStageId)) {
+      if (step.attempt.agentPath && (step.attempt.state === "passed" || step.attempt.state === "skipped")) return step.attempt.agentPath;
+      atBoundary = step.boundary;
     }
-    return pipeline.srcPath;
   }
+  if (!atBoundary) return pipeline.srcPath;
   const stop = beforeStageId ? pipeline.stages.findIndex((stage) => stage.id === beforeStageId) : pipeline.stages.length;
   for (let index = stop - 1; index >= 0; index -= 1) {
     const attempt = currentAttempt(pipeline, pipeline.stages[index]!.id);
@@ -405,16 +409,17 @@ function latestCompletedAgentPath(pipeline: Pipeline, beforeStageId?: string): s
 }
 
 /** The run whose session a review-loop stage reviews (#353): the nearest passed
-    run ancestor along the activation graph, so a merge/jump review binds to the
-    run that actually activated it — not whichever run sits earlier in the array.
-    Migrated pre-v3 attempts fall back to the positional scan. */
+    run ancestor along the activation graph, so a merge or jump review binds to
+    the run that activated it. The positional scan resumes at the migration
+    boundary and for an anchor with no provenance, so migrated and mixed v2/v3
+    histories keep the legacy implementer selection. */
 function latestPassedRun(pipeline: Pipeline, stageId: string): PipelineStageAttempt | null {
-  if (stageActivation(pipeline, stageId)) {
-    for (const { stage, attempt } of activationLineage(pipeline, stageId)) {
-      if (stage.kind === "run" && attempt.state === "passed" && attempt.agentPath) return attempt;
-    }
-    return null;
+  let atBoundary = true;
+  for (const step of activationLineage(pipeline, stageId)) {
+    if (step.stage.kind === "run" && step.attempt.state === "passed" && step.attempt.agentPath) return step.attempt;
+    atBoundary = step.boundary;
   }
+  if (!atBoundary) return null;
   const stop = pipeline.stages.findIndex((stage) => stage.id === stageId);
   for (let index = stop - 1; index >= 0; index -= 1) {
     const stage = pipeline.stages[index]!;
@@ -1093,9 +1098,8 @@ function normalizeStages(
 
 /** Snapshots the draft's stages as editable inputs, preserving each stage's
     intentional pass (`next`) and fail (`onFail`) edges verbatim (#353): a
-    structural edit (add/remove/reorder/override) must not silently flatten a
-    custom jump/merge or fail loop back to array order — only the edit's own seam
-    is rewired, by the caller. */
+    structural edit (add/remove/reorder/override) keeps a custom jump/merge or
+    fail loop as authored, and the caller rewires only the edit's own seam. */
 function draftStageInputs(stages: PipelineStage[]): PipelineStageInput[] {
   return stages.map((stage) => ({
     id: stage.id,
@@ -1117,10 +1121,10 @@ function replaceDraftStages(
   lookup?: PipelineRoleLookup | null,
 ): { error?: string } {
   /* Custom edges survive structural edits (#353): each kept stage's intentional
-     pass and fail edge is preserved as-is — the add/remove handlers rewire only
-     the edit's own seam. This is only a safety net: an edge whose target left the
-     plan, or a pass edge left pointing at its own stage, is cleared so the graph
-     can never persist a dangling reference. */
+     pass and fail edge is preserved as-is, and the add/remove handlers rewire
+     only the edit's own seam. This safety net clears an edge whose target left
+     the plan, or a pass edge left pointing at its own stage, so the graph stays
+     free of dangling references. */
   const keptIds = new Set(inputs.map((stage) => stage.id));
   const relinked = inputs.map((stage) => ({
     ...stage,
@@ -1134,9 +1138,9 @@ function replaceDraftStages(
   if (!normalized.stages) return { error: normalized.error ?? "invalid stages" };
   /* The entry stage (the draft cursor rests on stages[0]) must be a run: a
      review-loop entry has no preceding run to review and would park on Start.
-     With edges preserved rather than flattened, a fronted review can be
-     graph-reachable from a later run, so the array-position guard is enforced
-     explicitly here (matching the client's reviewLoopChainValid). */
+     Preserved edges let a fronted review stay graph-reachable from a later run,
+     so the array-position guard runs explicitly here (matching the client's
+     reviewLoopChainValid). */
   if (normalized.stages[0] && normalized.stages[0].kind !== "run") {
     return { error: "review-loop stage requires a preceding run stage" };
   }
@@ -1388,10 +1392,10 @@ export async function patchPipeline(
         from.next = req.to;
       } else {
         /* A fail edge freezes the instant its verdict routes the cursor along it,
-           not only once the target attempt materializes: the activation lands on
-           the durable cursor in the same mutation as the failing verdict and
-           survives a restart, so the target it forwarded evidence to can never be
-           rewritten out from under an in-flight round (#353). */
+           while the target attempt is still forming: the activation lands on the
+           durable cursor in the same mutation as the failing verdict and survives
+           a restart, so the target it forwarded evidence to stays frozen through
+           the in-flight round (#353). */
         const traversed = (pipeline.cursor?.activatedBy?.edge === "fail" && pipeline.cursor.activatedBy.stageId === from.id)
           || pipeline.runs.some((run) =>
             run.attempts.some((item) => item.activatedBy?.edge === "fail" && item.activatedBy.stageId === from.id));
